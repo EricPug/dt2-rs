@@ -14,7 +14,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2)
     });
     let file = std::fs::read(path).expect("cannot read file");
@@ -54,7 +54,7 @@ fn main() {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -69,10 +69,15 @@ fn run_binary(args: &[String]) {
         eprintln!("{error}");
         std::process::exit(2)
     });
-    let entry_pc = parse_address(&args[4]).unwrap_or_else(|error| {
-        eprintln!("{error}");
-        std::process::exit(2)
-    });
+    let reset_from_sbf_vector = args[4] == "SBF_RESET_VECTOR";
+    let entry_pc = if reset_from_sbf_vector {
+        None
+    } else {
+        Some(parse_address(&args[4]).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2)
+        }))
+    };
     let instruction_limit = args[5].parse::<usize>().unwrap_or_else(|_| {
         eprintln!("invalid instruction limit: {}", args[5]);
         std::process::exit(2)
@@ -95,6 +100,10 @@ fn run_binary(args: &[String]) {
         || args[6..]
             .iter()
             .any(|assignment| assignment == "MCF5441X_SRAM");
+    if reset_from_sbf_vector && !mcf_sbf_boot {
+        eprintln!("SBF_RESET_VECTOR requires MCF5441X_SBF_BOOT");
+        std::process::exit(2);
+    }
     let mut bus = if mcf_sram_alias {
         if ram_base != 0x8000_0000 || ram_size != 0x1_0000 {
             eprintln!("MCF5441X_SRAM requires RAM base 0x80000000 and size 0x10000");
@@ -114,7 +123,7 @@ fn run_binary(args: &[String]) {
         std::process::exit(2)
     });
     let mut cpu = Cpu::new();
-    cpu.pc = entry_pc;
+    let mut cpu_overrides = Vec::new();
     for assignment in &args[6..] {
         if assignment == "MCF5441X_SRAM" || assignment == "MCF5441X_SBF_BOOT" {
             continue;
@@ -128,9 +137,24 @@ fn run_binary(args: &[String]) {
         } else if let Some(mmio) = assignment.strip_prefix("MMIO32@") {
             bus.seed_mmio32(mmio)
         } else {
-            set_register(&mut cpu, assignment)
+            cpu_overrides.push(assignment.as_str());
+            continue;
         };
         result.unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2)
+        });
+    }
+    if reset_from_sbf_vector {
+        reset_cpu_from_sbf_vector(&mut cpu, &mut bus).unwrap_or_else(|error| {
+            eprintln!("unmapped SBF reset-vector read at {:#010x}", error.addr);
+            std::process::exit(2)
+        });
+    } else {
+        cpu.pc = entry_pc.unwrap();
+    }
+    for assignment in cpu_overrides {
+        set_register(&mut cpu, assignment).unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2)
         });
@@ -145,7 +169,11 @@ fn run_binary(args: &[String]) {
         "flat RAM"
     };
     println!("RAM map={ram_map}; base={ram_base:#010x} size={ram_size:#x}; image loaded at {image_address:#010x}");
-    println!("unprovided initial registers are zero");
+    if reset_from_sbf_vector {
+        println!("initial state: A7/PC from SBF reset vector, SR=0x2700; other registers default to zero");
+    } else {
+        println!("unprovided initial registers are zero");
+    }
     if args.len() > 6 {
         println!("initial overrides: {}", args[6..].join(" "));
     }
@@ -215,6 +243,13 @@ fn set_register(cpu: &mut Cpu, assignment: &str) -> Result<(), String> {
         return Ok(());
     }
     Err(format!("unknown register: {register}"))
+}
+
+fn reset_cpu_from_sbf_vector<B: Bus>(cpu: &mut Cpu, bus: &mut B) -> Result<(), BusError> {
+    cpu.a[7] = bus.read32(0)?;
+    cpu.pc = bus.read32(4)?;
+    cpu.sr = 0x2700;
+    Ok(())
 }
 
 fn parse_register_index(index: &str, register: &str) -> Result<usize, String> {
@@ -481,5 +516,19 @@ mod tests {
         bus.seed_ram32("4=0x80000de8").unwrap();
         assert_eq!(bus.read32(0x80000000).unwrap(), 0x8001_0000);
         assert_eq!(bus.read32(0x80010004).unwrap(), 0x8000_0DE8);
+    }
+
+    #[test]
+    fn sbf_reset_initializes_stack_pc_and_status_from_reset_vector() {
+        let mut bus = ProbeBus::new(Mcf5441xSram::new().with_sbf_reset_alias());
+        bus.seed_ram32("0=0x80010000").unwrap();
+        bus.seed_ram32("4=0x80000de8").unwrap();
+        let mut cpu = Cpu::new();
+
+        reset_cpu_from_sbf_vector(&mut cpu, &mut bus).unwrap();
+
+        assert_eq!(cpu.a[7], 0x8001_0000);
+        assert_eq!(cpu.pc, 0x8000_0DE8);
+        assert_eq!(cpu.sr, 0x2700);
     }
 }
