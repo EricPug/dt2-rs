@@ -14,7 +14,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2)
     });
     let file = std::fs::read(path).expect("cannot read file");
@@ -54,7 +54,7 @@ fn main() {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -88,15 +88,24 @@ fn run_binary(args: &[String]) {
         );
         std::process::exit(2);
     }
-    let mcf_sram_alias = args[6..]
+    let mcf_sbf_boot = args[6..]
         .iter()
-        .any(|assignment| assignment == "MCF5441X_SRAM");
+        .any(|assignment| assignment == "MCF5441X_SBF_BOOT");
+    let mcf_sram_alias = mcf_sbf_boot
+        || args[6..]
+            .iter()
+            .any(|assignment| assignment == "MCF5441X_SRAM");
     let mut bus = if mcf_sram_alias {
         if ram_base != 0x8000_0000 || ram_size != 0x1_0000 {
             eprintln!("MCF5441X_SRAM requires RAM base 0x80000000 and size 0x10000");
             std::process::exit(2);
         }
-        ProbeBus::new(Mcf5441xSram::new())
+        let sram = Mcf5441xSram::new();
+        if mcf_sbf_boot {
+            ProbeBus::new(sram.with_sbf_reset_alias())
+        } else {
+            ProbeBus::new(sram)
+        }
     } else {
         ProbeBus::new(FlatRam::new(ram_base, ram_size))
     };
@@ -107,7 +116,7 @@ fn run_binary(args: &[String]) {
     let mut cpu = Cpu::new();
     cpu.pc = entry_pc;
     for assignment in &args[6..] {
-        if assignment == "MCF5441X_SRAM" {
+        if assignment == "MCF5441X_SRAM" || assignment == "MCF5441X_SBF_BOOT" {
             continue;
         }
         let result = if let Some(ram_seed) = assignment.strip_prefix("RAM32@") {
@@ -128,7 +137,9 @@ fn run_binary(args: &[String]) {
     }
     let report = cpu.run(&mut bus, instruction_limit);
 
-    let ram_map = if mcf_sram_alias {
+    let ram_map = if mcf_sbf_boot {
+        "MCF5441x SRAM with SBF address-zero reset alias"
+    } else if mcf_sram_alias {
         "MCF5441x 64 KiB SRAM with aliasing"
     } else {
         "flat RAM"
@@ -461,5 +472,14 @@ mod tests {
         let mut bus = ProbeBus::new(Mcf5441xSram::new());
         bus.seed_ram32("0x80010004=0x80000de8").unwrap();
         assert_eq!(bus.read32(0x80000004).unwrap(), 0x8000_0DE8);
+    }
+
+    #[test]
+    fn sbf_reset_vector_seed_is_visible_in_high_sram_alias() {
+        let mut bus = ProbeBus::new(Mcf5441xSram::new().with_sbf_reset_alias());
+        bus.seed_ram32("0=0x80010000").unwrap();
+        bus.seed_ram32("4=0x80000de8").unwrap();
+        assert_eq!(bus.read32(0x80000000).unwrap(), 0x8001_0000);
+        assert_eq!(bus.read32(0x80010004).unwrap(), 0x8000_0DE8);
     }
 }

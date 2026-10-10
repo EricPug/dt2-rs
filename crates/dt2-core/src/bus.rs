@@ -73,9 +73,10 @@ impl Bus for FlatRam {
     }
 }
 
-/// MCF5441x 64 KiB on-chip SRAM mirrored across its 256 MiB address window.
+/// MCF5441x 64 KiB SRAM mirrored across its address window (MCF54418RM, 7.2.2).
 pub struct Mcf5441xSram {
     data: Vec<u8>,
+    sbf_reset_alias: bool,
 }
 
 impl Mcf5441xSram {
@@ -86,11 +87,20 @@ impl Mcf5441xSram {
     pub fn new() -> Self {
         Self {
             data: vec![0; Self::SIZE],
+            sbf_reset_alias: false,
         }
     }
 
+    /// Map SRAM at address zero for SBF reset-vector access (MCF54418RM, 11.4.3).
+    pub fn with_sbf_reset_alias(mut self) -> Self {
+        self.sbf_reset_alias = true;
+        self
+    }
+
     fn offset(&self, address: u32, write: bool) -> Result<usize, BusError> {
-        if (Self::BASE..Self::BASE + Self::WINDOW_SIZE).contains(&address) {
+        if self.sbf_reset_alias && address < Self::SIZE as u32 {
+            Ok(address as usize)
+        } else if (Self::BASE..Self::BASE + Self::WINDOW_SIZE).contains(&address) {
             Ok((address.wrapping_sub(Self::BASE) as usize) & (Self::SIZE - 1))
         } else {
             Err(BusError {
@@ -168,6 +178,16 @@ mod tests {
     fn mcf5441x_sram_rejects_addresses_outside_the_alias_window() {
         let mut sram = Mcf5441xSram::new();
         assert!(sram.read8(0x7FFF_FFFF).is_err());
+        assert!(sram.read8(0).is_err());
         assert!(sram.read8(0x9000_0000).is_err());
+    }
+
+    #[test]
+    fn sbf_reset_alias_maps_low_memory_to_the_same_sram() {
+        let mut sram = Mcf5441xSram::new().with_sbf_reset_alias();
+        sram.write32(0, 0x8001_0000).unwrap();
+        sram.write32(4, 0x8000_0DE8).unwrap();
+        assert_eq!(sram.read32(0x8000_0000).unwrap(), 0x8001_0000);
+        assert_eq!(sram.read32(0x8001_0004).unwrap(), 0x8000_0DE8);
     }
 }
