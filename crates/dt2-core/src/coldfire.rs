@@ -407,7 +407,9 @@ impl Cpu {
                 }
             }
             4 => {
-                if op & 0xFFC0 == 0x4840 {
+                if op == 0x46FC {
+                    self.sr = self.fetch16(bus)?;
+                } else if op & 0xFFC0 == 0x4840 {
                     let address = self.control_ea(bus, op, pc0)?;
                     self.push32(bus, address)?;
                 } else if op & 0xFFF8 == 0x4E50 {
@@ -964,6 +966,15 @@ mod tests {
         run(&mut c, &mut r, 1);
         assert_eq!(c.a[7], 0x1FFC);
         assert_eq!(r.read32(0x1FFC).unwrap(), 0x1012);
+    }
+
+    #[test]
+    fn move_immediate_to_sr_loads_status_word() {
+        let (mut c, mut r) = machine(&[0x46FC, 0x2500]);
+        c.sr = 0x2700;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.sr, 0x2500);
+        assert_eq!(c.pc, 0x1004);
     }
 
     #[test]
