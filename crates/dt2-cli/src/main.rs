@@ -1,5 +1,5 @@
 use dt2_core::{
-    bus::{Bus, BusError, FlatRam},
+    bus::{Bus, BusError, FlatRam, Mcf5441xSram},
     coldfire::{Cpu, CpuError, RunStop},
 };
 use dt2_fw::{container, syx};
@@ -14,7 +14,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2)
     });
     let file = std::fs::read(path).expect("cannot read file");
@@ -54,7 +54,7 @@ fn main() {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [MCF5441X_SRAM D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -88,12 +88,28 @@ fn run_binary(args: &[String]) {
         );
         std::process::exit(2);
     }
-    let mut ram = FlatRam::new(ram_base, ram_size);
-    ram.load(image_address, &bytes);
-    let mut bus = ProbeBus::new(ram);
+    let mcf_sram_alias = args[6..]
+        .iter()
+        .any(|assignment| assignment == "MCF5441X_SRAM");
+    let mut bus = if mcf_sram_alias {
+        if ram_base != 0x8000_0000 || ram_size != 0x1_0000 {
+            eprintln!("MCF5441X_SRAM requires RAM base 0x80000000 and size 0x10000");
+            std::process::exit(2);
+        }
+        ProbeBus::new(Mcf5441xSram::new())
+    } else {
+        ProbeBus::new(FlatRam::new(ram_base, ram_size))
+    };
+    bus.load_ram(image_address, &bytes).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
     let mut cpu = Cpu::new();
     cpu.pc = entry_pc;
     for assignment in &args[6..] {
+        if assignment == "MCF5441X_SRAM" {
+            continue;
+        }
         let result = if let Some(ram_seed) = assignment.strip_prefix("RAM32@") {
             bus.seed_ram32(ram_seed)
         } else if let Some(mmio) = assignment.strip_prefix("MMIO8@") {
@@ -112,7 +128,12 @@ fn run_binary(args: &[String]) {
     }
     let report = cpu.run(&mut bus, instruction_limit);
 
-    println!("RAM base={ram_base:#010x} size={ram_size:#x}; image loaded at {image_address:#010x}");
+    let ram_map = if mcf_sram_alias {
+        "MCF5441x 64 KiB SRAM with aliasing"
+    } else {
+        "flat RAM"
+    };
+    println!("RAM map={ram_map}; base={ram_base:#010x} size={ram_size:#x}; image loaded at {image_address:#010x}");
     println!("unprovided initial registers are zero");
     if args.len() > 6 {
         println!("initial overrides: {}", args[6..].join(" "));
@@ -197,16 +218,25 @@ fn parse_register_index(index: &str, register: &str) -> Result<usize, String> {
 }
 
 struct ProbeBus {
-    ram: FlatRam,
+    ram: Box<dyn Bus>,
     mmio: BTreeMap<u32, u8>,
 }
 
 impl ProbeBus {
-    fn new(ram: FlatRam) -> Self {
+    fn new(ram: impl Bus + 'static) -> Self {
         Self {
-            ram,
+            ram: Box::new(ram),
             mmio: BTreeMap::new(),
         }
+    }
+
+    fn load_ram(&mut self, address: u32, bytes: &[u8]) -> Result<(), String> {
+        for (offset, byte) in bytes.iter().copied().enumerate() {
+            self.ram
+                .write8(address.wrapping_add(offset as u32), byte)
+                .map_err(|error| format!("image load hit unmapped RAM at {:#010x}", error.addr))?;
+        }
+        Ok(())
     }
 
     fn seed_mmio16(&mut self, assignment: &str) -> Result<(), String> {
@@ -424,5 +454,12 @@ mod tests {
         bus.seed_ram32("0x80010004=1").unwrap();
         assert_eq!(bus.read32(0x8001_0004).unwrap(), 1);
         assert!(bus.seed_ram32("0x90000000=1").is_err());
+    }
+
+    #[test]
+    fn mcf_sram_seed_is_visible_through_its_64k_alias() {
+        let mut bus = ProbeBus::new(Mcf5441xSram::new());
+        bus.seed_ram32("0x80010004=0x80000de8").unwrap();
+        assert_eq!(bus.read32(0x80000004).unwrap(), 0x8000_0DE8);
     }
 }
