@@ -1,0 +1,8 @@
+/target
+# Elektron firmware and anything derived from it must never be committed.
+*.syx
+/sections/
+/out/
+/snapshots/
+/firmware/
+/research/

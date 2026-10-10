@@ -1,0 +1,10 @@
+[package]
+name = "dt2-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dt2-core = { path = "../dt2-core" }
+dt2-fw = { path = "../dt2-fw" }
