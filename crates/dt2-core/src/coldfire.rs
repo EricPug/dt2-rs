@@ -15,6 +15,8 @@ pub const CCR_X: u16 = 0x10;
 pub enum CpuError {
     Bus(BusError),
     Illegal { pc: u32, op: u16 },
+    Privilege { pc: u32, op: u16 },
+    UnsupportedDebugRegister { pc: u32, register: u8 },
 }
 
 impl From<BusError> for CpuError {
@@ -32,6 +34,7 @@ pub struct CpuSnapshot {
     pub rambar: u32,
     pub vbr: u32,
     pub cacr: u32,
+    pub debug_csr: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +98,7 @@ pub struct Cpu {
     pub rambar: u32,
     pub vbr: u32,
     pub cacr: u32,
+    pub debug_csr: u32,
 }
 
 impl Cpu {
@@ -561,6 +565,32 @@ impl Cpu {
                 }
                 self.set_ccr(CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C, flags);
             }
+            0xF => {
+                if op & 0xFFC0 != 0xFBC0 {
+                    return Err(ill);
+                }
+                if self.sr & 0x2000 == 0 {
+                    return Err(CpuError::Privilege { pc: pc0, op });
+                }
+                if self.fetch16(bus)? != 0x0003 {
+                    return Err(ill);
+                }
+                let address = self.control_ea(bus, op, pc0)?;
+                let command = bus.read32(address)?;
+                let data_tail = bus.read32(address.wrapping_add(4))?;
+                let command_word = (command >> 16) as u16;
+                if command_word & 0xFFF0 != 0x2C80 {
+                    return Err(CpuError::Illegal {
+                        pc: pc0,
+                        op: command_word,
+                    });
+                }
+                let register = (command_word & 0xF) as u8;
+                if register != 0 {
+                    return Err(CpuError::UnsupportedDebugRegister { pc: pc0, register });
+                }
+                self.debug_csr = ((command & 0xFFFF) << 16) | (data_tail >> 16);
+            }
             7 => {
                 if op & 0x0100 != 0 {
                     return Err(ill);
@@ -658,6 +688,7 @@ impl Cpu {
                 rambar: self.rambar,
                 vbr: self.vbr,
                 cacr: self.cacr,
+                debug_csr: self.debug_csr,
             },
             stop,
         }
@@ -975,6 +1006,42 @@ mod tests {
         run(&mut c, &mut r, 1);
         assert_eq!(c.sr, 0x2500);
         assert_eq!(c.pc, 0x1004);
+    }
+
+    #[test]
+    fn wdebug_executes_wdmreg_command_to_csr() {
+        let (mut c, mut r) = machine(&[0xFBEF, 0x0003, 0xFFF8]);
+        c.sr = 0x2700;
+        r.load(0x1FF8, &[0x2C, 0x80, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00]);
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.debug_csr, 0x0002_0000);
+        assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
+    fn wdebug_requires_supervisor_state() {
+        let (mut c, mut r) = machine(&[0xFBEF, 0x0003, 0xFFF8]);
+        assert_eq!(
+            c.step(&mut r),
+            Err(CpuError::Privilege {
+                pc: 0x1000,
+                op: 0xFBEF,
+            })
+        );
+    }
+
+    #[test]
+    fn wdebug_reports_unimplemented_debug_register() {
+        let (mut c, mut r) = machine(&[0xFBEF, 0x0003, 0xFFF8]);
+        c.sr = 0x2700;
+        r.load(0x1FF8, &[0x2C, 0x88, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00]);
+        assert_eq!(
+            c.step(&mut r),
+            Err(CpuError::UnsupportedDebugRegister {
+                pc: 0x1000,
+                register: 8,
+            })
+        );
     }
 
     #[test]

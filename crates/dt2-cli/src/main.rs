@@ -120,8 +120,13 @@ fn run_binary(args: &[String]) {
     println!("executed {} instructions", report.instructions);
     print_stop(report.stop);
     println!(
-        "PC={:#010x} SR={:#06x} RAMBAR={:#010x} VBR={:#010x} CACR={:#010x}",
-        report.cpu.pc, report.cpu.sr, report.cpu.rambar, report.cpu.vbr, report.cpu.cacr
+        "PC={:#010x} SR={:#06x} RAMBAR={:#010x} VBR={:#010x} CACR={:#010x} DEBUG_CSR={:#010x}",
+        report.cpu.pc,
+        report.cpu.sr,
+        report.cpu.rambar,
+        report.cpu.vbr,
+        report.cpu.cacr,
+        report.cpu.debug_csr
     );
     for register in 0..8 {
         println!(
@@ -316,6 +321,12 @@ fn print_stop(stop: RunStop) {
         RunStop::InstructionLimit => println!("stop: instruction limit"),
         RunStop::Error(CpuError::Illegal { pc, op }) => {
             println!("stop: unsupported opcode {op:#06x} at {pc:#010x}");
+        }
+        RunStop::Error(CpuError::Privilege { pc, op }) => {
+            println!("stop: privilege violation at {pc:#010x} (opcode {op:#06x})");
+        }
+        RunStop::Error(CpuError::UnsupportedDebugRegister { pc, register }) => {
+            println!("stop: unsupported debug register {register:#x} at {pc:#010x}");
         }
         RunStop::Error(CpuError::Bus(BusError { addr, write })) => {
             let access = if write { "write" } else { "read" };
