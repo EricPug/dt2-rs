@@ -31,6 +31,7 @@ pub struct CpuSnapshot {
     pub sr: u16,
     pub rambar: u32,
     pub vbr: u32,
+    pub cacr: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +94,7 @@ pub struct Cpu {
     pub sr: u16,
     pub rambar: u32,
     pub vbr: u32,
+    pub cacr: u32,
 }
 
 impl Cpu {
@@ -405,7 +407,19 @@ impl Cpu {
                 }
             }
             4 => {
-                if op & 0xFFC0 == 0x48C0 && mode == 2 {
+                if op & 0xFFC0 == 0x4840 {
+                    let address = self.control_ea(bus, op, pc0)?;
+                    self.push32(bus, address)?;
+                } else if op & 0xFFF8 == 0x4E50 {
+                    let displacement = self.fetch16(bus)? as i16 as i32 as u32;
+                    self.push32(bus, self.a[reg])?;
+                    self.a[reg] = self.a[7];
+                    self.a[7] = self.a[7].wrapping_add(displacement);
+                } else if op & 0xFFF8 == 0x48C0 {
+                    let value = self.d[reg] as u16 as i16 as i32 as u32;
+                    self.d[reg] = value;
+                    self.flags_move(value, Size::L);
+                } else if op & 0xFFC0 == 0x48C0 && mode == 2 {
                     let mask = self.fetch16(bus)?;
                     let mut address = self.a[reg];
                     for register in 0..16 {
@@ -442,6 +456,7 @@ impl Cpu {
                         self.a[register - 8]
                     };
                     match ext & 0x0FFF {
+                        0x0002 => self.cacr = value,
                         0x0801 => self.vbr = value,
                         0x0C05 => self.rambar = value,
                         _ => return Err(CpuError::Illegal { pc: pc0, op: ext }),
@@ -552,6 +567,24 @@ impl Cpu {
                 self.d[((op >> 9) & 7) as usize] = v;
                 self.flags_move(v, Size::L);
             }
+            8 => {
+                if (op >> 6) & 7 != 2 || mode != 0 {
+                    return Err(ill);
+                }
+                let dst = ((op >> 9) & 7) as usize;
+                let result = self.d[dst] | self.d[reg];
+                self.d[dst] = result;
+                self.flags_move(result, Size::L);
+            }
+            0xC => {
+                if (op >> 6) & 7 != 2 || mode != 0 {
+                    return Err(ill);
+                }
+                let dst = ((op >> 9) & 7) as usize;
+                let result = self.d[dst] & self.d[reg];
+                self.d[dst] = result;
+                self.flags_move(result, Size::L);
+            }
             nib @ (9 | 0xB | 0xD) => {
                 let r = ((op >> 9) & 7) as usize;
                 let opmode = (op >> 6) & 7;
@@ -622,6 +655,7 @@ impl Cpu {
                 sr: self.sr,
                 rambar: self.rambar,
                 vbr: self.vbr,
+                cacr: self.cacr,
             },
             stop,
         }
@@ -868,6 +902,68 @@ mod tests {
         c.d[0] = 0x8000_0000;
         run(&mut c, &mut r, 1);
         assert_eq!(c.vbr, 0x8000_0000);
+    }
+
+    #[test]
+    fn movec_data_register_to_cacr() {
+        let (mut c, mut r) = machine(&[0x4E7B, 0x0002]);
+        c.d[0] = 0x000C_C100;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.cacr, 0x000C_C100);
+    }
+
+    #[test]
+    fn ext_long_sign_extends_word_and_updates_flags() {
+        let (mut c, mut r) = machine(&[0x48C0]);
+        c.d[0] = 0xABCD_8001;
+        c.sr = CCR_X | CCR_V | CCR_C;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0xFFFF_8001);
+        assert_eq!(c.sr, CCR_X | CCR_N);
+    }
+
+    #[test]
+    fn or_long_data_register_updates_destination_and_flags() {
+        let (mut c, mut r) = machine(&[0x8081]);
+        c.d[0] = 0x0000_0100;
+        c.d[1] = 0x0000_0008;
+        c.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x0000_0108);
+        assert_eq!(c.d[1], 0x0000_0008);
+        assert_eq!(c.sr, CCR_X);
+    }
+
+    #[test]
+    fn and_long_data_register_updates_destination_and_flags() {
+        let (mut c, mut r) = machine(&[0xC081]);
+        c.d[0] = 0x0000_0055;
+        c.d[1] = 0xFFFF_FFF3;
+        c.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x0000_0051);
+        assert_eq!(c.d[1], 0xFFFF_FFF3);
+        assert_eq!(c.sr, CCR_X);
+    }
+
+    #[test]
+    fn link_word_saves_frame_pointer_and_allocates_stack() {
+        let (mut c, mut r) = machine(&[0x4E56, 0xFFF0]);
+        c.a[6] = 0x1234_5678;
+        c.sr = CCR_X | CCR_Z;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.a[6], 0x1FFC);
+        assert_eq!(c.a[7], 0x1FEC);
+        assert_eq!(r.read32(0x1FFC).unwrap(), 0x1234_5678);
+        assert_eq!(c.sr, CCR_X | CCR_Z);
+    }
+
+    #[test]
+    fn pea_pc_relative_pushes_effective_address() {
+        let (mut c, mut r) = machine(&[0x487A, 0x0010]);
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.a[7], 0x1FFC);
+        assert_eq!(r.read32(0x1FFC).unwrap(), 0x1012);
     }
 
     #[test]

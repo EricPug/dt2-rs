@@ -14,7 +14,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [D0=value A0=value SR=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2)
     });
     let file = std::fs::read(path).expect("cannot read file");
@@ -54,7 +54,7 @@ fn main() {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [D0=value A0=value SR=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc> <instruction-limit> [D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -94,7 +94,11 @@ fn run_binary(args: &[String]) {
     let mut cpu = Cpu::new();
     cpu.pc = entry_pc;
     for assignment in &args[6..] {
-        let result = if let Some(mmio) = assignment.strip_prefix("MMIO16@") {
+        let result = if let Some(ram_seed) = assignment.strip_prefix("RAM32@") {
+            bus.seed_ram32(ram_seed)
+        } else if let Some(mmio) = assignment.strip_prefix("MMIO8@") {
+            bus.seed_mmio8(mmio)
+        } else if let Some(mmio) = assignment.strip_prefix("MMIO16@") {
             bus.seed_mmio16(mmio)
         } else if let Some(mmio) = assignment.strip_prefix("MMIO32@") {
             bus.seed_mmio32(mmio)
@@ -116,8 +120,8 @@ fn run_binary(args: &[String]) {
     println!("executed {} instructions", report.instructions);
     print_stop(report.stop);
     println!(
-        "PC={:#010x} SR={:#06x} RAMBAR={:#010x} VBR={:#010x}",
-        report.cpu.pc, report.cpu.sr, report.cpu.rambar, report.cpu.vbr
+        "PC={:#010x} SR={:#06x} RAMBAR={:#010x} VBR={:#010x} CACR={:#010x}",
+        report.cpu.pc, report.cpu.sr, report.cpu.rambar, report.cpu.vbr, report.cpu.cacr
     );
     for register in 0..8 {
         println!(
@@ -214,6 +218,32 @@ impl ProbeBus {
         self.mmio.insert(address, high);
         self.mmio.insert(address + 1, low);
         Ok(())
+    }
+
+    fn seed_mmio8(&mut self, assignment: &str) -> Result<(), String> {
+        let (address, value) = assignment
+            .split_once('=')
+            .ok_or_else(|| format!("invalid MMIO seed: MMIO8@{assignment}"))?;
+        let address = parse_address(address)?;
+        let value = u8::try_from(parse_address(value)?)
+            .map_err(|_| format!("8-bit MMIO value exceeds 8 bits: {value}"))?;
+        self.mmio.insert(address, value);
+        Ok(())
+    }
+
+    fn seed_ram32(&mut self, assignment: &str) -> Result<(), String> {
+        let (address, value) = assignment
+            .split_once('=')
+            .ok_or_else(|| format!("invalid RAM seed: RAM32@{assignment}"))?;
+        let address = parse_address(address)?;
+        if address & 3 != 0 {
+            return Err(format!(
+                "32-bit RAM address must be aligned: {address:#010x}"
+            ));
+        }
+        self.ram
+            .write32(address, parse_address(value)?)
+            .map_err(|error| format!("RAM seed outside mapped memory at {:#010x}", error.addr))
     }
 
     fn seed_mmio32(&mut self, assignment: &str) -> Result<(), String> {
@@ -328,6 +358,23 @@ mod tests {
     }
 
     #[test]
+    fn mmio8_seed_reads_and_writes_one_byte() {
+        let ram = FlatRam::new(0, 16);
+        let mut bus = ProbeBus::new(ram);
+        bus.seed_mmio8("0x1001=0x03").unwrap();
+        assert_eq!(bus.read8(0x1001).unwrap(), 0x03);
+        bus.write8(0x1001, 0xA5).unwrap();
+        assert_eq!(bus.read8(0x1001).unwrap(), 0xA5);
+    }
+
+    #[test]
+    fn mmio8_seed_rejects_wide_value() {
+        let ram = FlatRam::new(0, 16);
+        let mut bus = ProbeBus::new(ram);
+        assert!(bus.seed_mmio8("0x1000=0x100").is_err());
+    }
+
+    #[test]
     fn mmio_seed_rejects_unaligned_address_and_wide_value() {
         let ram = FlatRam::new(0, 16);
         let mut bus = ProbeBus::new(ram);
@@ -357,5 +404,14 @@ mod tests {
         assert!(range_fits(0x8000_0000, 0x20000, 0x8000_03FC, 0x765E));
         assert!(!range_fits(0x8000_0000, 0x1000, 0x8000_0FFC, 8));
         assert!(!range_fits(0x8000_1000, 0x1000, 0x8000_0FFC, 4));
+    }
+
+    #[test]
+    fn ram_seed_writes_initial_stack_memory() {
+        let ram = FlatRam::new(0x8000_0000, 0x20000);
+        let mut bus = ProbeBus::new(ram);
+        bus.seed_ram32("0x80010004=1").unwrap();
+        assert_eq!(bus.read32(0x8001_0004).unwrap(), 1);
+        assert!(bus.seed_ram32("0x90000000=1").is_err());
     }
 }
