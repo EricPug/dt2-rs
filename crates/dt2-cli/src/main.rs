@@ -1,6 +1,7 @@
 use dt2_core::{
     bus::{Bus, BusError, FlatRam, Mcf5441xSram},
     coldfire::{Cpu, CpuError, RunStop},
+    ddr::DdrController,
     dspi::Dspi,
     spi_nor::W25q128jv,
 };
@@ -16,7 +17,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT DDR_BOOTSTRAP D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2)
     });
     let file = std::fs::read(path).expect("cannot read file");
@@ -56,7 +57,7 @@ fn main() {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT DDR_BOOTSTRAP D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -130,6 +131,10 @@ fn run_binary(args: &[String]) {
         if assignment == "MCF5441X_SRAM" || assignment == "MCF5441X_SBF_BOOT" {
             continue;
         }
+        if assignment == "DDR_BOOTSTRAP" || assignment == "DDR_RCR" {
+            bus.attach_ddr_bootstrap();
+            continue;
+        }
         if let Some(flash) = assignment.strip_prefix("DSPI0_FLASH=") {
             bus.attach_dspi0_flash(flash).unwrap_or_else(|error| {
                 eprintln!("{error}");
@@ -189,6 +194,9 @@ fn run_binary(args: &[String]) {
     println!("executed {} instructions", report.instructions);
     if let Some(behavior) = bus.unsupported_device_behavior() {
         println!("device model: unsupported {behavior}");
+    }
+    if bus.ddr.is_some() {
+        println!("DDR model: bootstrap-observed registers only");
     }
     print_stop(report.stop);
     println!(
@@ -279,6 +287,7 @@ struct ProbeBus {
     ram: Box<dyn Bus>,
     mmio: BTreeMap<u32, u8>,
     dspi0: Option<Dspi>,
+    ddr: Option<DdrController>,
 }
 
 const DSPI0_BASE: u32 = 0xFC05_C000;
@@ -289,6 +298,7 @@ impl ProbeBus {
             ram: Box::new(ram),
             mmio: BTreeMap::new(),
             dspi0: None,
+            ddr: None,
         }
     }
 
@@ -317,6 +327,16 @@ impl ProbeBus {
 
     fn dspi_for(&mut self, address: u32) -> Option<&mut Dspi> {
         self.dspi0.as_mut().filter(|dspi| dspi.contains(address))
+    }
+
+    fn attach_ddr_bootstrap(&mut self) {
+        self.ddr = Some(DdrController::new());
+    }
+
+    fn ddr_for(&mut self, address: u32) -> Option<&mut DdrController> {
+        self.ddr
+            .as_mut()
+            .filter(|_| DdrController::contains(address))
     }
 
     fn unsupported_device_behavior(&self) -> Option<String> {
@@ -396,6 +416,9 @@ impl Bus for ProbeBus {
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.read8(address);
         }
+        if let Some(ddr) = self.ddr_for(address) {
+            return ddr.read8(address);
+        }
         if let Some(value) = self.mmio.get(&address) {
             Ok(*value)
         } else {
@@ -407,6 +430,9 @@ impl Bus for ProbeBus {
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.read16(address);
         }
+        if let Some(ddr) = self.ddr_for(address) {
+            return ddr.read16(address);
+        }
         let bytes = [self.read8(address)?, self.read8(address + 1)?];
         Ok(u16::from_be_bytes(bytes))
     }
@@ -414,6 +440,9 @@ impl Bus for ProbeBus {
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.read32(address);
+        }
+        if let Some(ddr) = self.ddr_for(address) {
+            return ddr.read32(address);
         }
         let bytes = [
             self.read8(address)?,
@@ -428,6 +457,9 @@ impl Bus for ProbeBus {
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.write8(address, value);
         }
+        if let Some(ddr) = self.ddr_for(address) {
+            return ddr.write8(address, value);
+        }
         if let Some(mapped) = self.mmio.get_mut(&address) {
             *mapped = value;
             Ok(())
@@ -440,6 +472,9 @@ impl Bus for ProbeBus {
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.write16(address, value);
         }
+        if let Some(ddr) = self.ddr_for(address) {
+            return ddr.write16(address, value);
+        }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write8(address + offset as u32, byte)?;
         }
@@ -449,6 +484,9 @@ impl Bus for ProbeBus {
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.write32(address, value);
+        }
+        if let Some(ddr) = self.ddr_for(address) {
+            return ddr.write32(address, value);
         }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write8(address + offset as u32, byte)?;
@@ -611,6 +649,15 @@ mod tests {
         let mut bus = ProbeBus::new(FlatRam::new(0, 16));
         bus.seed_mmio32("0xFC05C000=0x4001").unwrap();
         assert_eq!(bus.read32(DSPI0_BASE).unwrap(), 0x4001);
+    }
+
+    #[test]
+    fn ddr_bootstrap_option_handles_only_mapped_registers() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.attach_ddr_bootstrap();
+        bus.write32(0xFC0B_8180, 1 << 30).unwrap();
+        assert_eq!(bus.read32(0xFC0B_8180).unwrap(), 0);
+        assert!(bus.read32(0xFC0B_8184).is_err());
     }
 
     #[test]

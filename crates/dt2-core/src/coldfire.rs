@@ -411,7 +411,11 @@ impl Cpu {
                 }
             }
             4 => {
-                if op == 0x46FC {
+                if op & 0xFFC0 == 0x44C0 {
+                    let source = self.ea(bus, mode, reg, Size::B, pc0, op)?;
+                    let value = self.read(bus, source, Size::B)?;
+                    self.set_ccr(0x1F, value as u16);
+                } else if op == 0x46FC {
                     self.sr = self.fetch16(bus)?;
                 } else if op & 0xFFF8 == 0x4840 {
                     let swapped = self.d[reg].rotate_left(16);
@@ -1071,6 +1075,15 @@ mod tests {
         run(&mut c, &mut r, 1);
         assert_eq!(c.sr, 0x2500);
         assert_eq!(c.pc, 0x1004);
+    }
+
+    #[test]
+    fn move_byte_to_ccr_replaces_condition_codes_only() {
+        let (mut c, mut r) = machine(&[0x44C0]);
+        c.d[0] = 0xABCD_001B;
+        c.sr = 0x2500 | CCR_Z;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.sr, 0x251B);
     }
 
     #[test]
