@@ -413,6 +413,10 @@ impl Cpu {
             4 => {
                 if op == 0x46FC {
                     self.sr = self.fetch16(bus)?;
+                } else if op & 0xFFF8 == 0x4840 {
+                    let swapped = self.d[reg].rotate_left(16);
+                    self.d[reg] = swapped;
+                    self.flags_move(swapped, Size::L);
                 } else if op & 0xFFC0 == 0x4840 {
                     let address = self.control_ea(bus, op, pc0)?;
                     self.push32(bus, address)?;
@@ -421,6 +425,11 @@ impl Cpu {
                     self.push32(bus, self.a[reg])?;
                     self.a[reg] = self.a[7];
                     self.a[7] = self.a[7].wrapping_add(displacement);
+                } else if op & 0xFFF8 == 0x4E58 {
+                    self.a[7] = self.a[reg];
+                    let restored = bus.read32(self.a[7])?;
+                    self.a[7] = self.a[7].wrapping_add(4);
+                    self.a[reg] = restored;
                 } else if op & 0xFFF8 == 0x48C0 {
                     let value = self.d[reg] as u16 as i16 as i32 as u32;
                     self.d[reg] = value;
@@ -501,6 +510,15 @@ impl Cpu {
                 }
             }
             5 => {
+                if (op >> 6) & 3 == 3 {
+                    // Scc.B Dn: the only form ColdFire provides.
+                    if mode != 0 {
+                        return Err(ill);
+                    }
+                    let byte = if self.cond((op >> 8) & 0xF) { 0xFF } else { 0 };
+                    self.d[reg] = (self.d[reg] & !0xFF) | byte;
+                    return Ok(());
+                }
                 // ColdFire ADDQ/SUBQ are long only.
                 if (op >> 6) & 7 != 2 && (op >> 6) & 7 != 6 {
                     return Err(ill);
@@ -544,14 +562,29 @@ impl Cpu {
                 }
             }
             0xE => {
-                if op & 0xF1F8 != 0xE080 {
+                // Immediate-count long shifts only: ASR (type 00, right), LSR/LSL (type 01).
+                let left = op & 0x0100 != 0;
+                let shift_type = (op >> 3) & 3;
+                let supported = op & 0x00E0 == 0x0080
+                    && match shift_type {
+                        0 => !left,
+                        1 => true,
+                        _ => false,
+                    };
+                if !supported {
                     return Err(ill);
                 }
                 let encoded_count = ((op >> 9) & 7) as u32;
                 let count = if encoded_count == 0 { 8 } else { encoded_count };
                 let original = self.d[reg];
-                let result = ((original as i32) >> count) as u32;
-                let carry = original & (1 << (count - 1)) != 0;
+                let (result, carry) = match (shift_type, left) {
+                    (0, _) => (
+                        ((original as i32) >> count) as u32,
+                        original & (1 << (count - 1)) != 0,
+                    ),
+                    (_, false) => (original >> count, original & (1 << (count - 1)) != 0),
+                    (_, true) => (original << count, original & (1 << (32 - count)) != 0),
+                };
                 self.d[reg] = result;
                 let mut flags = 0;
                 if result & 0x8000_0000 != 0 {
@@ -593,7 +626,20 @@ impl Cpu {
             }
             7 => {
                 if op & 0x0100 != 0 {
-                    return Err(ill);
+                    // MVS (bit 7 clear) and MVZ (bit 7 set), both ISA_B.
+                    let size = if op & 0x0040 != 0 { Size::W } else { Size::B };
+                    let source = self.ea(bus, mode, reg, size, pc0, op)?;
+                    let v = self.read(bus, source, size)?;
+                    let extended = if op & 0x0080 != 0 {
+                        v & size.mask()
+                    } else if size == Size::B {
+                        v as u8 as i8 as i32 as u32
+                    } else {
+                        v as u16 as i16 as i32 as u32
+                    };
+                    self.d[((op >> 9) & 7) as usize] = extended;
+                    self.flags_move(extended, Size::L);
+                    return Ok(());
                 }
                 let v = op as u8 as i8 as i32 as u32;
                 self.d[((op >> 9) & 7) as usize] = v;
@@ -992,6 +1038,25 @@ mod tests {
     }
 
     #[test]
+    fn unlk_restores_stack_and_frame_pointer_without_touching_flags() {
+        let (mut c, mut r) = machine(&[0x4E56, 0xFFF0, 0x4E5E]);
+        c.a[6] = 0x1234_5678;
+        c.sr = CCR_X | CCR_Z;
+        run(&mut c, &mut r, 2);
+        assert_eq!(c.a[6], 0x1234_5678);
+        assert_eq!(c.a[7], 0x2000);
+        assert_eq!(c.sr, CCR_X | CCR_Z);
+    }
+
+    #[test]
+    fn unlk_a7_loads_the_stack_value_into_a7() {
+        let (mut c, mut r) = machine(&[0x4E5F]);
+        r.load(0x2000, &0x1234u32.to_be_bytes());
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.a[7], 0x1234);
+    }
+
+    #[test]
     fn pea_pc_relative_pushes_effective_address() {
         let (mut c, mut r) = machine(&[0x487A, 0x0010]);
         run(&mut c, &mut r, 1);
@@ -1096,6 +1161,202 @@ mod tests {
         run(&mut c, &mut r, 1);
         assert_eq!(c.d[0], 0x3FC);
         assert_eq!(c.sr, CCR_N | CCR_C | CCR_X);
+    }
+
+    #[test]
+    fn scc_sets_only_the_low_byte_from_the_condition_and_keeps_flags() {
+        let (mut c, mut r) = machine(&[0x57C0]);
+        c.d[0] = 0x1234_5600;
+        c.sr = CCR_Z | CCR_X;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x1234_56FF);
+        assert_eq!(c.sr & 0x1F, CCR_Z | CCR_X);
+
+        let (mut c, mut r) = machine(&[0x57C1]);
+        c.d[1] = 0xFFFF_FFFF;
+        c.sr = CCR_N;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[1], 0xFFFF_FF00);
+        assert_eq!(c.sr & 0x1F, CCR_N);
+    }
+
+    #[test]
+    fn scc_true_and_false_conditions_are_unconditional() {
+        let (mut c, mut r) = machine(&[0x50C2, 0x51C3]);
+        c.d[3] = 0xFF;
+        run(&mut c, &mut r, 2);
+        assert_eq!(c.d[2] & 0xFF, 0xFF);
+        assert_eq!(c.d[3] & 0xFF, 0);
+    }
+
+    #[test]
+    fn scc_other_destinations_are_not_decoded() {
+        let (mut c, mut r) = machine(&[0x57D0]);
+        assert!(matches!(
+            c.run(&mut r, 1).stop,
+            RunStop::Error(CpuError::Illegal { .. })
+        ));
+    }
+
+    #[test]
+    fn swap_exchanges_register_halves_and_sets_flags_from_the_result() {
+        let (mut c, mut r) = machine(&[0x4841]);
+        c.d[1] = 0x1234_8000;
+        c.sr = CCR_V | CCR_C | CCR_X;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[1], 0x8000_1234);
+        assert_eq!(
+            c.sr & (CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X),
+            CCR_N | CCR_X
+        );
+
+        let (mut c, mut r) = machine(&[0x4840]);
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0);
+        assert_eq!(c.sr & (CCR_N | CCR_Z), CCR_Z);
+    }
+
+    #[test]
+    fn pea_still_decodes_beside_swap() {
+        let (mut c, mut r) = machine(&[0x4850]);
+        c.a[0] = 0x1234;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.a[7], 0x2000 - 4);
+        assert_eq!(r.read32(c.a[7]).unwrap(), 0x1234);
+    }
+
+    #[test]
+    fn mvz_byte_from_displacement_zero_fills_and_clears_flags() {
+        let (mut c, mut r) = machine(&[0x71AE, 0x0004]);
+        c.a[6] = 0x1000;
+        c.d[0] = 0xFFFF_FFFF;
+        c.sr = CCR_N | CCR_V | CCR_C | CCR_X;
+        r.load(0x1004, &[0x9C]);
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x0000_009C);
+        assert_eq!(c.sr & (CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X), CCR_X);
+    }
+
+    #[test]
+    fn mvz_word_from_data_register_zero_fills_and_keeps_extend() {
+        let (mut c, mut r) = machine(&[0x71C1]);
+        c.d[1] = 0xABCD_0000;
+        c.d[0] = 0xFFFF_FFFF;
+        c.sr = CCR_X;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0);
+        assert_eq!(
+            c.sr & (CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X),
+            CCR_Z | CCR_X
+        );
+
+        let (mut c, mut r) = machine(&[0x71C1]);
+        c.d[1] = 0xABCD_8001;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x0000_8001);
+        assert_eq!(c.sr & (CCR_N | CCR_Z), 0);
+    }
+
+    #[test]
+    fn mvz_byte_zero_result_sets_z() {
+        let (mut c, mut r) = machine(&[0x7000 | 0x0100 | 0x0080 | 0x0001]);
+        c.d[1] = 0xFFFF_FF00;
+        c.d[0] = 0x1234_5678;
+        c.sr = CCR_X;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0);
+        assert_eq!(
+            c.sr & (CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X),
+            CCR_Z | CCR_X
+        );
+    }
+
+    #[test]
+    fn mvs_byte_sign_extends_and_sets_negative() {
+        let (mut c, mut r) = machine(&[0x7100]);
+        c.d[0] = 0x1234_5680;
+        c.sr = CCR_V | CCR_C | CCR_X;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0xFFFF_FF80);
+        assert_eq!(
+            c.sr & (CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X),
+            CCR_N | CCR_X
+        );
+    }
+
+    #[test]
+    fn mvs_word_from_memory_sign_extends_or_keeps_positive_values() {
+        let (mut c, mut r) = machine(&[0x7358, 0x7358]);
+        c.a[0] = 0x1800;
+        c.d[1] = 0xFFFF_FFFF;
+        r.load(0x1800, &[0x7F, 0xFF, 0x80, 0x00]);
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[1], 0x0000_7FFF);
+        assert_eq!(c.a[0], 0x1802);
+        assert_eq!(c.sr & (CCR_N | CCR_Z), 0);
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[1], 0xFFFF_8000);
+        assert_eq!(c.sr & CCR_N, CCR_N);
+    }
+
+    #[test]
+    fn mvs_zero_result_sets_z() {
+        let (mut c, mut r) = machine(&[0x7101]);
+        c.d[0] = 0x55;
+        c.d[1] = 0xFFFF_FF00;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0);
+        assert_eq!(c.sr & (CCR_N | CCR_Z), CCR_Z);
+    }
+
+    #[test]
+    fn lsr_long_immediate_shifts_in_zeros_and_sets_carry_and_extend() {
+        let (mut c, mut r) = machine(&[0xE888]);
+        c.d[0] = 0xC202_0220;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x0C20_2022);
+        assert_eq!(c.sr & (CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X), 0);
+
+        let (mut c, mut r) = machine(&[0xE889]);
+        c.d[1] = 0x8000_0018;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[1], 0x0800_0001);
+        assert_eq!(c.sr & (CCR_N | CCR_C | CCR_X), CCR_C | CCR_X);
+    }
+
+    #[test]
+    fn lsr_long_immediate_sets_zero_and_encodes_eight_as_zero() {
+        let (mut c, mut r) = machine(&[0xE088]);
+        c.d[0] = 0x0000_00FF;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0);
+        assert_eq!(c.sr & (CCR_Z | CCR_C | CCR_X), CCR_Z | CCR_C | CCR_X);
+    }
+
+    #[test]
+    fn lsl_long_immediate_shifts_left_and_reports_the_last_bit_out() {
+        let (mut c, mut r) = machine(&[0xE988]);
+        c.d[0] = 0x1000_0001;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x0000_0010);
+        assert_eq!(c.sr & (CCR_N | CCR_Z | CCR_C | CCR_X), CCR_C | CCR_X);
+
+        let (mut c, mut r) = machine(&[0xE188]);
+        c.d[0] = 0x0100_0001;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0x0000_0100);
+        assert_eq!(c.sr & (CCR_N | CCR_Z | CCR_C | CCR_X), CCR_C | CCR_X);
+    }
+
+    #[test]
+    fn shifts_other_than_immediate_long_asr_lsr_lsl_are_not_decoded() {
+        for op in [0xE180u16, 0xE8A8, 0xE898, 0xE848] {
+            let (mut c, mut r) = machine(&[op]);
+            assert!(matches!(
+                c.run(&mut r, 1).stop,
+                RunStop::Error(CpuError::Illegal { .. })
+            ));
+        }
     }
 
     #[test]

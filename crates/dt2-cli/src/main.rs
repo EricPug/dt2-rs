@@ -1,6 +1,8 @@
 use dt2_core::{
     bus::{Bus, BusError, FlatRam, Mcf5441xSram},
     coldfire::{Cpu, CpuError, RunStop},
+    dspi::Dspi,
+    spi_nor::W25q128jv,
 };
 use dt2_fw::{container, syx};
 use std::collections::BTreeMap;
@@ -128,6 +130,13 @@ fn run_binary(args: &[String]) {
         if assignment == "MCF5441X_SRAM" || assignment == "MCF5441X_SBF_BOOT" {
             continue;
         }
+        if let Some(flash) = assignment.strip_prefix("DSPI0_FLASH=") {
+            bus.attach_dspi0_flash(flash).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2)
+            });
+            continue;
+        }
         let result = if let Some(ram_seed) = assignment.strip_prefix("RAM32@") {
             bus.seed_ram32(ram_seed)
         } else if let Some(mmio) = assignment.strip_prefix("MMIO8@") {
@@ -178,6 +187,9 @@ fn run_binary(args: &[String]) {
         println!("initial overrides: {}", args[6..].join(" "));
     }
     println!("executed {} instructions", report.instructions);
+    if let Some(behavior) = bus.unsupported_device_behavior() {
+        println!("device model: unsupported {behavior}");
+    }
     print_stop(report.stop);
     println!(
         "PC={:#010x} SR={:#06x} RAMBAR={:#010x} VBR={:#010x} CACR={:#010x} DEBUG_CSR={:#010x}",
@@ -266,14 +278,49 @@ fn parse_register_index(index: &str, register: &str) -> Result<usize, String> {
 struct ProbeBus {
     ram: Box<dyn Bus>,
     mmio: BTreeMap<u32, u8>,
+    dspi0: Option<Dspi>,
 }
+
+const DSPI0_BASE: u32 = 0xFC05_C000;
 
 impl ProbeBus {
     fn new(ram: impl Bus + 'static) -> Self {
         Self {
             ram: Box::new(ram),
             mmio: BTreeMap::new(),
+            dspi0: None,
         }
+    }
+
+    /// Spec is `<pcs>:BLANK` or `<pcs>:<image path>`; the chip is a W25Q128JV.
+    fn attach_dspi0_flash(&mut self, spec: &str) -> Result<(), String> {
+        let (pcs, source) = spec
+            .split_once(':')
+            .ok_or_else(|| format!("invalid DSPI0_FLASH spec: {spec}"))?;
+        let pcs = pcs
+            .parse::<usize>()
+            .ok()
+            .filter(|pcs| *pcs < 4)
+            .ok_or_else(|| format!("DSPI0 chip select must be 0-3: {pcs}"))?;
+        let flash = if source == "BLANK" {
+            W25q128jv::blank()
+        } else {
+            let image =
+                std::fs::read(source).map_err(|error| format!("cannot read {source}: {error}"))?;
+            W25q128jv::with_image(&image)?
+        };
+        self.dspi0
+            .get_or_insert_with(|| Dspi::new(DSPI0_BASE))
+            .attach(pcs, Box::new(flash));
+        Ok(())
+    }
+
+    fn dspi_for(&mut self, address: u32) -> Option<&mut Dspi> {
+        self.dspi0.as_mut().filter(|dspi| dspi.contains(address))
+    }
+
+    fn unsupported_device_behavior(&self) -> Option<String> {
+        self.dspi0.as_ref().and_then(Dspi::unsupported)
     }
 
     fn load_ram(&mut self, address: u32, bytes: &[u8]) -> Result<(), String> {
@@ -346,6 +393,9 @@ impl ProbeBus {
 
 impl Bus for ProbeBus {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
+        if let Some(dspi) = self.dspi_for(address) {
+            return dspi.read8(address);
+        }
         if let Some(value) = self.mmio.get(&address) {
             Ok(*value)
         } else {
@@ -354,11 +404,17 @@ impl Bus for ProbeBus {
     }
 
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
+        if let Some(dspi) = self.dspi_for(address) {
+            return dspi.read16(address);
+        }
         let bytes = [self.read8(address)?, self.read8(address + 1)?];
         Ok(u16::from_be_bytes(bytes))
     }
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
+        if let Some(dspi) = self.dspi_for(address) {
+            return dspi.read32(address);
+        }
         let bytes = [
             self.read8(address)?,
             self.read8(address + 1)?,
@@ -369,6 +425,9 @@ impl Bus for ProbeBus {
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
+        if let Some(dspi) = self.dspi_for(address) {
+            return dspi.write8(address, value);
+        }
         if let Some(mapped) = self.mmio.get_mut(&address) {
             *mapped = value;
             Ok(())
@@ -378,6 +437,9 @@ impl Bus for ProbeBus {
     }
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
+        if let Some(dspi) = self.dspi_for(address) {
+            return dspi.write16(address, value);
+        }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write8(address + offset as u32, byte)?;
         }
@@ -385,6 +447,9 @@ impl Bus for ProbeBus {
     }
 
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
+        if let Some(dspi) = self.dspi_for(address) {
+            return dspi.write32(address, value);
+        }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write8(address + offset as u32, byte)?;
         }
@@ -516,6 +581,36 @@ mod tests {
         bus.seed_ram32("4=0x80000de8").unwrap();
         assert_eq!(bus.read32(0x80000000).unwrap(), 0x8001_0000);
         assert_eq!(bus.read32(0x80010004).unwrap(), 0x8000_0DE8);
+    }
+
+    #[test]
+    fn dspi0_flash_answers_jedec_id_through_the_bus() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.attach_dspi0_flash("1:BLANK").unwrap();
+        bus.write32(DSPI0_BASE, 0x8000_0000).unwrap();
+        bus.write32(DSPI0_BASE + 0x0C, 0x3800_0000).unwrap();
+        for word in [0x8402_009F, 0x8002_0000, 0x8002_0000, 0x0002_0000] {
+            bus.write32(DSPI0_BASE + 0x34, word).unwrap();
+        }
+        let id: Vec<u32> = (0..4)
+            .map(|_| bus.read32(DSPI0_BASE + 0x38).unwrap())
+            .collect();
+        assert_eq!(id, [0, 0xEF, 0x40, 0x18]);
+    }
+
+    #[test]
+    fn dspi0_flash_spec_is_validated() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        assert!(bus.attach_dspi0_flash("BLANK").is_err());
+        assert!(bus.attach_dspi0_flash("4:BLANK").is_err());
+        assert!(bus.attach_dspi0_flash("1:/nonexistent/flash.bin").is_err());
+    }
+
+    #[test]
+    fn dspi0_registers_fall_back_to_seeds_without_a_flash() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.seed_mmio32("0xFC05C000=0x4001").unwrap();
+        assert_eq!(bus.read32(DSPI0_BASE).unwrap(), 0x4001);
     }
 
     #[test]
