@@ -16,6 +16,7 @@ pub enum CpuError {
     Bus(BusError),
     Illegal { pc: u32, op: u16 },
     Privilege { pc: u32, op: u16 },
+    UnsupportedExceptionState { pc: u32, op: u16 },
     UnsupportedDebugRegister { pc: u32, register: u8 },
 }
 
@@ -32,6 +33,7 @@ pub struct CpuSnapshot {
     pub pc: u32,
     pub sr: u16,
     pub rambar: u32,
+    pub acr0: u32,
     pub vbr: u32,
     pub cacr: u32,
     pub debug_csr: u32,
@@ -96,6 +98,7 @@ pub struct Cpu {
     pub pc: u32,
     pub sr: u16,
     pub rambar: u32,
+    pub acr0: u32,
     pub vbr: u32,
     pub cacr: u32,
     pub debug_csr: u32,
@@ -347,6 +350,36 @@ impl Cpu {
         Ok(())
     }
 
+    fn take_trap<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        pc0: u32,
+        op: u16,
+        trap_number: u32,
+    ) -> Result<(), CpuError> {
+        if self.sr & 0x2000 == 0 {
+            return Err(CpuError::UnsupportedExceptionState { pc: pc0, op });
+        }
+
+        let saved_sr = self.sr;
+        let original_sp = self.a[7];
+        let format = 4 + (original_sp & 3);
+        let frame_sp = original_sp.wrapping_sub(4 + format);
+        let vector_number = 32 + trap_number;
+        bus.write16(frame_sp, ((format as u16) << 12) | vector_number as u16)?;
+        bus.write16(frame_sp.wrapping_add(2), saved_sr)?;
+        bus.write32(frame_sp.wrapping_add(4), self.pc)?;
+        self.a[7] = frame_sp;
+        self.sr = (saved_sr & !0x8000) | 0x2000;
+
+        let vector_address = self
+            .vbr
+            .wrapping_add(0x80)
+            .wrapping_add(trap_number.wrapping_mul(4));
+        self.pc = bus.read32(vector_address)?;
+        Ok(())
+    }
+
     /// Execute one instruction.
     pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<(), CpuError> {
         let pc0 = self.pc;
@@ -371,6 +404,9 @@ impl Cpu {
                     let old = self.d[reg];
                     self.d[reg] = old & !mask;
                     self.set_ccr(CCR_Z, if old & mask == 0 { CCR_Z } else { 0 });
+                } else if op & 0xFFF8 == 0x0680 {
+                    let immediate = self.fetch32(bus)?;
+                    self.d[reg] = self.add(self.d[reg], immediate, Size::L, false);
                 } else if op & 0xFFF8 == 0x0C80 {
                     let immediate = self.fetch32(bus)?;
                     self.sub(self.d[reg], immediate, Size::L, false);
@@ -411,12 +447,41 @@ impl Cpu {
                 }
             }
             4 => {
-                if op & 0xFFC0 == 0x44C0 {
+                if op & 0xFFF0 == 0x4E40 {
+                    self.take_trap(bus, pc0, op, u32::from(op & 0xF))?;
+                } else if op == 0x4E73 {
+                    if self.sr & 0x2000 == 0 {
+                        return Err(CpuError::Privilege { pc: pc0, op });
+                    }
+                    let frame_sp = self.a[7];
+                    let format_vector = bus.read16(frame_sp)?;
+                    let format = (format_vector >> 12) & 0xF;
+                    if !(4..=7).contains(&format) {
+                        return Err(CpuError::Illegal { pc: pc0, op });
+                    }
+                    let restored_sr = bus.read16(frame_sp.wrapping_add(2))?;
+                    let restored_pc = bus.read32(frame_sp.wrapping_add(4))?;
+                    self.a[7] = frame_sp.wrapping_add(4 + u32::from(format));
+                    self.sr = restored_sr;
+                    self.pc = restored_pc;
+                } else if op & 0xFFC0 == 0x40C0 {
+                    let destination = self.ea(bus, mode, reg, Size::W, pc0, op)?;
+                    self.write(bus, destination, Size::W, u32::from(self.sr), pc0, op)?;
+                } else if op & 0xFFC0 == 0x44C0 {
                     let source = self.ea(bus, mode, reg, Size::B, pc0, op)?;
                     let value = self.read(bus, source, Size::B)?;
                     self.set_ccr(0x1F, value as u16);
                 } else if op == 0x46FC {
+                    if self.sr & 0x2000 == 0 {
+                        return Err(CpuError::Privilege { pc: pc0, op });
+                    }
                     self.sr = self.fetch16(bus)?;
+                } else if op & 0xFFC0 == 0x46C0 {
+                    if self.sr & 0x2000 == 0 {
+                        return Err(CpuError::Privilege { pc: pc0, op });
+                    }
+                    let source = self.ea(bus, mode, reg, Size::W, pc0, op)?;
+                    self.sr = self.read(bus, source, Size::W)? as u16;
                 } else if op & 0xFFF8 == 0x4840 {
                     let swapped = self.d[reg].rotate_left(16);
                     self.d[reg] = swapped;
@@ -438,9 +503,13 @@ impl Cpu {
                     let value = self.d[reg] as u16 as i16 as i32 as u32;
                     self.d[reg] = value;
                     self.flags_move(value, Size::L);
-                } else if op & 0xFFC0 == 0x48C0 && mode == 2 {
+                } else if op & 0xFFC0 == 0x48C0 && matches!(mode, 2 | 5) {
                     let mask = self.fetch16(bus)?;
-                    let mut address = self.a[reg];
+                    let destination = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let mut address = match destination {
+                        Operand::Mem(address) => address,
+                        _ => return Err(ill),
+                    };
                     for register in 0..16 {
                         if mask & (1 << register) != 0 {
                             let value = if register < 8 {
@@ -452,9 +521,13 @@ impl Cpu {
                             address = address.wrapping_add(4);
                         }
                     }
-                } else if op & 0xFFC0 == 0x4CC0 && mode == 2 {
+                } else if op & 0xFFC0 == 0x4CC0 && matches!(mode, 2 | 5) {
                     let mask = self.fetch16(bus)?;
-                    let mut address = self.a[reg];
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let mut address = match source {
+                        Operand::Mem(address) => address,
+                        _ => return Err(ill),
+                    };
                     for register in 0..16 {
                         if mask & (1 << register) != 0 {
                             let value = bus.read32(address)?;
@@ -476,6 +549,7 @@ impl Cpu {
                     };
                     match ext & 0x0FFF {
                         0x0002 => self.cacr = value,
+                        0x0004 => self.acr0 = value,
                         0x0801 => self.vbr = value,
                         0x0C05 => self.rambar = value,
                         _ => return Err(CpuError::Illegal { pc: pc0, op: ext }),
@@ -658,15 +732,25 @@ impl Cpu {
                 self.d[dst] = result;
                 self.flags_move(result, Size::L);
             }
-            0xC => {
-                if (op >> 6) & 7 != 2 || mode != 0 {
-                    return Err(ill);
+            0xC => match (op >> 6) & 7 {
+                2 if mode != 1 => {
+                    let dst = ((op >> 9) & 7) as usize;
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let source_value = self.read(bus, source, Size::L)?;
+                    let result = self.d[dst] & source_value;
+                    self.d[dst] = result;
+                    self.flags_move(result, Size::L);
                 }
-                let dst = ((op >> 9) & 7) as usize;
-                let result = self.d[dst] & self.d[reg];
-                self.d[dst] = result;
-                self.flags_move(result, Size::L);
-            }
+                6 if mode != 1 => {
+                    let src = ((op >> 9) & 7) as usize;
+                    let destination = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let destination_value = self.read(bus, destination, Size::L)?;
+                    let result = destination_value & self.d[src];
+                    self.write(bus, destination, Size::L, result, pc0, op)?;
+                    self.flags_move(result, Size::L);
+                }
+                _ => return Err(ill),
+            },
             nib @ (9 | 0xB | 0xD) => {
                 let r = ((op >> 9) & 7) as usize;
                 let opmode = (op >> 6) & 7;
@@ -736,6 +820,7 @@ impl Cpu {
                 pc: self.pc,
                 sr: self.sr,
                 rambar: self.rambar,
+                acr0: self.acr0,
                 vbr: self.vbr,
                 cacr: self.cacr,
                 debug_csr: self.debug_csr,
@@ -961,6 +1046,47 @@ mod tests {
     }
 
     #[test]
+    fn addi_long_immediate_updates_data_register_and_flags() {
+        let (mut c, mut r) = machine(&[0x0680, 0x0000, 0x0001]);
+        c.d[0] = 0xFFFF_FFFF;
+        c.sr = CCR_X | CCR_V;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], 0);
+        assert_eq!(c.sr, CCR_X | CCR_Z | CCR_C);
+        assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
+    fn and_long_displacement_memory_to_data_register_updates_flags() {
+        let (mut c, mut r) = machine(&[0xC2AF, 0x0014]);
+        c.d[1] = 0xF00F_F00F;
+        c.sr = CCR_X | CCR_V | CCR_C;
+        r.write32(0x2014, 0x00FF_00FF).unwrap();
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[1], 0x000F_000F);
+        assert_eq!(c.sr, CCR_X);
+        assert_eq!(c.pc, 0x1004);
+    }
+
+    #[test]
+    fn and_long_data_register_to_absolute_memory_updates_flags() {
+        let (mut c, mut r) = machine(&[0xC1B9, 0x0000, 0x2014]);
+        c.d[0] = 0x00FF_00FF;
+        c.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+        r.write32(0x2014, 0xF00F_F00F).unwrap();
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(r.read32(0x2014).unwrap(), 0x000F_000F);
+        assert_eq!(c.sr, CCR_X);
+        assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
     fn ori_long_immediate_updates_data_register_and_flags() {
         let (mut c, mut r) = machine(&[0x0080, 0x0000, 0x1800]);
         c.d[0] = 0x0000_C000;
@@ -993,6 +1119,14 @@ mod tests {
         c.d[0] = 0x000C_C100;
         run(&mut c, &mut r, 1);
         assert_eq!(c.cacr, 0x000C_C100);
+    }
+
+    #[test]
+    fn movec_data_register_to_acr0() {
+        let (mut c, mut r) = machine(&[0x4E7B, 0x0004]);
+        c.d[0] = 0x4007_E020;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.acr0, 0x4007_E020);
     }
 
     #[test]
@@ -1087,6 +1221,80 @@ mod tests {
     }
 
     #[test]
+    fn move_sr_to_data_register_preserves_upper_word_and_status() {
+        let (mut c, mut r) = machine(&[0x40C2]);
+        c.d[2] = 0x1234_5678;
+        c.sr = 0x2704;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[2], 0x1234_2704);
+        assert_eq!(c.sr, 0x2704);
+    }
+
+    #[test]
+    fn move_data_register_to_sr_loads_status_word() {
+        let (mut c, mut r) = machine(&[0x46C2]);
+        c.sr = 0x2700;
+        c.d[2] = 0x1234_2004;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.sr, 0x2004);
+    }
+
+    #[test]
+    fn move_data_register_to_sr_is_privileged() {
+        let (mut c, mut r) = machine(&[0x46C2]);
+        c.d[2] = 0x2004;
+        assert_eq!(
+            c.step(&mut r),
+            Err(CpuError::Privilege {
+                pc: 0x1000,
+                op: 0x46C2
+            })
+        );
+    }
+
+    #[test]
+    fn trap_dispatches_with_aligned_format_vector_frame_and_rte_restores_state() {
+        let (mut c, mut r) = machine(&[0x4E40]);
+        c.vbr = 0x1200;
+        c.a[7] = 0x2003;
+        c.sr = 0xA004;
+        r.write32(0x1280, 0x1500).unwrap();
+        r.load(0x1500, &[0x4E, 0x73]);
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.pc, 0x1500);
+        assert_eq!(c.a[7], 0x1FF8);
+        assert_eq!(c.sr, 0x2004);
+        assert_eq!(r.read16(0x1FF8).unwrap(), 0x7020);
+        assert_eq!(r.read16(0x1FFA).unwrap(), 0xA004);
+        assert_eq!(r.read32(0x1FFC).unwrap(), 0x1002);
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.pc, 0x1002);
+        assert_eq!(c.a[7], 0x2003);
+        assert_eq!(c.sr, 0xA004);
+    }
+
+    #[test]
+    fn user_mode_trap_reports_missing_supervisor_stack_model() {
+        let (mut c, mut r) = machine(&[0x4E40]);
+        c.sr = 0;
+        assert_eq!(
+            c.step(&mut r),
+            Err(CpuError::UnsupportedExceptionState {
+                pc: 0x1000,
+                op: 0x4E40
+            })
+        );
+    }
+
+    #[test]
     fn wdebug_executes_wdmreg_command_to_csr() {
         let (mut c, mut r) = machine(&[0xFBEF, 0x0003, 0xFFF8]);
         c.sr = 0x2700;
@@ -1135,6 +1343,55 @@ mod tests {
             assert_eq!(r.read32(0x1100 + offset as u32 * 4).unwrap(), expected);
         }
         assert_eq!(c.a[0], 0x1100);
+    }
+
+    #[test]
+    fn movem_long_displacement_restores_registers_including_base_register() {
+        let (mut c, mut r) = machine(&[0x4CE8, 0xFFFF, 0x000C]);
+        let expected: Vec<u32> = (0..16).map(|index| 0xA000_0000 + index).collect();
+        for (index, value) in expected.iter().copied().enumerate() {
+            r.write32(0x110C + index as u32 * 4, value).unwrap();
+        }
+        c.a[0] = 0x1100;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d.as_slice(), &expected[..8]);
+        assert_eq!(c.a.as_slice(), &expected[8..]);
+        assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
+    fn movem_long_register_list_stores_to_displacement_address() {
+        let (mut c, mut r) = machine(&[0x48E8, 0xFFFF, 0x000C]);
+        c.d.copy_from_slice(&[
+            0xD000_0000,
+            0xD111_1111,
+            0xD222_2222,
+            0xD333_3333,
+            0xD444_4444,
+            0xD555_5555,
+            0xD666_6666,
+            0xD777_7777,
+        ]);
+        c.a.copy_from_slice(&[
+            0x1100,
+            0xA111_1111,
+            0xA222_2222,
+            0xA333_3333,
+            0xA444_4444,
+            0xA555_5555,
+            0xA666_6666,
+            0xA777_7777,
+        ]);
+
+        run(&mut c, &mut r, 1);
+
+        for (index, expected) in c.d.iter().chain(c.a.iter()).copied().enumerate() {
+            assert_eq!(r.read32(0x110C + index as u32 * 4).unwrap(), expected);
+        }
+        assert_eq!(c.a[0], 0x1100);
+        assert_eq!(c.pc, 0x1006);
     }
 
     #[test]
