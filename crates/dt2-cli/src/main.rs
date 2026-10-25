@@ -21,7 +21,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP SYNTHETIC_MCF_MMIO INSPECT_TRAP0 D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         std::process::exit(2)
     });
@@ -110,7 +110,7 @@ fn diagnostic_pattern_ppm() -> Vec<u8> {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP SYNTHETIC_MCF_MMIO INSPECT_TRAP0 D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -201,6 +201,7 @@ fn run_binary(args: &[String]) {
     });
     let mut cpu = Cpu::new();
     let mut cpu_overrides = Vec::new();
+    let mut ram_dumps = Vec::new();
     for assignment in &args[6..] {
         if assignment == "MCF5441X_SRAM"
             || assignment == "MCF5441X_SBF_BOOT"
@@ -208,6 +209,13 @@ fn run_binary(args: &[String]) {
             || assignment == "SYNTHETIC_MCF_MMIO"
             || assignment == "INSPECT_TRAP0"
         {
+            continue;
+        }
+        if let Some(spec) = assignment.strip_prefix("DUMP_RAM=") {
+            ram_dumps.push(parse_ram_dump_spec(spec).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2)
+            }));
             continue;
         }
         if assignment == "DDR_BOOTSTRAP" || assignment == "DDR_RCR" {
@@ -253,6 +261,13 @@ fn run_binary(args: &[String]) {
         });
     }
     let report = cpu.run(&mut bus, instruction_limit);
+
+    for (address, length) in ram_dumps {
+        match bus.dump_ram(address, length) {
+            Ok(bytes) => print_ram_dump(address, &bytes),
+            Err(error) => println!("RAM dump unmapped at {:#010x}", error.addr),
+        }
+    }
 
     let ram_map = if mcf_sbf_boot {
         "MCF5441x SRAM with SBF address-zero reset alias"
@@ -343,6 +358,33 @@ fn range_fits(base: u32, size: usize, address: u32, length: usize) -> bool {
 fn trap_vector_address(vbr: u32, trap_number: u32) -> u32 {
     vbr.wrapping_add(0x80)
         .wrapping_add(trap_number.wrapping_mul(4))
+}
+
+fn parse_ram_dump_spec(spec: &str) -> Result<(u32, usize), String> {
+    let (address, length) = spec
+        .split_once(':')
+        .ok_or_else(|| format!("invalid DUMP_RAM spec: {spec}"))?;
+    let address = parse_address(address)?;
+    let length = usize::try_from(parse_address(length)?)
+        .map_err(|_| format!("invalid DUMP_RAM length: {length}"))?;
+    if !(1..=256).contains(&length) {
+        return Err(format!("DUMP_RAM length must be 1-256 bytes: {length}"));
+    }
+    if address.checked_add(length as u32).is_none() {
+        return Err(format!("DUMP_RAM range overflows address space: {spec}"));
+    }
+    Ok((address, length))
+}
+
+fn print_ram_dump(address: u32, bytes: &[u8]) {
+    println!("RAM dump {address:#010x} ({} bytes):", bytes.len());
+    for (line, chunk) in bytes.chunks(16).enumerate() {
+        print!("  {:#010x}:", address.wrapping_add((line * 16) as u32));
+        for byte in chunk {
+            print!(" {byte:02x}");
+        }
+        println!();
+    }
 }
 
 fn set_register(cpu: &mut Cpu, assignment: &str) -> Result<(), String> {
@@ -756,6 +798,19 @@ impl ProbeBus {
         result.map_err(|error| format!("RAM seed outside mapped memory at {:#010x}", error.addr))
     }
 
+    fn dump_ram(&mut self, address: u32, length: usize) -> Result<Vec<u8>, BusError> {
+        (0..length)
+            .map(|offset| {
+                let current = address.wrapping_add(offset as u32);
+                if let Some(sram) = self.sram_for(current) {
+                    sram.read8(current)
+                } else {
+                    self.ram.read8(current)
+                }
+            })
+            .collect()
+    }
+
     fn seed_mmio32(&mut self, assignment: &str) -> Result<(), String> {
         let (address, value) = assignment
             .split_once('=')
@@ -1094,6 +1149,35 @@ mod tests {
         assert!(range_fits(0x8000_0000, 0x20000, 0x8000_03FC, 0x765E));
         assert!(!range_fits(0x8000_0000, 0x1000, 0x8000_0FFC, 8));
         assert!(!range_fits(0x8000_1000, 0x1000, 0x8000_0FFC, 4));
+    }
+
+    #[test]
+    fn ram_dump_spec_enforces_bounds_and_address_overflow() {
+        assert_eq!(
+            parse_ram_dump_spec("0x40001000:32").unwrap(),
+            (0x4000_1000, 32)
+        );
+        assert!(parse_ram_dump_spec("0x40001000:0").is_err());
+        assert!(parse_ram_dump_spec("0x40001000:257").is_err());
+        assert!(parse_ram_dump_spec("0xfffffff0:32").is_err());
+    }
+
+    #[test]
+    fn ram_dump_reads_flat_and_sram_memory_but_not_mmio() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x4000_0000, 0x1000));
+        bus.attach_mcf_sram_overlay();
+        bus.seed_ram32("0x40000004=0x12345678").unwrap();
+        bus.seed_ram32("0x80000000=0xAABBCCDD").unwrap();
+
+        assert_eq!(
+            bus.dump_ram(0x4000_0004, 4).unwrap(),
+            [0x12, 0x34, 0x56, 0x78]
+        );
+        assert_eq!(
+            bus.dump_ram(0x8001_0000, 4).unwrap(),
+            [0xAA, 0xBB, 0xCC, 0xDD]
+        );
+        assert!(bus.dump_ram(0xFC04_8000, 4).is_err());
     }
 
     #[test]

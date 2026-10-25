@@ -32,3 +32,5 @@ the flat DDR image region with the documented 64 KiB mirrored SRAM window.
 `SYNTHETIC_MCF_MMIO` is an explicit approximation that returns zero for unclaimed
 peripheral reads and drops writes; it does not model hardware reset values or timing.
 `INSPECT_TRAP0` prints the live TRAP #0 vector after execution stops.
+`DUMP_RAM=address:length` prints 1-256 bytes from mapped RAM/SRAM after execution;
+it does not read MMIO.
