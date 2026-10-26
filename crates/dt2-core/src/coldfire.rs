@@ -445,6 +445,7 @@ impl Cpu {
         self.fast_forwarded_in_step = 0;
         let pc0 = self.pc;
         bus.begin_instruction(pc0);
+        bus.report_instruction_state(pc0, &self.d, &self.a, self.sr);
         let op = self.fetch16(bus)?;
         let ill = CpuError::Illegal { pc: pc0, op };
         let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);

@@ -34,6 +34,9 @@ pub trait Bus {
     /// Identify the instruction about to access the bus, for diagnostics.
     fn begin_instruction(&mut self, _pc: u32) {}
 
+    /// Observe CPU registers at a guest instruction boundary for diagnostics.
+    fn report_instruction_state(&mut self, _pc: u32, _d: &[u32; 8], _a: &[u32; 8], _sr: u16) {}
+
     /// Mark reads performed to fetch opcodes or extension words.
     fn begin_instruction_fetch(&mut self) {}
     fn end_instruction_fetch(&mut self) {}

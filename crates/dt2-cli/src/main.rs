@@ -33,7 +33,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT0_ONESHOT PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length WATCH_WRITE=address TRACE_REGS=pc D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -351,9 +351,28 @@ fn run_binary(args: &[String]) {
     let intc2_bootstrap = args[6..]
         .iter()
         .any(|assignment| assignment == "INTC2_BOOTSTRAP");
+    let pit0_oneshot = args[6..]
+        .iter()
+        .any(|assignment| assignment == "PIT0_ONESHOT");
     let loop_detect = args[6..]
         .iter()
         .any(|assignment| assignment == "LOOP_DETECT");
+    let watch_write_address = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("WATCH_WRITE=").map(|address| {
+            parse_address(address).unwrap_or_else(|error| {
+                eprintln!("invalid WATCH_WRITE address: {error}");
+                std::process::exit(2)
+            })
+        })
+    });
+    let trace_register_pc = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("TRACE_REGS=").map(|pc| {
+            parse_address(pc).unwrap_or_else(|error| {
+                eprintln!("invalid TRACE_REGS address: {error}");
+                std::process::exit(2)
+            })
+        })
+    });
     let interrupt_injection = args[6..].iter().find_map(|assignment| {
         assignment.strip_prefix("INJECT_IRQ=").map(|spec| {
             parse_interrupt_injection(spec).unwrap_or_else(|error| {
@@ -377,6 +396,10 @@ fn run_binary(args: &[String]) {
     };
     if pit_tick_setting.is_some() && !pit_bootstrap {
         eprintln!("PIT_TICKS_PER_INSTRUCTION requires PIT_BOOTSTRAP");
+        std::process::exit(2);
+    }
+    if pit0_oneshot && (!pit_bootstrap || !intc2_bootstrap) {
+        eprintln!("PIT0_ONESHOT requires PIT_BOOTSTRAP and INTC2_BOOTSTRAP");
         std::process::exit(2);
     }
     let uart8_tx = args[6..].iter().any(|assignment| assignment == "UART8_TX");
@@ -427,6 +450,15 @@ fn run_binary(args: &[String]) {
     if intc2_bootstrap {
         bus.attach_intc2();
     }
+    if pit0_oneshot {
+        bus.enable_pit0_oneshot();
+    }
+    if let Some(address) = watch_write_address {
+        bus.watch_write(address);
+    }
+    if let Some(pc) = trace_register_pc {
+        bus.trace_registers_at(pc);
+    }
     if loop_detect {
         bus.enable_loop_detection();
     }
@@ -447,6 +479,9 @@ fn run_binary(args: &[String]) {
             || assignment == "SYNTHETIC_MCF_MMIO"
             || assignment == "PIT_BOOTSTRAP"
             || assignment == "INTC2_BOOTSTRAP"
+            || assignment == "PIT0_ONESHOT"
+            || assignment.starts_with("WATCH_WRITE=")
+            || assignment.starts_with("TRACE_REGS=")
             || assignment.starts_with("PIT_TICKS_PER_INSTRUCTION=")
             || assignment == "LOOP_DETECT"
             || assignment.starts_with("INJECT_IRQ=")
@@ -539,6 +574,11 @@ fn run_binary(args: &[String]) {
     if args.len() > 6 {
         println!("initial overrides: {}", args[6..].join(" "));
     }
+    if pit0_oneshot {
+        println!("PIT0 one-shot diagnostic: expose the first unmasked PIT0 request; suppress later PIT0 requests");
+    }
+    bus.print_watched_writes();
+    bus.print_register_trace();
     println!("executed {} instructions", report.instructions);
     println!(
         "runner throughput: {elapsed_seconds:.3}s, {instructions_per_second:.0} instructions/s"
@@ -633,6 +673,7 @@ fn run_binary(args: &[String]) {
     bus.print_access_trace();
     bus.print_loop_reports();
     bus.print_last_control_flow();
+    bus.print_rte_history();
     bus.print_halt_context(report.stop);
     print_stop(report.stop);
     println!(
@@ -793,6 +834,13 @@ struct ProbeBus {
     pit: Option<PitController>,
     intc2: Option<Intc2>,
     uart8: Option<Uart8>,
+    pit0_oneshot: bool,
+    pit0_request_seen: bool,
+    watch_write_address: Option<u32>,
+    watched_write_count: usize,
+    watched_writes: VecDeque<WatchedWrite>,
+    trace_register_pc: Option<u32>,
+    register_trace: VecDeque<RegisterTrace>,
     synthetic_mcf_mmio: bool,
     access_events: Vec<AccessEvent>,
     access_addresses: BTreeSet<u32>,
@@ -808,7 +856,8 @@ struct ProbeBus {
     loop_reported_pcs: BTreeSet<u32>,
     last_tst: Option<TstDiagnostic>,
     last_branch: Option<BranchDiagnostic>,
-    last_rte: Option<RteDiagnostic>,
+    rte_count: usize,
+    rte_history: VecDeque<RteDiagnostic>,
     recent_mmio_accesses: VecDeque<(u32, AccessEvent)>,
 }
 
@@ -821,6 +870,9 @@ const MAX_ACCESS_EVENTS: usize = 256;
 const MAX_ACCESS_ADDRESSES: usize = 128;
 const MAX_LOOP_TRACKED_PCS: usize = 4096;
 const MAX_LOOP_HISTORY: usize = 4096;
+const MAX_RTE_HISTORY: usize = 16;
+const MAX_WATCHED_WRITES: usize = 16;
+const MAX_REGISTER_TRACE: usize = 16;
 const PIT1_PCSR: u32 = 0xFC08_4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -906,6 +958,20 @@ struct RteDiagnostic {
     restored_pc: u32,
 }
 
+struct WatchedWrite {
+    pc: u32,
+    address: u32,
+    width_bits: u8,
+    value: u32,
+}
+
+struct RegisterTrace {
+    pc: u32,
+    d: [u32; 8],
+    a: [u32; 8],
+    sr: u16,
+}
+
 struct BranchDiagnostic {
     pc: u32,
     condition: u8,
@@ -926,6 +992,13 @@ impl ProbeBus {
             pit: None,
             intc2: None,
             uart8: None,
+            pit0_oneshot: false,
+            pit0_request_seen: false,
+            watch_write_address: None,
+            watched_write_count: 0,
+            watched_writes: VecDeque::new(),
+            trace_register_pc: None,
+            register_trace: VecDeque::new(),
             synthetic_mcf_mmio: false,
             access_events: Vec::new(),
             access_addresses: BTreeSet::new(),
@@ -941,13 +1014,44 @@ impl ProbeBus {
             loop_reported_pcs: BTreeSet::new(),
             last_tst: None,
             last_branch: None,
-            last_rte: None,
+            rte_count: 0,
+            rte_history: VecDeque::new(),
             recent_mmio_accesses: VecDeque::new(),
         }
     }
 
     fn enable_loop_detection(&mut self) {
         self.loop_detection = true;
+    }
+
+    fn enable_pit0_oneshot(&mut self) {
+        self.pit0_oneshot = true;
+    }
+
+    fn watch_write(&mut self, address: u32) {
+        self.watch_write_address = Some(address);
+    }
+
+    fn trace_registers_at(&mut self, pc: u32) {
+        self.trace_register_pc = Some(pc);
+    }
+
+    fn record_watched_write(&mut self, address: u32, width: u8, value: u32) {
+        let Some(watched_address) = self.watch_write_address else {
+            return;
+        };
+        if watched_address < address || watched_address - address >= u32::from(width) {
+            return;
+        }
+        self.watched_write_count += 1;
+        if self.watched_writes.len() < MAX_WATCHED_WRITES {
+            self.watched_writes.push_back(WatchedWrite {
+                pc: self.current_pc,
+                address,
+                width_bits: width * 8,
+                value,
+            });
+        }
     }
 
     fn enable_synthetic_mcf_mmio(&mut self) {
@@ -1126,6 +1230,71 @@ impl ProbeBus {
         }
     }
 
+    fn print_rte_history(&self) {
+        if self.rte_count > 0 {
+            println!(
+                "RTE events: {} (showing most recent {})",
+                self.rte_count,
+                self.rte_history.len()
+            );
+            let first_index = self.rte_count - self.rte_history.len() + 1;
+            for (offset, rte) in self.rte_history.iter().enumerate() {
+                println!(
+                    "  RTE #{} at {:#010x}: frame={:#010x} format={} vector={:#05x} restored_SR={:#06x} restored_PC={:#010x}",
+                    first_index + offset,
+                    rte.pc,
+                    rte.frame_sp,
+                    rte.format_vector >> 12,
+                    rte.format_vector & 0x0FFF,
+                    rte.restored_sr,
+                    rte.restored_pc
+                );
+            }
+        }
+    }
+
+    fn print_watched_writes(&self) {
+        let Some(address) = self.watch_write_address else {
+            return;
+        };
+        println!(
+            "write watch at {address:#010x}: {} matching writes (showing first {})",
+            self.watched_write_count,
+            self.watched_writes.len()
+        );
+        for write in &self.watched_writes {
+            println!(
+                "  write{} at PC={:#010x} address={:#010x} value={:#010x}",
+                write.width_bits, write.pc, write.address, write.value
+            );
+        }
+    }
+
+    fn print_register_trace(&self) {
+        let Some(pc) = self.trace_register_pc else {
+            return;
+        };
+        println!(
+            "register trace at PC={pc:#010x}: {} snapshots (showing most recent)",
+            self.register_trace.len()
+        );
+        for trace in &self.register_trace {
+            println!(
+                "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x}",
+                trace.pc,
+                trace.sr,
+                trace.d[0],
+                trace.d[1],
+                trace.d[2],
+                trace.d[3],
+                trace.a[0],
+                trace.a[1],
+                trace.a[2],
+                trace.a[3]
+            );
+        }
+    }
+
     fn print_halt_context(&self, stop: RunStop) {
         let RunStop::Halt { pc } = stop else {
             return;
@@ -1149,17 +1318,6 @@ impl ProbeBus {
                 branch.taken,
                 branch.target,
                 branch.sr
-            );
-        }
-        if let Some(rte) = &self.last_rte {
-            println!(
-                "last RTE at {:#010x}: frame={:#010x} format={} vector={:#05x} restored_SR={:#06x} restored_PC={:#010x}",
-                rte.pc,
-                rte.frame_sp,
-                rte.format_vector >> 12,
-                rte.format_vector & 0x0FFF,
-                rte.restored_sr,
-                rte.restored_pc
             );
         }
         println!(
@@ -1609,6 +1767,21 @@ impl Bus for ProbeBus {
         self.current_pc = pc;
     }
 
+    fn report_instruction_state(&mut self, pc: u32, d: &[u32; 8], a: &[u32; 8], sr: u16) {
+        if self.trace_register_pc != Some(pc) {
+            return;
+        }
+        if self.register_trace.len() == MAX_REGISTER_TRACE {
+            self.register_trace.pop_front();
+        }
+        self.register_trace.push_back(RegisterTrace {
+            pc,
+            d: *d,
+            a: *a,
+            sr,
+        });
+    }
+
     fn begin_instruction_fetch(&mut self) {
         self.instruction_fetch = true;
     }
@@ -1645,7 +1818,11 @@ impl Bus for ProbeBus {
         restored_sr: u16,
         restored_pc: u32,
     ) {
-        self.last_rte = Some(RteDiagnostic {
+        if self.rte_history.len() == MAX_RTE_HISTORY {
+            self.rte_history.pop_front();
+        }
+        self.rte_count += 1;
+        self.rte_history.push_back(RteDiagnostic {
             pc,
             frame_sp,
             format_vector,
@@ -1849,6 +2026,7 @@ impl Bus for ProbeBus {
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         let source = self.source_for_access(address, 1);
         self.write8_inner(address, value)?;
+        self.record_watched_write(address, 1, u32::from(value));
         self.record_loop_access(address, true);
         self.record_access(AccessEvent {
             address,
@@ -1863,6 +2041,7 @@ impl Bus for ProbeBus {
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         let source = self.source_for_access(address, 2);
         self.write16_inner(address, value)?;
+        self.record_watched_write(address, 2, u32::from(value));
         self.record_loop_access(address, true);
         self.record_access(AccessEvent {
             address,
@@ -1877,6 +2056,7 @@ impl Bus for ProbeBus {
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         let source = self.source_for_access(address, 4);
         self.write32_inner(address, value)?;
+        self.record_watched_write(address, 4, value);
         self.record_loop_access(address, true);
         self.record_access(AccessEvent {
             address,
@@ -1894,7 +2074,14 @@ impl Bus for ProbeBus {
             .as_ref()
             .is_some_and(|pit| pit.interrupt_pending(0));
         let pending_sources = if pit0_pending { 1u64 << 13 } else { 0 };
-        self.intc2.as_ref()?.pending_interrupt(pending_sources)
+        let request = self.intc2.as_ref()?.pending_interrupt(pending_sources)?;
+        if request.source == 13 && self.pit0_oneshot {
+            if self.pit0_request_seen {
+                return None;
+            }
+            self.pit0_request_seen = true;
+        }
+        Some(request)
     }
 
     fn advance_instruction(&mut self) {
@@ -2317,6 +2504,65 @@ mod tests {
         assert_eq!(report.cpu.a[7], 0x2000);
         assert_eq!(report.cpu.sr, 0x2000);
         assert_eq!(bus.read16(0xFC08_0000).unwrap() & 0x0004, 0);
+    }
+
+    #[test]
+    fn pit0_oneshot_suppresses_only_repeated_pit0_requests() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x100));
+        bus.attach_pit_bootstrap();
+        bus.attach_intc2();
+        bus.enable_pit0_oneshot();
+        bus.write16(0xFC08_0000, 0x0019).unwrap();
+        bus.write16(0xFC08_0002, 0).unwrap();
+        bus.write8(0xFC05_004D, 1).unwrap();
+        bus.write8(0xFC05_001D, 13).unwrap();
+        bus.advance_instruction();
+
+        assert_eq!(
+            bus.pending_interrupt(),
+            Some(InterruptRequest {
+                source: 13,
+                level: 1,
+                vector: 205,
+            })
+        );
+
+        bus.write16(0xFC08_0002, 0).unwrap();
+        bus.advance_instruction();
+        assert_eq!(bus.pending_interrupt(), None);
+    }
+
+    #[test]
+    fn write_watch_records_first_cpu_write_overlapping_address() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
+        bus.watch_write(0x1002);
+        bus.begin_instruction(0x2000);
+        bus.write32(0x1000, 0xAABB_CCDD).unwrap();
+        bus.begin_instruction(0x2004);
+        bus.write8(0x1002, 0x11).unwrap();
+
+        assert_eq!(bus.watched_write_count, 2);
+        assert_eq!(bus.watched_writes.len(), 2);
+        assert_eq!(bus.watched_writes[0].pc, 0x2000);
+        assert_eq!(bus.watched_writes[0].address, 0x1000);
+        assert_eq!(bus.watched_writes[0].width_bits, 32);
+        assert_eq!(bus.watched_writes[0].value, 0xAABB_CCDD);
+    }
+
+    #[test]
+    fn register_trace_keeps_most_recent_selected_pc_snapshots() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.trace_registers_at(0x1000);
+        let mut data_registers = [0; 8];
+        let address_registers = [0; 8];
+        for value in 0..=MAX_REGISTER_TRACE as u32 {
+            data_registers[0] = value;
+            bus.report_instruction_state(0x1000, &data_registers, &address_registers, 0);
+        }
+
+        assert_eq!(bus.register_trace.len(), MAX_REGISTER_TRACE);
+        assert_eq!(bus.register_trace.front().unwrap().d[0], 1);
+        assert_eq!(bus.register_trace.back().unwrap().d[0], 16);
     }
 
     #[test]

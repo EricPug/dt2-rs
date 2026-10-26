@@ -34,7 +34,14 @@ peripheral reads and drops writes; it does not model hardware reset values or ti
 `INSPECT_TRAP0` prints the live TRAP #0 vector after execution stops.
 `DUMP_RAM=address:length` prints 1-256 bytes from mapped RAM/SRAM after execution;
 it does not read MMIO.
-`PIT_BOOTSTRAP` advances modeled PIT counters one retired instruction at a time;
-it does not reproduce bus-clock timing or deliver INTC interrupts. `UART8_TX`
-captures transmitted UART8 bytes but does not model receive data or serial timing.
-Both are opt-in diagnostic approximations; section-2 direct entry is not an SBF boot.
+`PIT_BOOTSTRAP` advances modeled PIT counters by retired instruction, not bus
+cycles. With `INTC2_BOOTSTRAP`, the observed PIT0 source can naturally reach the
+partial INTC2 model; this remains an approximate timing model. `PIT0_ONESHOT` is
+an intentionally behavior-changing probe that suppresses PIT0 requests after the
+first one, useful for isolating post-interrupt code but not representative of
+normal timer behavior. Runs print a bounded RTE history with restored PCs.
+`WATCH_WRITE=address` reports the first 16 CPU writes overlapping one address,
+and `TRACE_REGS=pc` reports the most recent 16 register snapshots at one PC.
+`UART8_TX` captures transmitted UART8 bytes but does not model receive data or
+serial timing. These are opt-in diagnostic approximations; section-2 direct
+entry is not an SBF boot.
