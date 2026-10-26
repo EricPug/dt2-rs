@@ -2,7 +2,7 @@
 
 ## Observation
 
-The section-2 natural-PIT0 run captured 1,321 bytes on the TX-only UART8 model. The user identified the bitmap rendered from those records as the Elektron logo; this is a user observation, not independent hardware verification. The capture occurs during bootstrap, before the main OS handoff, so it does not establish that UART8 carries the main UI framebuffer.
+The section-2 natural-PIT0 run captured 1,321 bytes on the TX-only UART8 model. In the rendered bitmap, the user identifies the central mark as the Elektron logo and the lower-left mark as a capital “B”; these are visual identifications, not independent hardware verification. The capture occurs during bootstrap, before the main OS handoff, so it does not establish that UART8 carries the main UI framebuffer.
 
 The captured stream is structured as a 40-byte header/handshake, 128 records of 10 bytes each (`tag`, `y-coordinate`, eight payload bytes), and a final `0xB8` terminator. Record tags span `0x10`–`0x17`; y-coordinates run from `0x00` through `0x78` in steps of eight. The diagnostic renderer treats each payload as an 8x8 monochrome tile with bit 7 leftmost. This is a visualization hypothesis, not a proven device protocol.
 
