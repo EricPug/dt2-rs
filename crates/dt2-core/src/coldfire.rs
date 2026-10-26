@@ -451,7 +451,19 @@ impl Cpu {
         let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);
         match op >> 12 {
             0 => {
-                if op & 0x0100 != 0 && mode != 1 {
+                if op & 0xFFF8 == 0x04C0 {
+                    let source = self.d[reg];
+                    let result = source.leading_zeros();
+                    self.d[reg] = result;
+                    let mut flags = 0;
+                    if source & 0x8000_0000 != 0 {
+                        flags |= CCR_N;
+                    }
+                    if source == 0 {
+                        flags |= CCR_Z;
+                    }
+                    self.set_ccr(CCR_N | CCR_Z | CCR_V | CCR_C, flags);
+                } else if op & 0x0100 != 0 && mode != 1 {
                     let bit_register = ((op >> 9) & 7) as usize;
                     let size = if mode == 0 { Size::L } else { Size::B };
                     let bit = self.d[bit_register] & if size == Size::L { 31 } else { 7 };
@@ -545,6 +557,34 @@ impl Cpu {
                     self.a[7] = frame_sp.wrapping_add(4 + u32::from(format));
                     self.sr = restored_sr;
                     self.pc = restored_pc;
+                } else if op & 0xFFC0 == 0x4C00 {
+                    if !matches!(mode, 0 | 2 | 3 | 4 | 5) {
+                        return Err(ill);
+                    }
+                    let extension = self.fetch16(bus)?;
+                    if extension & 0x87FF != 0 {
+                        return Err(CpuError::Illegal {
+                            pc: pc0,
+                            op: extension,
+                        });
+                    }
+                    let destination = ((extension >> 12) & 7) as usize;
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let source = self.read(bus, source, Size::L)?;
+                    let result = if extension & 0x0800 != 0 {
+                        ((source as i32 as i64) * (self.d[destination] as i32 as i64)) as u32
+                    } else {
+                        (u64::from(source) * u64::from(self.d[destination])) as u32
+                    };
+                    self.d[destination] = result;
+                    let mut flags = 0;
+                    if result & 0x8000_0000 != 0 {
+                        flags |= CCR_N;
+                    }
+                    if result == 0 {
+                        flags |= CCR_Z;
+                    }
+                    self.set_ccr(CCR_N | CCR_Z | CCR_V | CCR_C, flags);
                 } else if op & 0xFFC0 == 0x40C0 {
                     let destination = self.ea(bus, mode, reg, Size::W, pc0, op)?;
                     self.write(bus, destination, Size::W, u32::from(self.sr), pc0, op)?;
@@ -1500,6 +1540,62 @@ mod tests {
         run(&mut c, &mut r, 1);
         assert_eq!(c.rambar, 0x8000_0235);
         assert_eq!(c.pc, 0x1004);
+    }
+
+    #[test]
+    fn ff1_long_counts_leading_zeroes_and_sets_documented_flags() {
+        let (mut cpu, mut ram) = machine(&[0x04C1]);
+        cpu.d[1] = 0x0010_0000;
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[1], 11);
+        assert_eq!(cpu.sr, CCR_X);
+        assert_eq!(cpu.pc, 0x1002);
+
+        let (mut cpu, mut ram) = machine(&[0x04C1]);
+        cpu.d[1] = 0;
+        cpu.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[1], 32);
+        assert_eq!(cpu.sr, CCR_X | CCR_Z);
+
+        let (mut cpu, mut ram) = machine(&[0x04C1]);
+        cpu.d[1] = 0x8000_0000;
+        cpu.sr = CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[1], 0);
+        assert_eq!(cpu.sr, CCR_N);
+    }
+
+    #[test]
+    fn long_multiply_signed_and_unsigned_forms_update_result_and_flags() {
+        let (mut cpu, mut ram) = machine(&[0x4C00, 0x2800]);
+        cpu.d[0] = 3;
+        cpu.d[2] = (-7i32) as u32;
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[2], (-21i32) as u32);
+        assert_eq!(cpu.sr, CCR_X | CCR_N);
+        assert_eq!(cpu.pc, 0x1004);
+
+        let (mut cpu, mut ram) = machine(&[0x4C00, 0x2000]);
+        cpu.d[0] = 3;
+        cpu.d[2] = u32::MAX;
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[2], 0xFFFF_FFFD);
+        assert_eq!(cpu.sr, CCR_X | CCR_N);
+        assert_eq!(cpu.pc, 0x1004);
     }
 
     #[test]
