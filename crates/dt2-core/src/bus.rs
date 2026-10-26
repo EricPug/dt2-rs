@@ -42,6 +42,16 @@ pub trait Bus {
 
     fn report_branch(&mut self, _pc: u32, _condition: u8, _taken: bool, _target: u32, _sr: u16) {}
 
+    fn report_rte(
+        &mut self,
+        _pc: u32,
+        _frame_sp: u32,
+        _format_vector: u16,
+        _restored_sr: u16,
+        _restored_pc: u32,
+    ) {
+    }
+
     /// Fast-forward only when the bus can prove a repeated loop is side-effect free.
     fn fast_forward_loop(&mut self, _context: LoopContext<'_>) -> usize {
         0

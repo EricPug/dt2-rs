@@ -808,6 +808,7 @@ struct ProbeBus {
     loop_reported_pcs: BTreeSet<u32>,
     last_tst: Option<TstDiagnostic>,
     last_branch: Option<BranchDiagnostic>,
+    last_rte: Option<RteDiagnostic>,
     recent_mmio_accesses: VecDeque<(u32, AccessEvent)>,
 }
 
@@ -897,6 +898,14 @@ struct TstDiagnostic {
     sr: u16,
 }
 
+struct RteDiagnostic {
+    pc: u32,
+    frame_sp: u32,
+    format_vector: u16,
+    restored_sr: u16,
+    restored_pc: u32,
+}
+
 struct BranchDiagnostic {
     pc: u32,
     condition: u8,
@@ -932,6 +941,7 @@ impl ProbeBus {
             loop_reported_pcs: BTreeSet::new(),
             last_tst: None,
             last_branch: None,
+            last_rte: None,
             recent_mmio_accesses: VecDeque::new(),
         }
     }
@@ -1139,6 +1149,17 @@ impl ProbeBus {
                 branch.taken,
                 branch.target,
                 branch.sr
+            );
+        }
+        if let Some(rte) = &self.last_rte {
+            println!(
+                "last RTE at {:#010x}: frame={:#010x} format={} vector={:#05x} restored_SR={:#06x} restored_PC={:#010x}",
+                rte.pc,
+                rte.frame_sp,
+                rte.format_vector >> 12,
+                rte.format_vector & 0x0FFF,
+                rte.restored_sr,
+                rte.restored_pc
             );
         }
         println!(
@@ -1613,6 +1634,23 @@ impl Bus for ProbeBus {
             taken,
             target,
             sr,
+        });
+    }
+
+    fn report_rte(
+        &mut self,
+        pc: u32,
+        frame_sp: u32,
+        format_vector: u16,
+        restored_sr: u16,
+        restored_pc: u32,
+    ) {
+        self.last_rte = Some(RteDiagnostic {
+            pc,
+            frame_sp,
+            format_vector,
+            restored_sr,
+            restored_pc,
         });
     }
 

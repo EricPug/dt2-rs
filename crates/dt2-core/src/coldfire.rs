@@ -540,6 +540,7 @@ impl Cpu {
                     }
                     let restored_sr = bus.read16(frame_sp.wrapping_add(2))?;
                     let restored_pc = bus.read32(frame_sp.wrapping_add(4))?;
+                    bus.report_rte(pc0, frame_sp, format_vector, restored_sr, restored_pc);
                     self.a[7] = frame_sp.wrapping_add(4 + u32::from(format));
                     self.sr = restored_sr;
                     self.pc = restored_pc;
@@ -934,6 +935,7 @@ impl Cpu {
                     (0xB, 0) => (Size::B, false),
                     (0xB, 1) => (Size::W, false),
                     (_, 2) => (Size::L, false),
+                    (0xB, 6) if mode != 1 => (Size::L, true),
                     (9 | 0xD, 6) => (Size::L, true),
                     (_, 7) => {
                         // ADDA/SUBA/CMPA.L
@@ -955,12 +957,17 @@ impl Cpu {
                 let ev = self.read(bus, o, size)?;
                 let dv = self.d[r];
                 if to_ea {
-                    let res = if nib == 0xD {
+                    let res = if nib == 0xB {
+                        ev ^ dv
+                    } else if nib == 0xD {
                         self.add(ev, dv, size, true)
                     } else {
                         self.sub(ev, dv, size, true)
                     };
                     self.write(bus, o, size, res, pc0, op)?;
+                    if nib == 0xB {
+                        self.flags_move(res, size);
+                    }
                 } else if nib == 0xB {
                     self.sub(dv, ev, size, false);
                 } else {
@@ -1459,6 +1466,20 @@ mod tests {
         assert_eq!(c.d[0], 0x8000_0001);
         assert_eq!(c.sr, CCR_X | CCR_N);
         assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
+    fn eor_long_data_register_to_data_register_updates_flags() {
+        let (mut c, mut r) = machine(&[0xB782]);
+        c.d[2] = 0x8000_0001;
+        c.d[3] = 1;
+        c.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[2], 0x8000_0000);
+        assert_eq!(c.d[3], 1);
+        assert_eq!(c.sr, CCR_X | CCR_N);
     }
 
     #[test]
