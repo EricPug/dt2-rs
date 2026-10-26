@@ -3,7 +3,7 @@
 //! Only a subset of the instruction set is decoded so far; anything else returns
 //! [`CpuError::Illegal`], which at this stage means "not implemented" as much as "illegal".
 
-use crate::bus::{Bus, BusError};
+use crate::bus::{Bus, BusError, LoopContext};
 
 pub const CCR_C: u16 = 0x01;
 pub const CCR_V: u16 = 0x02;
@@ -14,6 +14,7 @@ pub const CCR_X: u16 = 0x10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuError {
     Bus(BusError),
+    Halt { pc: u32 },
     Illegal { pc: u32, op: u16 },
     Privilege { pc: u32, op: u16 },
     UnsupportedExceptionState { pc: u32, op: u16 },
@@ -42,12 +43,31 @@ pub struct CpuSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStop {
     InstructionLimit,
+    Halt { pc: u32 },
     Error(CpuError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptInjection {
+    pub instruction_count: usize,
+    pub level: u8,
+    pub vector: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptDelivery {
+    pub instruction_count: usize,
+    pub source: u8,
+    pub level: u8,
+    pub vector: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunReport {
     pub instructions: usize,
+    pub fast_forwarded_instructions: usize,
+    pub injected_interrupt: Option<InterruptInjection>,
+    pub natural_interrupt: Option<InterruptDelivery>,
     pub cpu: CpuSnapshot,
     pub stop: RunStop,
 }
@@ -102,6 +122,7 @@ pub struct Cpu {
     pub vbr: u32,
     pub cacr: u32,
     pub debug_csr: u32,
+    fast_forwarded_in_step: usize,
 }
 
 impl Cpu {
@@ -110,13 +131,19 @@ impl Cpu {
     }
 
     fn fetch16<B: Bus>(&mut self, bus: &mut B) -> Result<u16, CpuError> {
-        let v = bus.read16(self.pc)?;
+        bus.begin_instruction_fetch();
+        let value = bus.read16(self.pc);
+        bus.end_instruction_fetch();
+        let v = value?;
         self.pc = self.pc.wrapping_add(2);
         Ok(v)
     }
 
     fn fetch32<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
-        let v = bus.read32(self.pc)?;
+        bus.begin_instruction_fetch();
+        let value = bus.read32(self.pc);
+        bus.end_instruction_fetch();
+        let v = value?;
         self.pc = self.pc.wrapping_add(4);
         Ok(v)
     }
@@ -380,15 +407,65 @@ impl Cpu {
         Ok(())
     }
 
+    fn take_interrupt<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        level: u8,
+        vector: u8,
+    ) -> Result<(), CpuError> {
+        if self.sr & 0x2000 == 0 {
+            return Err(CpuError::UnsupportedExceptionState {
+                pc: self.pc,
+                op: 0x4E73,
+            });
+        }
+        let saved_sr = self.sr;
+        let original_sp = self.a[7];
+        let format = 4 + (original_sp & 3);
+        let frame_sp = original_sp.wrapping_sub(4 + format);
+        bus.write16(frame_sp, ((format as u16) << 12) | u16::from(vector))?;
+        bus.write16(frame_sp.wrapping_add(2), saved_sr)?;
+        bus.write32(frame_sp.wrapping_add(4), self.pc)?;
+        self.a[7] = frame_sp;
+        self.sr = (saved_sr & !(0x8000 | 0x0700)) | 0x2000 | (u16::from(level) << 8);
+        self.pc = bus.read32(self.vbr.wrapping_add(u32::from(vector) * 4))?;
+        Ok(())
+    }
+
     /// Execute one instruction.
     pub fn step<B: Bus>(&mut self, bus: &mut B) -> Result<(), CpuError> {
+        self.step_with_loop_budget(bus, None)
+    }
+
+    fn step_with_loop_budget<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        loop_budget: Option<(usize, usize)>,
+    ) -> Result<(), CpuError> {
+        self.fast_forwarded_in_step = 0;
         let pc0 = self.pc;
+        bus.begin_instruction(pc0);
         let op = self.fetch16(bus)?;
         let ill = CpuError::Illegal { pc: pc0, op };
         let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);
         match op >> 12 {
             0 => {
-                if op & 0xFFC0 == 0x08C0 && mode == 0 {
+                if op & 0x0100 != 0 && mode != 1 {
+                    let bit_register = ((op >> 9) & 7) as usize;
+                    let size = if mode == 0 { Size::L } else { Size::B };
+                    let bit = self.d[bit_register] & if size == Size::L { 31 } else { 7 };
+                    let operand = self.ea(bus, mode, reg, size, pc0, op)?;
+                    let value = self.read(bus, operand, size)?;
+                    let mask = 1 << bit;
+                    self.set_ccr(CCR_Z, if value & mask == 0 { CCR_Z } else { 0 });
+                    match op & 0x00C0 {
+                        0x0000 => {}
+                        0x0040 => self.write(bus, operand, size, value ^ mask, pc0, op)?,
+                        0x0080 => self.write(bus, operand, size, value & !mask, pc0, op)?,
+                        0x00C0 => self.write(bus, operand, size, value | mask, pc0, op)?,
+                        _ => unreachable!(),
+                    }
+                } else if op & 0xFFC0 == 0x08C0 && mode == 0 {
                     let bit = (self.fetch16(bus)? & 31) as u32;
                     let mask = 1 << bit;
                     let old = self.d[reg];
@@ -447,7 +524,9 @@ impl Cpu {
                 }
             }
             4 => {
-                if op & 0xFFF0 == 0x4E40 {
+                if op & 0xFFF8 == 0x4480 {
+                    self.d[reg] = self.sub(0, self.d[reg], Size::L, true);
+                } else if op & 0xFFF0 == 0x4E40 {
                     self.take_trap(bus, pc0, op, u32::from(op & 0xF))?;
                 } else if op == 0x4E73 {
                     if self.sr & 0x2000 == 0 {
@@ -471,6 +550,17 @@ impl Cpu {
                     let source = self.ea(bus, mode, reg, Size::B, pc0, op)?;
                     let value = self.read(bus, source, Size::B)?;
                     self.set_ccr(0x1F, value as u16);
+                } else if op & 0xFF00 == 0x4600 && mode == 0 && op & 0x00C0 != 0x00C0 {
+                    let size = match op & 0x00C0 {
+                        0x0000 => Size::B,
+                        0x0040 => Size::W,
+                        0x0080 => Size::L,
+                        _ => return Err(ill),
+                    };
+                    let mask = size.mask();
+                    let result = !self.d[reg] & mask;
+                    self.d[reg] = (self.d[reg] & !mask) | result;
+                    self.flags_move(result, size);
                 } else if op == 0x46FC {
                     if self.sr & 0x2000 == 0 {
                         return Err(CpuError::Privilege { pc: pc0, op });
@@ -499,6 +589,10 @@ impl Cpu {
                     let restored = bus.read32(self.a[7])?;
                     self.a[7] = self.a[7].wrapping_add(4);
                     self.a[reg] = restored;
+                } else if op & 0xFFF8 == 0x4880 {
+                    let value = self.d[reg] as u8 as i8 as i16 as u16;
+                    self.d[reg] = (self.d[reg] & 0xFFFF_0000) | u32::from(value);
+                    self.flags_move(u32::from(value), Size::W);
                 } else if op & 0xFFF8 == 0x48C0 {
                     let value = self.d[reg] as u16 as i16 as i32 as u32;
                     self.d[reg] = value;
@@ -568,6 +662,11 @@ impl Cpu {
                 } else if op & 0xF1C0 == 0x41C0 {
                     let a = self.control_ea(bus, op, pc0)?;
                     self.a[((op >> 9) & 7) as usize] = a;
+                } else if op == 0x4AC8 {
+                    if self.sr & 0x2000 == 0 {
+                        return Err(CpuError::Privilege { pc: pc0, op });
+                    }
+                    return Err(CpuError::Halt { pc: pc0 });
                 } else if op & 0xFF00 == 0x4200 || op & 0xFF00 == 0x4A00 {
                     let size = match (op >> 6) & 3 {
                         0 => Size::B,
@@ -582,6 +681,13 @@ impl Cpu {
                     } else {
                         let v = self.read(bus, o, size)?;
                         self.flags_move(v, size);
+                        let operand = match o {
+                            Operand::Dn(register) => format!("D{register}"),
+                            Operand::An(register) => format!("A{register}"),
+                            Operand::Mem(address) => format!("memory[{address:#010x}]"),
+                            Operand::Imm(value) => format!("immediate[{value:#010x}]"),
+                        };
+                        bus.report_tst(pc0, &operand, v, size.bytes() as u8, self.sr);
                     }
                 } else {
                     return Err(ill);
@@ -633,17 +739,50 @@ impl Cpu {
                     d => d as u8 as i8 as i32 as u32,
                 };
                 if c == 1 {
+                    let target = base.wrapping_add(disp);
                     self.push32(bus, self.pc)?;
-                    self.pc = base.wrapping_add(disp);
-                } else if self.cond(c) {
-                    self.pc = base.wrapping_add(disp);
+                    self.pc = target;
+                    bus.report_branch(pc0, c as u8, true, target, self.sr);
+                    if target <= pc0 {
+                        if let Some((instructions, remaining)) = loop_budget {
+                            self.fast_forwarded_in_step = bus.fast_forward_loop(LoopContext {
+                                from_pc: pc0,
+                                pc: target,
+                                d: &self.d,
+                                a: &self.a,
+                                sr: self.sr,
+                                instructions,
+                                remaining,
+                            });
+                        }
+                    }
+                } else {
+                    let taken = self.cond(c);
+                    let target = base.wrapping_add(disp);
+                    if taken {
+                        self.pc = target;
+                        if target <= pc0 {
+                            if let Some((instructions, remaining)) = loop_budget {
+                                self.fast_forwarded_in_step = bus.fast_forward_loop(LoopContext {
+                                    from_pc: pc0,
+                                    pc: target,
+                                    d: &self.d,
+                                    a: &self.a,
+                                    sr: self.sr,
+                                    instructions,
+                                    remaining,
+                                });
+                            }
+                        }
+                    }
+                    bus.report_branch(pc0, c as u8, taken, target, self.sr);
                 }
             }
             0xE => {
-                // Immediate-count long shifts only: ASR (type 00, right), LSR/LSL (type 01).
+                // Long shifts: ASR (type 00, right), LSR/LSL (type 01).
                 let left = op & 0x0100 != 0;
                 let shift_type = (op >> 3) & 3;
-                let supported = op & 0x00E0 == 0x0080
+                let supported = op & 0x00C0 == 0x0080
                     && match shift_type {
                         0 => !left,
                         1 => true,
@@ -652,16 +791,40 @@ impl Cpu {
                 if !supported {
                     return Err(ill);
                 }
+                let register_count = op & 0x0020 != 0;
                 let encoded_count = ((op >> 9) & 7) as u32;
-                let count = if encoded_count == 0 { 8 } else { encoded_count };
+                let count = if register_count {
+                    self.d[((op >> 9) & 7) as usize] & 0x3F
+                } else if encoded_count == 0 {
+                    8
+                } else {
+                    encoded_count
+                };
                 let original = self.d[reg];
                 let (result, carry) = match (shift_type, left) {
-                    (0, _) => (
+                    (_, _) if count == 0 => (original, false),
+                    (0, _) if count < 32 => (
                         ((original as i32) >> count) as u32,
                         original & (1 << (count - 1)) != 0,
                     ),
-                    (_, false) => (original >> count, original & (1 << (count - 1)) != 0),
-                    (_, true) => (original << count, original & (1 << (32 - count)) != 0),
+                    (0, _) => (
+                        if original & 0x8000_0000 != 0 {
+                            u32::MAX
+                        } else {
+                            0
+                        },
+                        original & 0x8000_0000 != 0,
+                    ),
+                    (_, false) if count < 32 => {
+                        (original >> count, original & (1 << (count - 1)) != 0)
+                    }
+                    (_, false) if count == 32 => (0, original & 0x8000_0000 != 0),
+                    (_, false) => (0, false),
+                    (_, true) if count < 32 => {
+                        (original << count, original & (1 << (32 - count)) != 0)
+                    }
+                    (_, true) if count == 32 => (0, original & 1 != 0),
+                    (_, true) => (0, false),
                 };
                 self.d[reg] = result;
                 let mut flags = 0;
@@ -674,7 +837,10 @@ impl Cpu {
                 if carry {
                     flags |= CCR_C | CCR_X;
                 }
-                self.set_ccr(CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C, flags);
+                self.set_ccr(
+                    CCR_N | CCR_Z | CCR_V | CCR_C | if count == 0 { 0 } else { CCR_X },
+                    flags,
+                );
             }
             0xF => {
                 if op & 0xFFC0 != 0xFBC0 {
@@ -723,15 +889,25 @@ impl Cpu {
                 self.d[((op >> 9) & 7) as usize] = v;
                 self.flags_move(v, Size::L);
             }
-            8 => {
-                if (op >> 6) & 7 != 2 || mode != 0 {
-                    return Err(ill);
+            8 => match (op >> 6) & 7 {
+                2 if mode != 1 => {
+                    let dst = ((op >> 9) & 7) as usize;
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let source_value = self.read(bus, source, Size::L)?;
+                    let result = self.d[dst] | source_value;
+                    self.d[dst] = result;
+                    self.flags_move(result, Size::L);
                 }
-                let dst = ((op >> 9) & 7) as usize;
-                let result = self.d[dst] | self.d[reg];
-                self.d[dst] = result;
-                self.flags_move(result, Size::L);
-            }
+                6 if mode != 1 => {
+                    let src = ((op >> 9) & 7) as usize;
+                    let destination = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let destination_value = self.read(bus, destination, Size::L)?;
+                    let result = destination_value | self.d[src];
+                    self.write(bus, destination, Size::L, result, pc0, op)?;
+                    self.flags_move(result, Size::L);
+                }
+                _ => return Err(ill),
+            },
             0xC => match (op >> 6) & 7 {
                 2 if mode != 1 => {
                     let dst = ((op >> 9) & 7) as usize;
@@ -802,18 +978,77 @@ impl Cpu {
     }
 
     pub fn run<B: Bus>(&mut self, bus: &mut B, instruction_limit: usize) -> RunReport {
+        self.run_with_interrupt(bus, instruction_limit, None)
+    }
+
+    pub fn run_with_interrupt<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        instruction_limit: usize,
+        mut injection: Option<InterruptInjection>,
+    ) -> RunReport {
         let mut instructions = 0;
+        let mut budget_used = 0;
+        let mut fast_forwarded_instructions = 0;
+        let mut injected_interrupt = None;
+        let mut natural_interrupt = None;
         let stop = loop {
-            if instructions == instruction_limit {
+            if budget_used >= instruction_limit {
                 break RunStop::InstructionLimit;
             }
-            match self.step(bus) {
-                Ok(()) => instructions += 1,
+            if let Some(event) = injection {
+                let interrupt_mask = ((self.sr >> 8) & 7) as u8;
+                if budget_used >= event.instruction_count && event.level > interrupt_mask {
+                    match self.take_interrupt(bus, event.level, event.vector) {
+                        Ok(()) => {
+                            injection = None;
+                            injected_interrupt = Some(event);
+                            continue;
+                        }
+                        Err(error) => break RunStop::Error(error),
+                    }
+                }
+            }
+            if let Some(request) = bus.pending_interrupt() {
+                let interrupt_mask = ((self.sr >> 8) & 7) as u8;
+                if request.level > interrupt_mask {
+                    if let Err(error) = self.take_interrupt(bus, request.level, request.vector) {
+                        break RunStop::Error(error);
+                    }
+                    if natural_interrupt.is_none() {
+                        natural_interrupt = Some(InterruptDelivery {
+                            instruction_count: budget_used,
+                            source: request.source,
+                            level: request.level,
+                            vector: request.vector,
+                        });
+                    }
+                    continue;
+                }
+            }
+            let logical_instruction_count = budget_used + 1;
+            let remaining = instruction_limit - logical_instruction_count;
+            match self.step_with_loop_budget(bus, Some((logical_instruction_count, remaining))) {
+                Ok(()) => {
+                    bus.advance_instruction();
+                    instructions += 1;
+                    budget_used += 1;
+                    let skipped = self.fast_forwarded_in_step.min(remaining);
+                    budget_used += skipped;
+                    fast_forwarded_instructions += skipped;
+                }
+                Err(CpuError::Halt { pc }) => {
+                    instructions += 1;
+                    break RunStop::Halt { pc };
+                }
                 Err(error) => break RunStop::Error(error),
             }
         };
         RunReport {
             instructions,
+            fast_forwarded_instructions,
+            injected_interrupt,
+            natural_interrupt,
             cpu: CpuSnapshot {
                 d: self.d,
                 a: self.a,
@@ -935,6 +1170,74 @@ mod tests {
     }
 
     #[test]
+    fn halt_is_a_clean_supervisor_stop() {
+        let (mut c, mut r) = machine(&[0x4AC8]);
+        c.sr = 0x2000;
+
+        let report = c.run(&mut r, 10);
+
+        assert_eq!(report.instructions, 1);
+        assert_eq!(report.cpu.pc, 0x1002);
+        assert_eq!(report.stop, RunStop::Halt { pc: 0x1000 });
+    }
+
+    #[test]
+    fn halt_is_privileged() {
+        let (mut c, mut r) = machine(&[0x4AC8]);
+
+        let report = c.run(&mut r, 10);
+
+        assert_eq!(
+            report.stop,
+            RunStop::Error(CpuError::Privilege {
+                pc: 0x1000,
+                op: 0x4AC8,
+            })
+        );
+    }
+
+    #[test]
+    fn injected_interrupt_enters_vector_and_returns_to_loop() {
+        let (mut cpu, mut ram) = machine(&[0x60FE]);
+        cpu.sr = 0x2000;
+        cpu.vbr = 0x1000;
+        ram.write32(0x1000 + 206 * 4, 0x1100).unwrap();
+        ram.write16(0x1100, 0x4E73).unwrap();
+
+        let injection = InterruptInjection {
+            instruction_count: 0,
+            level: 6,
+            vector: 206,
+        };
+        let report = cpu.run_with_interrupt(&mut ram, 2, Some(injection));
+
+        assert_eq!(report.injected_interrupt, Some(injection));
+        assert_eq!(report.instructions, 2);
+        assert_eq!(report.cpu.pc, 0x1000);
+        assert_eq!(report.cpu.sr, 0x2000);
+        assert_eq!(report.cpu.a[7], 0x2000);
+    }
+
+    #[test]
+    fn injected_interrupt_waits_until_level_exceeds_sr_mask() {
+        let (mut cpu, mut ram) = machine(&[0x60FE]);
+        cpu.sr = 0x2600;
+
+        let report = cpu.run_with_interrupt(
+            &mut ram,
+            1,
+            Some(InterruptInjection {
+                instruction_count: 0,
+                level: 6,
+                vector: 206,
+            }),
+        );
+
+        assert_eq!(report.injected_interrupt, None);
+        assert_eq!(report.cpu.pc, 0x1000);
+    }
+
+    #[test]
     fn run_reports_instruction_limit_and_cpu_state() {
         let (mut c, mut r) = machine(&[0x4E71]);
         let report = c.run(&mut r, 1);
@@ -1016,6 +1319,34 @@ mod tests {
     }
 
     #[test]
+    fn dynamic_bclr_absolute_memory_clears_data_bit_and_updates_zero() {
+        let (mut c, mut r) = machine(&[0x01B9, 0x0000, 0x2014]);
+        c.d[0] = 3;
+        c.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+        r.write8(0x2014, 0xFF).unwrap();
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(r.read8(0x2014).unwrap(), 0xF7);
+        assert_eq!(c.sr, CCR_X | CCR_N | CCR_V | CCR_C);
+        assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
+    fn dynamic_bset_absolute_memory_sets_data_bit_and_zero_flag() {
+        let (mut c, mut r) = machine(&[0x01F9, 0x0000, 0x2014]);
+        c.d[0] = 4;
+        c.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+        r.write8(0x2014, 0).unwrap();
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(r.read8(0x2014).unwrap(), 0x10);
+        assert_eq!(c.sr, CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C);
+        assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
     fn btst_immediate_tests_wrapped_data_register_bit_without_modifying_it() {
         let (mut c, mut r) = machine(&[0x0800, 0x0024]);
         c.d[0] = 0x0000_0010;
@@ -1059,6 +1390,19 @@ mod tests {
     }
 
     #[test]
+    fn neg_long_data_register_sets_negative_carry_and_extend() {
+        let (mut c, mut r) = machine(&[0x4480]);
+        c.d[0] = 1;
+        c.sr = CCR_V;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], u32::MAX);
+        assert_eq!(c.sr, CCR_N | CCR_C | CCR_X);
+        assert_eq!(c.pc, 0x1002);
+    }
+
+    #[test]
     fn and_long_displacement_memory_to_data_register_updates_flags() {
         let (mut c, mut r) = machine(&[0xC2AF, 0x0014]);
         c.d[1] = 0xF00F_F00F;
@@ -1083,6 +1427,37 @@ mod tests {
 
         assert_eq!(r.read32(0x2014).unwrap(), 0x000F_000F);
         assert_eq!(c.sr, CCR_X);
+        assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
+    fn or_long_data_register_to_absolute_memory_updates_flags() {
+        let mut r = FlatRam::new(0x8000_0000, 0x1_0000);
+        r.load(0x8000_1000, &[0x81, 0xB9, 0x80, 0x00, 0x84, 0x04]);
+        let mut c = Cpu::new();
+        c.pc = 0x8000_1000;
+        c.d[0] = 1;
+        c.sr = CCR_X | CCR_V | CCR_C;
+        r.write32(0x8000_8404, 0x8000_0000).unwrap();
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(r.read32(0x8000_8404).unwrap(), 0x8000_0001);
+        assert_eq!(c.sr, CCR_X | CCR_N);
+        assert_eq!(c.pc, 0x8000_1006);
+    }
+
+    #[test]
+    fn or_long_absolute_memory_to_data_register_updates_flags() {
+        let (mut c, mut r) = machine(&[0x80B9, 0x0000, 0x2014]);
+        c.d[0] = 1;
+        c.sr = CCR_X | CCR_V | CCR_C;
+        r.write32(0x2014, 0x8000_0000).unwrap();
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], 0x8000_0001);
+        assert_eq!(c.sr, CCR_X | CCR_N);
         assert_eq!(c.pc, 0x1006);
     }
 
@@ -1136,6 +1511,30 @@ mod tests {
         c.sr = CCR_X | CCR_V | CCR_C;
         run(&mut c, &mut r, 1);
         assert_eq!(c.d[0], 0xFFFF_8001);
+        assert_eq!(c.sr, CCR_X | CCR_N);
+    }
+
+    #[test]
+    fn ext_word_sign_extends_byte_and_preserves_upper_word() {
+        let (mut c, mut r) = machine(&[0x4883]);
+        c.d[3] = 0x1234_0080;
+        c.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[3], 0x1234_FF80);
+        assert_eq!(c.sr, CCR_X | CCR_N);
+    }
+
+    #[test]
+    fn not_long_data_register_inverts_value_and_updates_flags() {
+        let (mut c, mut r) = machine(&[0x4680]);
+        c.d[0] = 0x1234_5678;
+        c.sr = CCR_X | CCR_N | CCR_V | CCR_C;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], 0xEDCB_A987);
         assert_eq!(c.sr, CCR_X | CCR_N);
     }
 
@@ -1619,8 +2018,64 @@ mod tests {
     }
 
     #[test]
+    fn lsl_long_register_count_uses_low_six_bits_of_count_register() {
+        let (mut c, mut r) = machine(&[0xE3A8]);
+        c.d[0] = 1;
+        c.d[1] = 17;
+        c.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], 0x0002_0000);
+        assert_eq!(c.sr & (CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C), 0);
+    }
+
+    #[test]
+    fn lsr_long_register_count_sets_carry_and_extend() {
+        let (mut c, mut r) = machine(&[0xE8A8]);
+        c.d[0] = 0x8000_0001;
+        c.d[4] = 1;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], 0x4000_0000);
+        assert_eq!(
+            c.sr & (CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X),
+            CCR_C | CCR_X
+        );
+    }
+
+    #[test]
+    fn register_shift_count_zero_preserves_extend_and_clears_carry() {
+        let (mut c, mut r) = machine(&[0xE3A8]);
+        c.d[0] = 0x8000_0001;
+        c.d[1] = 0;
+        c.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], 0x8000_0001);
+        assert_eq!(
+            c.sr & (CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C),
+            CCR_X | CCR_N
+        );
+    }
+
+    #[test]
+    fn register_lsl_count_32_reports_last_original_bit() {
+        let (mut c, mut r) = machine(&[0xE3A8]);
+        c.d[0] = 0x8000_0001;
+        c.d[1] = 32;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[0], 0);
+        assert_eq!(c.sr & (CCR_X | CCR_Z | CCR_C), CCR_X | CCR_Z | CCR_C);
+    }
+
+    #[test]
     fn shifts_other_than_immediate_long_asr_lsr_lsl_are_not_decoded() {
-        for op in [0xE180u16, 0xE8A8, 0xE898, 0xE848] {
+        for op in [0xE180u16, 0xE898, 0xE848] {
             let (mut c, mut r) = machine(&[op]);
             assert!(matches!(
                 c.run(&mut r, 1).stop,

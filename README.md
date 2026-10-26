@@ -34,3 +34,7 @@ peripheral reads and drops writes; it does not model hardware reset values or ti
 `INSPECT_TRAP0` prints the live TRAP #0 vector after execution stops.
 `DUMP_RAM=address:length` prints 1-256 bytes from mapped RAM/SRAM after execution;
 it does not read MMIO.
+`PIT_BOOTSTRAP` advances modeled PIT counters one retired instruction at a time;
+it does not reproduce bus-clock timing or deliver INTC interrupts. `UART8_TX`
+captures transmitted UART8 bytes but does not model receive data or serial timing.
+Both are opt-in diagnostic approximations; section-2 direct entry is not an SBF boot.

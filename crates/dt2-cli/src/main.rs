@@ -1,12 +1,16 @@
 use dt2_core::{
-    bus::{Bus, BusError, FlatRam, Mcf5441xSram},
-    coldfire::{Cpu, CpuError, RunStop},
+    bus::{Bus, BusError, FlatRam, InterruptRequest, LoopContext, Mcf5441xSram},
+    coldfire::{Cpu, CpuError, InterruptInjection, RunStop},
     ddr::DdrController,
     dspi::Dspi,
+    intc2::Intc2,
+    pit::PitController,
     spi_nor::W25q128jv,
+    uart::Uart8,
 };
 use dt2_fw::{container, syx};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -18,11 +22,21 @@ fn main() {
         render_pattern(&args[1..]);
         return;
     }
+    if args.first().is_some_and(|arg| arg == "build-flash") {
+        build_flash(&args[1..]);
+        return;
+    }
+    if args.first().is_some_and(|arg| arg == "render-uart-records") {
+        render_uart_records(&args[1..]);
+        return;
+    }
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
+        eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
+        eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
         std::process::exit(2)
     });
     let file = std::fs::read(path).expect("cannot read file");
@@ -58,6 +72,63 @@ fn main() {
             }
         );
     }
+}
+
+const W25Q128_SIZE: usize = 16 * 1024 * 1024;
+const DEFAULT_NOR_CONTAINER_OFFSET: u32 = 0x80000;
+const SYSEX_PREAMBLE_SIZE: usize = 8;
+
+fn build_flash(args: &[String]) {
+    if !(2..=3).contains(&args.len()) {
+        eprintln!("usage: dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
+        std::process::exit(2);
+    }
+    let input = std::fs::read(&args[0]).unwrap_or_else(|error| {
+        eprintln!("cannot read {}: {error}", args[0]);
+        std::process::exit(2)
+    });
+    let sysex = syx::decode(&input).unwrap_or_else(|error| {
+        eprintln!("cannot decode firmware SysEx: {error:?}");
+        std::process::exit(2)
+    });
+    container::parse(&sysex.stream).unwrap_or_else(|error| {
+        eprintln!("cannot parse firmware container: {error:?}");
+        std::process::exit(2)
+    });
+    let offset = args
+        .get(2)
+        .map(|value| parse_address(value))
+        .transpose()
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2)
+        })
+        .unwrap_or(DEFAULT_NOR_CONTAINER_OFFSET);
+    let container_bytes = &sysex.stream[SYSEX_PREAMBLE_SIZE..];
+    let image = nor_image_with_container(container_bytes, offset).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    std::fs::write(&args[1], image).unwrap_or_else(|error| {
+        eprintln!("cannot write {}: {error}", args[1]);
+        std::process::exit(2)
+    });
+    println!(
+        "wrote {}-byte W25Q128JV image with {} container bytes at {offset:#x}",
+        W25Q128_SIZE,
+        container_bytes.len()
+    );
+}
+
+fn nor_image_with_container(container: &[u8], offset: u32) -> Result<Vec<u8>, String> {
+    let start = usize::try_from(offset).map_err(|_| "NOR offset exceeds address space")?;
+    let end = start
+        .checked_add(container.len())
+        .filter(|end| *end <= W25Q128_SIZE)
+        .ok_or_else(|| "firmware container does not fit in W25Q128JV image".to_string())?;
+    let mut image = vec![0xFF; W25Q128_SIZE];
+    image[start..end].copy_from_slice(container);
+    Ok(image)
 }
 
 const PATTERN_WIDTH: usize = 320;
@@ -108,9 +179,113 @@ fn diagnostic_pattern_ppm() -> Vec<u8> {
     image
 }
 
+const UART_RECORD_HEADER_BYTES: usize = 40;
+const UART_RECORD_BYTES: usize = 10;
+const UART_RECORD_COUNT: usize = 128;
+const UART_TILE_SIZE: usize = 8;
+const UART_TILE_COLUMNS: usize = 8;
+const UART_TILE_ROWS: usize = 16;
+const UART_BITMAP_SCALE: usize = 4;
+
+fn render_uart_records(args: &[String]) {
+    if args.len() != 2 {
+        eprintln!("usage: dt2-cli render-uart-records <run.log> <output.ppm>");
+        std::process::exit(2);
+    }
+    let log = std::fs::read_to_string(&args[0]).unwrap_or_else(|error| {
+        eprintln!("cannot read {}: {error}", args[0]);
+        std::process::exit(2)
+    });
+    let bytes = parse_uart_hex_log(&log).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    let image = uart_records_bitmap_ppm(&bytes).unwrap_or_else(|error| {
+        eprintln!("{error}");
+        std::process::exit(2)
+    });
+    std::fs::write(&args[1], image).unwrap_or_else(|error| {
+        eprintln!("cannot write {}: {error}", args[1]);
+        std::process::exit(2)
+    });
+    println!(
+        "rendered {} UART bytes as a {}x{} tiled diagnostic bitmap at {} (bit 7 leftmost)",
+        bytes.len(),
+        UART_TILE_COLUMNS * UART_TILE_SIZE * UART_BITMAP_SCALE,
+        UART_TILE_ROWS * UART_TILE_SIZE * UART_BITMAP_SCALE,
+        args[1]
+    );
+}
+
+fn parse_uart_hex_log(log: &str) -> Result<Vec<u8>, String> {
+    let hex = log
+        .lines()
+        .find_map(|line| line.strip_prefix("UART8 TX hex: "))
+        .ok_or_else(|| "run log has no UART8 TX hex line".to_string())?;
+    hex.split_whitespace()
+        .map(|byte| {
+            u8::from_str_radix(byte, 16)
+                .map_err(|_| format!("invalid UART8 hex byte in run log: {byte}"))
+        })
+        .collect()
+}
+
+fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let expected = UART_RECORD_HEADER_BYTES + UART_RECORD_BYTES * UART_RECORD_COUNT + 1;
+    if bytes.len() != expected {
+        return Err(format!(
+            "UART record stream must be {expected} bytes, got {}",
+            bytes.len()
+        ));
+    }
+    if bytes[expected - 1] != 0xB8 {
+        return Err("UART record stream is missing the 0xB8 terminator".to_string());
+    }
+
+    let width = UART_TILE_COLUMNS * UART_TILE_SIZE;
+    let height = UART_TILE_ROWS * UART_TILE_SIZE;
+    let mut pixels = vec![0u8; width * height * 3];
+    let records = &bytes[UART_RECORD_HEADER_BYTES..expected - 1];
+    for record in records.chunks_exact(UART_RECORD_BYTES) {
+        let tag = record[0];
+        let y = usize::from(record[1]);
+        if !(0x10..=0x17).contains(&tag) || y > 0x78 || y % UART_TILE_SIZE != 0 {
+            return Err(format!(
+                "invalid UART tile record header: tag={tag:#04x} y={y:#04x}"
+            ));
+        }
+        let tile_x = usize::from(tag - 0x10) * UART_TILE_SIZE;
+        for row in 0..UART_TILE_SIZE {
+            let bits = record[2 + row];
+            for column in 0..UART_TILE_SIZE {
+                let color = if bits & (1 << (7 - column)) != 0 {
+                    255
+                } else {
+                    0
+                };
+                let pixel = ((y + row) * width + tile_x + column) * 3;
+                pixels[pixel..pixel + 3].fill(color);
+            }
+        }
+    }
+
+    let scaled_width = width * UART_BITMAP_SCALE;
+    let scaled_height = height * UART_BITMAP_SCALE;
+    let header = format!("P6\n{scaled_width} {scaled_height}\n255\n");
+    let mut image = Vec::with_capacity(header.len() + scaled_width * scaled_height * 3);
+    image.extend_from_slice(header.as_bytes());
+    for y in 0..scaled_height {
+        for x in 0..scaled_width {
+            let source = ((y / UART_BITMAP_SCALE) * width + x / UART_BITMAP_SCALE) * 3;
+            image.extend_from_slice(&pixels[source..source + 3]);
+        }
+    }
+    Ok(image)
+}
+
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -138,13 +313,24 @@ fn run_binary(args: &[String]) {
         eprintln!("invalid instruction limit: {}", args[5]);
         std::process::exit(2)
     });
+    let mcf_sram_overlay = args[6..]
+        .iter()
+        .any(|assignment| assignment == "MCF5441X_SRAM_OVERLAY");
     let bytes = std::fs::read(&args[0]).unwrap_or_else(|error| {
         eprintln!("cannot read {}: {error}", args[0]);
         std::process::exit(2)
     });
-    if !range_fits(ram_base, ram_size, image_address, bytes.len()) {
+    let image_fits_ram = range_fits(ram_base, ram_size, image_address, bytes.len());
+    let image_fits_sram_overlay = mcf_sram_overlay
+        && range_fits(
+            MCF_SRAM_ALIAS_WINDOW.0,
+            0x1_0000,
+            image_address,
+            bytes.len(),
+        );
+    if !image_fits_ram && !image_fits_sram_overlay {
         eprintln!(
-            "image range {image_address:#010x}..+{:#x} does not fit RAM {ram_base:#010x}..+{ram_size:#x}",
+            "image range {image_address:#010x}..+{:#x} does not fit configured memory",
             bytes.len()
         );
         std::process::exit(2);
@@ -156,12 +342,44 @@ fn run_binary(args: &[String]) {
         || args[6..]
             .iter()
             .any(|assignment| assignment == "MCF5441X_SRAM");
-    let mcf_sram_overlay = args[6..]
-        .iter()
-        .any(|assignment| assignment == "MCF5441X_SRAM_OVERLAY");
     let synthetic_mcf_mmio = args[6..]
         .iter()
         .any(|assignment| assignment == "SYNTHETIC_MCF_MMIO");
+    let pit_bootstrap = args[6..]
+        .iter()
+        .any(|assignment| assignment == "PIT_BOOTSTRAP");
+    let intc2_bootstrap = args[6..]
+        .iter()
+        .any(|assignment| assignment == "INTC2_BOOTSTRAP");
+    let loop_detect = args[6..]
+        .iter()
+        .any(|assignment| assignment == "LOOP_DETECT");
+    let interrupt_injection = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("INJECT_IRQ=").map(|spec| {
+            parse_interrupt_injection(spec).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2)
+            })
+        })
+    });
+    let pit_tick_setting = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("PIT_TICKS_PER_INSTRUCTION="));
+    let pit_ticks_per_instruction = match pit_tick_setting {
+        Some(value) => match value.parse::<u32>() {
+            Ok(ticks) if ticks > 0 => ticks,
+            _ => {
+                eprintln!("PIT_TICKS_PER_INSTRUCTION must be a positive integer");
+                std::process::exit(2)
+            }
+        },
+        None => 1,
+    };
+    if pit_tick_setting.is_some() && !pit_bootstrap {
+        eprintln!("PIT_TICKS_PER_INSTRUCTION requires PIT_BOOTSTRAP");
+        std::process::exit(2);
+    }
+    let uart8_tx = args[6..].iter().any(|assignment| assignment == "UART8_TX");
     let inspect_trap0 = args[6..]
         .iter()
         .any(|assignment| assignment == "INSPECT_TRAP0");
@@ -169,13 +387,13 @@ fn run_binary(args: &[String]) {
         eprintln!("SBF_RESET_VECTOR requires MCF5441X_SBF_BOOT");
         std::process::exit(2);
     }
-    if mcf_sram_overlay && mcf_sram_alias {
-        eprintln!(
-            "MCF5441X_SRAM_OVERLAY cannot be combined with MCF5441X_SRAM or MCF5441X_SBF_BOOT"
-        );
+    if mcf_sram_overlay && mcf_sram_alias && !mcf_sbf_boot {
+        eprintln!("MCF5441X_SRAM_OVERLAY cannot be combined with MCF5441X_SRAM");
         std::process::exit(2);
     }
-    let mut bus = if mcf_sram_alias {
+    let mut bus = if mcf_sram_overlay {
+        ProbeBus::new(FlatRam::new(ram_base, ram_size))
+    } else if mcf_sram_alias {
         if ram_base != 0x8000_0000 || ram_size != 0x1_0000 {
             eprintln!("MCF5441X_SRAM requires RAM base 0x80000000 and size 0x10000");
             std::process::exit(2);
@@ -190,10 +408,30 @@ fn run_binary(args: &[String]) {
         ProbeBus::new(FlatRam::new(ram_base, ram_size))
     };
     if mcf_sram_overlay {
-        bus.attach_mcf_sram_overlay();
+        if mcf_sbf_boot {
+            bus.attach_mcf_sram_overlay_with_sbf_alias(true);
+        } else {
+            bus.attach_mcf_sram_overlay();
+        }
     }
     if synthetic_mcf_mmio {
         bus.enable_synthetic_mcf_mmio();
+    }
+    if pit_bootstrap {
+        if pit_ticks_per_instruction == 1 {
+            bus.attach_pit_bootstrap();
+        } else {
+            bus.attach_pit_bootstrap_with_ticks(pit_ticks_per_instruction);
+        }
+    }
+    if intc2_bootstrap {
+        bus.attach_intc2();
+    }
+    if loop_detect {
+        bus.enable_loop_detection();
+    }
+    if uart8_tx {
+        bus.attach_uart8_tx();
     }
     bus.load_ram(image_address, &bytes).unwrap_or_else(|error| {
         eprintln!("{error}");
@@ -207,6 +445,12 @@ fn run_binary(args: &[String]) {
             || assignment == "MCF5441X_SBF_BOOT"
             || assignment == "MCF5441X_SRAM_OVERLAY"
             || assignment == "SYNTHETIC_MCF_MMIO"
+            || assignment == "PIT_BOOTSTRAP"
+            || assignment == "INTC2_BOOTSTRAP"
+            || assignment.starts_with("PIT_TICKS_PER_INSTRUCTION=")
+            || assignment == "LOOP_DETECT"
+            || assignment.starts_with("INJECT_IRQ=")
+            || assignment == "UART8_TX"
             || assignment == "INSPECT_TRAP0"
         {
             continue;
@@ -260,7 +504,14 @@ fn run_binary(args: &[String]) {
             std::process::exit(2)
         });
     }
-    let report = cpu.run(&mut bus, instruction_limit);
+    let run_started = Instant::now();
+    let report = cpu.run_with_interrupt(&mut bus, instruction_limit, interrupt_injection);
+    let elapsed_seconds = run_started.elapsed().as_secs_f64();
+    let instructions_per_second = if elapsed_seconds > 0.0 {
+        report.instructions as f64 / elapsed_seconds
+    } else {
+        0.0
+    };
 
     for (address, length) in ram_dumps {
         match bus.dump_ram(address, length) {
@@ -289,11 +540,82 @@ fn run_binary(args: &[String]) {
         println!("initial overrides: {}", args[6..].join(" "));
     }
     println!("executed {} instructions", report.instructions);
+    println!(
+        "runner throughput: {elapsed_seconds:.3}s, {instructions_per_second:.0} instructions/s"
+    );
+    if report.fast_forwarded_instructions > 0 {
+        println!(
+            "fast-forwarded {} stable-loop instructions",
+            report.fast_forwarded_instructions
+        );
+    }
+    if let Some(injection) = report.injected_interrupt {
+        println!(
+            "synthetic interrupt injected at instruction {}: level {} vector {:#04x}; bypassed INTC source mask and acknowledge",
+            injection.instruction_count, injection.level, injection.vector
+        );
+    }
+    if let Some(interrupt) = report.natural_interrupt {
+        println!(
+            "natural interrupt delivered after instruction {}: source {} level {} vector {:#04x}",
+            interrupt.instruction_count, interrupt.source, interrupt.level, interrupt.vector
+        );
+    }
     if let Some(behavior) = bus.unsupported_device_behavior() {
         println!("device model: unsupported {behavior}");
     }
     if bus.ddr.is_some() {
         println!("DDR model: bootstrap-observed registers only");
+    }
+    if bus.pit.is_some() {
+        println!(
+            "PIT model: {pit_ticks_per_instruction} timer tick(s) per retired instruction;{}approximate timing, no INTC delivery",
+            if pit_ticks_per_instruction > 1 {
+                " accelerated "
+            } else {
+                " "
+            }
+        );
+    }
+    if let Some(pit) = &bus.pit {
+        if let Some((pcsr, pmr, counter)) = pit.timer_state(1) {
+            println!("PIT1 state: PCSR={pcsr:#06x} PMR={pmr:#06x} PCNTR={counter:#06x}");
+        }
+    }
+    if let Some(uart) = &bus.uart8 {
+        println!(
+            "UART8 model: TX-only sink, no RX or serial timing; captured {} bytes",
+            uart.transmitted()
+        );
+        if !uart.captured().is_empty() {
+            let hex = uart
+                .captured()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            println!("UART8 TX hex: {hex}");
+            let text = uart
+                .captured()
+                .iter()
+                .flat_map(|byte| std::ascii::escape_default(*byte))
+                .map(char::from)
+                .collect::<String>();
+            println!("UART8 TX text (escaped): {text}");
+            let tail = &uart.captured()[uart.captured().len().saturating_sub(32)..];
+            let tail_hex = tail
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let tail_text = tail
+                .iter()
+                .flat_map(|byte| std::ascii::escape_default(*byte))
+                .map(char::from)
+                .collect::<String>();
+            println!("UART8 TX tail hex ({} bytes): {tail_hex}", tail.len());
+            println!("UART8 TX tail text (escaped): {tail_text}");
+        }
     }
     if inspect_trap0 {
         let vector_address = trap_vector_address(report.cpu.vbr, 0);
@@ -309,6 +631,9 @@ fn run_binary(args: &[String]) {
         }
     }
     bus.print_access_trace();
+    bus.print_loop_reports();
+    bus.print_last_control_flow();
+    bus.print_halt_context(report.stop);
     print_stop(report.stop);
     println!(
         "PC={:#010x} SR={:#06x} RAMBAR={:#010x} ACR0={:#010x} VBR={:#010x} CACR={:#010x} DEBUG_CSR={:#010x}",
@@ -376,6 +701,37 @@ fn parse_ram_dump_spec(spec: &str) -> Result<(u32, usize), String> {
     Ok((address, length))
 }
 
+fn parse_interrupt_injection(spec: &str) -> Result<InterruptInjection, String> {
+    let mut fields = spec.split(':');
+    let instruction_count = fields
+        .next()
+        .ok_or_else(|| format!("invalid INJECT_IRQ spec: {spec}"))?
+        .parse::<usize>()
+        .map_err(|_| format!("invalid INJECT_IRQ instruction count: {spec}"))?;
+    let level = fields
+        .next()
+        .ok_or_else(|| format!("invalid INJECT_IRQ spec: {spec}"))?
+        .parse::<u8>()
+        .ok()
+        .filter(|level| (1..=7).contains(level))
+        .ok_or_else(|| format!("INJECT_IRQ level must be 1-7: {spec}"))?;
+    let vector = fields
+        .next()
+        .ok_or_else(|| format!("invalid INJECT_IRQ spec: {spec}"))
+        .and_then(parse_address)
+        .and_then(|value| {
+            u8::try_from(value).map_err(|_| format!("INJECT_IRQ vector exceeds 8 bits: {spec}"))
+        })?;
+    if fields.next().is_some() {
+        return Err(format!("invalid INJECT_IRQ spec: {spec}"));
+    }
+    Ok(InterruptInjection {
+        instruction_count,
+        level,
+        vector,
+    })
+}
+
 fn print_ram_dump(address: u32, bytes: &[u8]) {
     println!("RAM dump {address:#010x} ({} bytes):", bytes.len());
     for (line, chunk) in bytes.chunks(16).enumerate() {
@@ -430,13 +786,29 @@ fn parse_register_index(index: &str, register: &str) -> Result<usize, String> {
 struct ProbeBus {
     ram: Box<dyn Bus>,
     sram_overlay: Option<Mcf5441xSram>,
+    sram_overlay_sbf_alias: bool,
     mmio: BTreeMap<u32, u8>,
     dspi0: Option<Dspi>,
     ddr: Option<DdrController>,
+    pit: Option<PitController>,
+    intc2: Option<Intc2>,
+    uart8: Option<Uart8>,
     synthetic_mcf_mmio: bool,
     access_events: Vec<AccessEvent>,
     access_addresses: BTreeSet<u32>,
+    access_summaries: BTreeMap<u32, AccessSummary>,
+    current_pc: u32,
     suppressed_access_events: usize,
+    loop_detection: bool,
+    current_instruction_count: usize,
+    loop_observations: BTreeMap<u32, LoopObservation>,
+    loop_access_history: VecDeque<LoopAccess>,
+    instruction_fetch: bool,
+    loop_reports: Vec<LoopReport>,
+    loop_reported_pcs: BTreeSet<u32>,
+    last_tst: Option<TstDiagnostic>,
+    last_branch: Option<BranchDiagnostic>,
+    recent_mmio_accesses: VecDeque<(u32, AccessEvent)>,
 }
 
 const DSPI0_BASE: u32 = 0xFC05_C000;
@@ -446,6 +818,9 @@ const MCF_PERIPHERAL_WINDOWS: [(u32, u32); 2] =
 const DDR_REGISTER_APERTURE: (u32, u32) = (0xFC0B_8000, 0xFC0B_8200);
 const MAX_ACCESS_EVENTS: usize = 256;
 const MAX_ACCESS_ADDRESSES: usize = 128;
+const MAX_LOOP_TRACKED_PCS: usize = 4096;
+const MAX_LOOP_HISTORY: usize = 4096;
+const PIT1_PCSR: u32 = 0xFC08_4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AccessSource {
@@ -477,19 +852,92 @@ struct AccessEvent {
     source: AccessSource,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AccessSummary {
+    first_pc: u32,
+    reads: u64,
+    writes: u64,
+    last_value: u32,
+    source: AccessSource,
+    unmodeled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct LoopObservation {
+    d: [u32; 8],
+    a: [u32; 8],
+    sr: u16,
+    instruction_count: usize,
+    repeats: u32,
+    stable_repeats: u32,
+}
+
+#[derive(Clone, Copy)]
+struct LoopAccess {
+    instruction_count: usize,
+    address: u32,
+    write: bool,
+}
+
+struct LoopReport {
+    pc: u32,
+    start_pc: u32,
+    end_pc: u32,
+    sr: u16,
+    repeat_period: usize,
+    modified_registers: Vec<String>,
+    read_addresses: Vec<u32>,
+}
+
+struct TstDiagnostic {
+    pc: u32,
+    operand: String,
+    value: u32,
+    size_bytes: u8,
+    sr: u16,
+}
+
+struct BranchDiagnostic {
+    pc: u32,
+    condition: u8,
+    taken: bool,
+    target: u32,
+    sr: u16,
+}
+
 impl ProbeBus {
     fn new(ram: impl Bus + 'static) -> Self {
         Self {
             ram: Box::new(ram),
             sram_overlay: None,
+            sram_overlay_sbf_alias: false,
             mmio: BTreeMap::new(),
             dspi0: None,
             ddr: None,
+            pit: None,
+            intc2: None,
+            uart8: None,
             synthetic_mcf_mmio: false,
             access_events: Vec::new(),
             access_addresses: BTreeSet::new(),
+            access_summaries: BTreeMap::new(),
+            current_pc: 0,
             suppressed_access_events: 0,
+            loop_detection: false,
+            current_instruction_count: 0,
+            loop_observations: BTreeMap::new(),
+            loop_access_history: VecDeque::new(),
+            instruction_fetch: false,
+            loop_reports: Vec::new(),
+            loop_reported_pcs: BTreeSet::new(),
+            last_tst: None,
+            last_branch: None,
+            recent_mmio_accesses: VecDeque::new(),
         }
+    }
+
+    fn enable_loop_detection(&mut self) {
+        self.loop_detection = true;
     }
 
     fn enable_synthetic_mcf_mmio(&mut self) {
@@ -497,13 +945,24 @@ impl ProbeBus {
     }
 
     fn attach_mcf_sram_overlay(&mut self) {
-        self.sram_overlay = Some(Mcf5441xSram::new());
+        self.attach_mcf_sram_overlay_with_sbf_alias(false);
+    }
+
+    fn attach_mcf_sram_overlay_with_sbf_alias(&mut self, sbf_reset_alias: bool) {
+        let sram = Mcf5441xSram::new();
+        self.sram_overlay = Some(if sbf_reset_alias {
+            sram.with_sbf_reset_alias()
+        } else {
+            sram
+        });
+        self.sram_overlay_sbf_alias = sbf_reset_alias;
     }
 
     fn sram_for(&mut self, address: u32) -> Option<&mut Mcf5441xSram> {
-        self.sram_overlay
-            .as_mut()
-            .filter(|_| (MCF_SRAM_ALIAS_WINDOW.0..MCF_SRAM_ALIAS_WINDOW.1).contains(&address))
+        self.sram_overlay.as_mut().filter(|_| {
+            (MCF_SRAM_ALIAS_WINDOW.0..MCF_SRAM_ALIAS_WINDOW.1).contains(&address)
+                || (self.sram_overlay_sbf_alias && address < 0x1_0000)
+        })
     }
 
     fn synthetic_access(&self, address: u32) -> bool {
@@ -515,7 +974,9 @@ impl ProbeBus {
     }
 
     fn source_for_byte(&self, address: u32) -> AccessSource {
-        if self
+        if self.mmio.contains_key(&address) {
+            AccessSource::Seeded
+        } else if self
             .dspi0
             .as_ref()
             .is_some_and(|dspi| dspi.contains(address))
@@ -523,6 +984,18 @@ impl ProbeBus {
                 .ddr
                 .as_ref()
                 .is_some_and(|_| DdrController::contains(address))
+            || self
+                .pit
+                .as_ref()
+                .is_some_and(|_| PitController::contains(address))
+            || self
+                .uart8
+                .as_ref()
+                .is_some_and(|_| Uart8::contains(address))
+            || self
+                .intc2
+                .as_ref()
+                .is_some_and(|_| Intc2::contains(address))
         {
             AccessSource::Modeled
         } else if self.mmio.contains_key(&address) {
@@ -547,17 +1020,48 @@ impl ProbeBus {
     }
 
     fn record_access(&mut self, event: AccessEvent) {
-        if !self.synthetic_mcf_mmio
-            || !MCF_PERIPHERAL_WINDOWS
-                .iter()
-                .any(|&(start, end)| (start..end).contains(&event.address))
+        if !MCF_PERIPHERAL_WINDOWS
+            .iter()
+            .any(|&(start, end)| (start..end).contains(&event.address))
         {
             return;
         }
-        let is_new_address = !self.access_addresses.contains(&event.address);
-        if self.access_events.len() >= MAX_ACCESS_EVENTS
-            || (is_new_address && self.access_addresses.len() >= MAX_ACCESS_ADDRESSES)
+        if !self.access_summaries.contains_key(&event.address)
+            && self.access_summaries.len() >= MAX_ACCESS_ADDRESSES
         {
+            self.suppressed_access_events = self.suppressed_access_events.saturating_add(1);
+            return;
+        }
+        let summary = self
+            .access_summaries
+            .entry(event.address)
+            .or_insert(AccessSummary {
+                first_pc: self.current_pc,
+                reads: 0,
+                writes: 0,
+                last_value: event.value,
+                source: event.source,
+                unmodeled: false,
+            });
+        if event.write {
+            summary.writes = summary.writes.saturating_add(1);
+        } else {
+            summary.reads = summary.reads.saturating_add(1);
+        }
+        summary.last_value = event.value;
+        summary.unmodeled |= matches!(event.source, AccessSource::Synthetic | AccessSource::Mixed);
+        self.recent_mmio_accesses
+            .push_back((self.current_pc, event));
+        if self.recent_mmio_accesses.len() > 32 {
+            self.recent_mmio_accesses.pop_front();
+        }
+
+        if self.access_events.len() >= MAX_ACCESS_EVENTS {
+            self.suppressed_access_events = self.suppressed_access_events.saturating_add(1);
+            return;
+        }
+        let is_new_address = !self.access_addresses.contains(&event.address);
+        if is_new_address && self.access_addresses.len() >= MAX_ACCESS_ADDRESSES {
             self.suppressed_access_events = self.suppressed_access_events.saturating_add(1);
             return;
         }
@@ -565,11 +1069,119 @@ impl ProbeBus {
         self.access_events.push(event);
     }
 
-    fn print_access_trace(&self) {
-        if !self.synthetic_mcf_mmio {
+    fn record_loop_access(&mut self, address: u32, write: bool) {
+        if !self.loop_detection || self.instruction_fetch {
             return;
         }
-        println!("MMIO diagnostic: synthetic responses are approximations, not hardware behavior");
+        self.loop_access_history.push_back(LoopAccess {
+            instruction_count: self.current_instruction_count,
+            address,
+            write,
+        });
+        if self.loop_access_history.len() > MAX_LOOP_HISTORY {
+            self.loop_access_history.pop_front();
+        }
+    }
+
+    fn print_loop_reports(&self) {
+        if !self.loop_detection {
+            return;
+        }
+        println!("loop detection: {} candidate(s)", self.loop_reports.len());
+        for report in &self.loop_reports {
+            let modified = if report.modified_registers.is_empty() {
+                "none observed".to_string()
+            } else {
+                report.modified_registers.join(",")
+            };
+            let reads = if report.read_addresses.is_empty() {
+                "none".to_string()
+            } else {
+                report
+                    .read_addresses
+                    .iter()
+                    .map(|address| format!("{address:#010x}"))
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!(
+                "  loop {:#010x}..{:#010x}, recurring pc={:#010x}, period={} instructions; SR={:#06x} interrupt_mask={}; modified={modified}; reads={reads}",
+                report.start_pc,
+                report.end_pc,
+                report.pc,
+                report.repeat_period,
+                report.sr,
+                (report.sr >> 8) & 7
+            );
+        }
+    }
+
+    fn print_halt_context(&self, stop: RunStop) {
+        let RunStop::Halt { pc } = stop else {
+            return;
+        };
+        println!("HALT context at {pc:#010x}:");
+        if let Some(tst) = &self.last_tst {
+            println!(
+                "  TST at {:#010x}: {} value={:#010x} width={} SR={:#06x}",
+                tst.pc,
+                tst.operand,
+                tst.value,
+                tst.size_bytes * 8,
+                tst.sr
+            );
+        }
+        if let Some(branch) = &self.last_branch {
+            println!(
+                "  branch at {:#010x}: condition={} taken={} target={:#010x} SR={:#06x}",
+                branch.pc,
+                branch_condition_name(branch.condition),
+                branch.taken,
+                branch.target,
+                branch.sr
+            );
+        }
+        println!(
+            "  recent MMIO before HALT ({} accesses):",
+            self.recent_mmio_accesses.len()
+        );
+        let mut summarized = BTreeSet::new();
+        for (pc, event) in &self.recent_mmio_accesses {
+            let operation = if event.write { "write" } else { "read" };
+            println!(
+                "    {operation}{} at PC={pc:#010x} address={:#010x} value={:#010x} [{}]",
+                event.width,
+                event.address,
+                event.value,
+                event.source.label()
+            );
+            summarized.insert(event.address);
+        }
+        for address in summarized {
+            if let Some(summary) = self.access_summaries.get(&address) {
+                println!(
+                    "    summary {address:#010x}: first_pc={:#010x} reads={} writes={} last={:#010x} [{}{}]",
+                    summary.first_pc,
+                    summary.reads,
+                    summary.writes,
+                    summary.last_value,
+                    summary.source.label(),
+                    if summary.unmodeled {
+                        ", synthetic/unmodeled"
+                    } else {
+                        ""
+                    }
+                );
+            }
+        }
+    }
+
+    fn print_access_trace(&self) {
+        if self.synthetic_mcf_mmio {
+            println!(
+                "MMIO diagnostic: synthetic responses are approximations, not hardware behavior"
+            );
+        }
         for event in &self.access_events {
             let operation = if event.write { "write" } else { "read" };
             let arrow = if event.write { "<-" } else { "->" };
@@ -587,17 +1199,68 @@ impl ProbeBus {
             self.access_addresses.len(),
             self.suppressed_access_events
         );
+        println!(
+            "MMIO access summary: {} addresses",
+            self.access_summaries.len()
+        );
+        for (address, summary) in &self.access_summaries {
+            println!(
+                "  {address:#010x}: first_pc={:#010x} reads={} writes={} last={:#010x} [{}{}]",
+                summary.first_pc,
+                summary.reads,
+                summary.writes,
+                summary.last_value,
+                summary.source.label(),
+                if summary.unmodeled {
+                    ", synthetic/unmodeled"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+
+    fn print_last_control_flow(&self) {
+        if let Some(tst) = &self.last_tst {
+            println!(
+                "last TST at {:#010x}: {} value={:#010x} width={} SR={:#06x}",
+                tst.pc,
+                tst.operand,
+                tst.value,
+                tst.size_bytes * 8,
+                tst.sr
+            );
+        }
+        if let Some(branch) = &self.last_branch {
+            println!(
+                "last branch at {:#010x}: condition={} taken={} target={:#010x} SR={:#06x}",
+                branch.pc,
+                branch_condition_name(branch.condition),
+                branch.taken,
+                branch.target,
+                branch.sr
+            );
+        }
     }
 
     fn read8_inner(&mut self, address: u32) -> Result<u8, BusError> {
+        if let Some(value) = self.mmio.get(&address) {
+            return Ok(*value);
+        }
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.read8(address);
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.read8(address);
         }
-        if let Some(value) = self.mmio.get(&address) {
-            return Ok(*value);
+        if let Some(pit) = self.pit_for(address) {
+            return pit.read8(address);
+        }
+        if let Some(uart) = self.uart8_for(address) {
+            return uart.read8(address);
+        }
+        if let Some(intc2) = self.intc2_for(address) {
+            return intc2.read8(address);
         }
         if let Some(sram) = self.sram_for(address) {
             return sram.read8(address);
@@ -618,11 +1281,27 @@ impl ProbeBus {
     }
 
     fn read16_inner(&mut self, address: u32) -> Result<u16, BusError> {
+        if self.mmio.contains_key(&address) || self.mmio.contains_key(&address.wrapping_add(1)) {
+            let bytes = [
+                self.read8_inner(address)?,
+                self.read8_inner(address.wrapping_add(1))?,
+            ];
+            return Ok(u16::from_be_bytes(bytes));
+        }
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.read16(address);
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.read16(address);
+        }
+        if let Some(pit) = self.pit_for(address) {
+            return pit.read16(address);
+        }
+        if let Some(uart) = self.uart8_for(address) {
+            return uart.read16(address);
+        }
+        if let Some(intc2) = self.intc2_for(address) {
+            return intc2.read16(address);
         }
         let bytes = [
             self.read8_inner(address)?,
@@ -632,11 +1311,29 @@ impl ProbeBus {
     }
 
     fn read32_inner(&mut self, address: u32) -> Result<u32, BusError> {
+        if (0..4).any(|offset| self.mmio.contains_key(&address.wrapping_add(offset))) {
+            let bytes = [
+                self.read8_inner(address)?,
+                self.read8_inner(address.wrapping_add(1))?,
+                self.read8_inner(address.wrapping_add(2))?,
+                self.read8_inner(address.wrapping_add(3))?,
+            ];
+            return Ok(u32::from_be_bytes(bytes));
+        }
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.read32(address);
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.read32(address);
+        }
+        if let Some(pit) = self.pit_for(address) {
+            return pit.read32(address);
+        }
+        if let Some(uart) = self.uart8_for(address) {
+            return uart.read32(address);
+        }
+        if let Some(intc2) = self.intc2_for(address) {
+            return intc2.read32(address);
         }
         let bytes = [
             self.read8_inner(address)?,
@@ -653,6 +1350,15 @@ impl ProbeBus {
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.write8(address, value);
+        }
+        if let Some(pit) = self.pit_for(address) {
+            return pit.write8(address, value);
+        }
+        if let Some(uart) = self.uart8_for(address) {
+            return uart.write8(address, value);
+        }
+        if let Some(intc2) = self.intc2_for(address) {
+            return intc2.write8(address, value);
         }
         if let Some(mapped) = self.mmio.get_mut(&address) {
             *mapped = value;
@@ -683,6 +1389,15 @@ impl ProbeBus {
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.write16(address, value);
         }
+        if let Some(pit) = self.pit_for(address) {
+            return pit.write16(address, value);
+        }
+        if let Some(uart) = self.uart8_for(address) {
+            return uart.write16(address, value);
+        }
+        if let Some(intc2) = self.intc2_for(address) {
+            return intc2.write16(address, value);
+        }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write8_inner(address.wrapping_add(offset as u32), byte)?;
         }
@@ -695,6 +1410,15 @@ impl ProbeBus {
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.write32(address, value);
+        }
+        if let Some(pit) = self.pit_for(address) {
+            return pit.write32(address, value);
+        }
+        if let Some(uart) = self.uart8_for(address) {
+            return uart.write32(address, value);
+        }
+        if let Some(intc2) = self.intc2_for(address) {
+            return intc2.write32(address, value);
         }
         for (offset, byte) in value.to_be_bytes().into_iter().enumerate() {
             self.write8_inner(address.wrapping_add(offset as u32), byte)?;
@@ -733,10 +1457,42 @@ impl ProbeBus {
         self.ddr = Some(DdrController::new());
     }
 
+    fn attach_pit_bootstrap(&mut self) {
+        self.attach_pit_bootstrap_with_ticks(1);
+    }
+
+    fn attach_pit_bootstrap_with_ticks(&mut self, ticks_per_instruction: u32) {
+        self.pit = Some(PitController::with_ticks_per_instruction(
+            ticks_per_instruction,
+        ));
+    }
+
+    fn attach_intc2(&mut self) {
+        self.intc2 = Some(Intc2::new());
+    }
+
+    fn attach_uart8_tx(&mut self) {
+        self.uart8 = Some(Uart8::new());
+    }
+
     fn ddr_for(&mut self, address: u32) -> Option<&mut DdrController> {
         self.ddr
             .as_mut()
             .filter(|_| DdrController::contains(address))
+    }
+
+    fn pit_for(&mut self, address: u32) -> Option<&mut PitController> {
+        self.pit
+            .as_mut()
+            .filter(|_| PitController::contains(address))
+    }
+
+    fn intc2_for(&mut self, address: u32) -> Option<&mut Intc2> {
+        self.intc2.as_mut().filter(|_| Intc2::contains(address))
+    }
+
+    fn uart8_for(&mut self, address: u32) -> Option<&mut Uart8> {
+        self.uart8.as_mut().filter(|_| Uart8::contains(address))
     }
 
     fn unsupported_device_behavior(&self) -> Option<String> {
@@ -745,8 +1501,7 @@ impl ProbeBus {
 
     fn load_ram(&mut self, address: u32, bytes: &[u8]) -> Result<(), String> {
         for (offset, byte) in bytes.iter().copied().enumerate() {
-            self.ram
-                .write8(address.wrapping_add(offset as u32), byte)
+            self.write8_inner(address.wrapping_add(offset as u32), byte)
                 .map_err(|error| format!("image load hit unmapped RAM at {:#010x}", error.addr))?;
         }
         Ok(())
@@ -829,10 +1584,181 @@ impl ProbeBus {
 }
 
 impl Bus for ProbeBus {
+    fn begin_instruction(&mut self, pc: u32) {
+        self.current_pc = pc;
+    }
+
+    fn begin_instruction_fetch(&mut self) {
+        self.instruction_fetch = true;
+    }
+
+    fn end_instruction_fetch(&mut self) {
+        self.instruction_fetch = false;
+    }
+
+    fn report_tst(&mut self, pc: u32, operand: &str, value: u32, size_bytes: u8, sr: u16) {
+        self.last_tst = Some(TstDiagnostic {
+            pc,
+            operand: operand.to_string(),
+            value,
+            size_bytes,
+            sr,
+        });
+    }
+
+    fn report_branch(&mut self, pc: u32, condition: u8, taken: bool, target: u32, sr: u16) {
+        self.last_branch = Some(BranchDiagnostic {
+            pc,
+            condition,
+            taken,
+            target,
+            sr,
+        });
+    }
+
+    fn fast_forward_loop(&mut self, context: LoopContext<'_>) -> usize {
+        if !self.loop_detection {
+            return 0;
+        }
+        let LoopContext {
+            from_pc,
+            pc,
+            d,
+            a,
+            sr,
+            instructions: instruction_count,
+            remaining,
+        } = context;
+        self.current_instruction_count = instruction_count;
+        let Some(previous) = self.loop_observations.get(&pc).copied() else {
+            if self.loop_observations.len() < MAX_LOOP_TRACKED_PCS {
+                self.loop_observations.insert(
+                    pc,
+                    LoopObservation {
+                        d: *d,
+                        a: *a,
+                        sr,
+                        instruction_count,
+                        repeats: 0,
+                        stable_repeats: 0,
+                    },
+                );
+            }
+            return 0;
+        };
+        let period = instruction_count.saturating_sub(previous.instruction_count);
+        if period == 0 {
+            return 0;
+        }
+        let same_state = previous.d == *d && previous.a == *a && previous.sr == sr;
+        let stable_repeats = if same_state {
+            previous.stable_repeats.saturating_add(1)
+        } else {
+            0
+        };
+        let repeats = previous.repeats.saturating_add(1);
+        let start_pc = pc;
+        let end_pc = from_pc;
+        let accesses: Vec<_> = self
+            .loop_access_history
+            .iter()
+            .filter(|access| {
+                access.instruction_count >= previous.instruction_count
+                    && access.instruction_count < instruction_count
+            })
+            .copied()
+            .collect();
+        let read_addresses: BTreeSet<_> = accesses
+            .iter()
+            .filter(|access| !access.write)
+            .map(|access| access.address)
+            .collect();
+        let has_pit_read = read_addresses.contains(&PIT1_PCSR);
+        let has_other_peripheral_read = read_addresses.iter().any(|address| {
+            *address != PIT1_PCSR
+                && MCF_PERIPHERAL_WINDOWS
+                    .iter()
+                    .any(|&(start, end)| (start..end).contains(address))
+        });
+        let has_writes = accesses.iter().any(|access| access.write);
+        let mut modified_registers = Vec::new();
+        for index in 0..8 {
+            if previous.d[index] != d[index] {
+                modified_registers.push(format!("D{index}"));
+            }
+            if previous.a[index] != a[index] {
+                modified_registers.push(format!("A{index}"));
+            }
+        }
+        if previous.sr != sr {
+            modified_registers.push("SR".to_string());
+        }
+        if !self.loop_reported_pcs.contains(&pc)
+            && (stable_repeats >= 2 || repeats >= 8)
+            && self.loop_reports.len() < 32
+        {
+            self.loop_reported_pcs.insert(pc);
+            self.loop_reports.push(LoopReport {
+                pc,
+                start_pc,
+                end_pc,
+                sr,
+                repeat_period: period,
+                modified_registers,
+                read_addresses: read_addresses.into_iter().collect(),
+            });
+        }
+        self.loop_observations.insert(
+            pc,
+            LoopObservation {
+                d: *d,
+                a: *a,
+                sr,
+                instruction_count,
+                repeats,
+                stable_repeats,
+            },
+        );
+
+        if !same_state
+            || stable_repeats < 2
+            || period > 64
+            || has_writes
+            || !has_pit_read
+            || has_other_peripheral_read
+        {
+            return 0;
+        }
+        let Some(pit) = self.pit.as_mut() else {
+            return 0;
+        };
+        let Some(ticks_until_pif) = pit.ticks_until_pif(1) else {
+            return 0;
+        };
+        let ticks_per_loop = (period as u64) * u64::from(pit.ticks_per_instruction());
+        if ticks_per_loop == 0 {
+            return 0;
+        }
+        let loops_to_skip =
+            ((ticks_until_pif - 1) / ticks_per_loop).min((remaining / period) as u64);
+        let skipped = (loops_to_skip as usize) * period;
+        if skipped == 0 {
+            return 0;
+        }
+        pit.fast_forward_ticks((skipped as u64) * u64::from(pit.ticks_per_instruction()));
+        self.loop_observations
+            .get_mut(&pc)
+            .unwrap()
+            .instruction_count = instruction_count.saturating_add(skipped);
+        self.current_instruction_count = instruction_count.saturating_add(skipped);
+        skipped
+    }
+
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
+                self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
                     address,
                     width: 8,
@@ -850,6 +1776,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 2);
         match self.read16_inner(address) {
             Ok(value) => {
+                self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
                     address,
                     width: 16,
@@ -867,6 +1794,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 4);
         match self.read32_inner(address) {
             Ok(value) => {
+                self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
                     address,
                     width: 32,
@@ -883,6 +1811,7 @@ impl Bus for ProbeBus {
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         let source = self.source_for_access(address, 1);
         self.write8_inner(address, value)?;
+        self.record_loop_access(address, true);
         self.record_access(AccessEvent {
             address,
             width: 8,
@@ -896,6 +1825,7 @@ impl Bus for ProbeBus {
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         let source = self.source_for_access(address, 2);
         self.write16_inner(address, value)?;
+        self.record_loop_access(address, true);
         self.record_access(AccessEvent {
             address,
             width: 16,
@@ -909,6 +1839,7 @@ impl Bus for ProbeBus {
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         let source = self.source_for_access(address, 4);
         self.write32_inner(address, value)?;
+        self.record_loop_access(address, true);
         self.record_access(AccessEvent {
             address,
             width: 32,
@@ -918,13 +1849,32 @@ impl Bus for ProbeBus {
         });
         Ok(())
     }
+
+    fn pending_interrupt(&mut self) -> Option<InterruptRequest> {
+        let pit0_pending = self
+            .pit
+            .as_ref()
+            .is_some_and(|pit| pit.interrupt_pending(0));
+        let pending_sources = if pit0_pending { 1u64 << 13 } else { 0 };
+        self.intc2.as_ref()?.pending_interrupt(pending_sources)
+    }
+
+    fn advance_instruction(&mut self) {
+        if let Some(pit) = &mut self.pit {
+            pit.advance_instruction();
+        }
+    }
 }
 
 fn print_stop(stop: RunStop) {
     match stop {
         RunStop::InstructionLimit => println!("stop: instruction limit"),
+        RunStop::Halt { pc } => println!("HALT executed at PC={pc:#010x}"),
         RunStop::Error(CpuError::Illegal { pc, op }) => {
             println!("stop: unsupported opcode {op:#06x} at {pc:#010x}");
+        }
+        RunStop::Error(CpuError::Halt { pc }) => {
+            println!("HALT executed at PC={pc:#010x}");
         }
         RunStop::Error(CpuError::Privilege { pc, op }) => {
             println!("stop: privilege violation at {pc:#010x} (opcode {op:#06x})");
@@ -942,9 +1892,43 @@ fn print_stop(stop: RunStop) {
     }
 }
 
+fn branch_condition_name(condition: u8) -> &'static str {
+    match condition & 0xF {
+        0 => "T",
+        1 => "BSR",
+        2 => "HI",
+        3 => "LS",
+        4 => "CC",
+        5 => "CS",
+        6 => "NE",
+        7 => "EQ",
+        8 => "VC",
+        9 => "VS",
+        10 => "PL",
+        11 => "MI",
+        12 => "GE",
+        13 => "LT",
+        14 => "GT",
+        _ => "LE",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dt2_core::uart::UART8_BASE;
+
+    #[test]
+    fn nor_image_places_container_in_erased_flash_and_checks_bounds() {
+        let payload = [0x45, 0x4C, 0x45, 0x33];
+        let image = nor_image_with_container(&payload, 0x20).unwrap();
+
+        assert_eq!(image.len(), W25Q128_SIZE);
+        assert!(image[..0x20].iter().all(|byte| *byte == 0xFF));
+        assert_eq!(&image[0x20..0x24], &payload);
+        assert_eq!(image[0x24], 0xFF);
+        assert!(nor_image_with_container(&payload, (W25Q128_SIZE - 2) as u32).is_err());
+    }
 
     #[test]
     fn diagnostic_pattern_is_a_well_formed_ppm_with_expected_bars() {
@@ -964,6 +1948,47 @@ mod tests {
         let last_gray = (gray_row * PATTERN_WIDTH + PATTERN_WIDTH - 1) * 3;
         assert_eq!(&pixel_data[first_gray..first_gray + 3], &[0, 0, 0]);
         assert_eq!(&pixel_data[last_gray..last_gray + 3], &[255, 255, 255]);
+    }
+
+    #[test]
+    fn uart_records_render_as_tagged_tiles_with_msb_left_pixels() {
+        let mut bytes =
+            vec![0; UART_RECORD_HEADER_BYTES + UART_RECORD_BYTES * UART_RECORD_COUNT + 1];
+        let mut offset = UART_RECORD_HEADER_BYTES;
+        for group in 0..2 {
+            for y in 0..UART_TILE_ROWS {
+                for column in 0..4 {
+                    let tag = 0x10 + group * 4 + column;
+                    bytes[offset] = tag as u8;
+                    bytes[offset + 1] = (y * UART_TILE_SIZE) as u8;
+                    if group == 0 && y == 0 && column == 0 {
+                        bytes[offset + 2] = 0x80;
+                    }
+                    if group == 1 && y == 0 && column == 0 {
+                        bytes[offset + 2] = 0x01;
+                    }
+                    offset += UART_RECORD_BYTES;
+                }
+            }
+        }
+        *bytes.last_mut().unwrap() = 0xB8;
+
+        let image = uart_records_bitmap_ppm(&bytes).unwrap();
+        let header = format!(
+            "P6\n{} {}\n255\n",
+            UART_TILE_COLUMNS * UART_TILE_SIZE * UART_BITMAP_SCALE,
+            UART_TILE_ROWS * UART_TILE_SIZE * UART_BITMAP_SCALE
+        );
+        let pixels = &image[header.len()..];
+        let pixel_at = |x: usize, y: usize| {
+            let offset = (y * UART_TILE_COLUMNS * UART_TILE_SIZE * UART_BITMAP_SCALE + x) * 3;
+            &pixels[offset..offset + 3]
+        };
+
+        assert!(image.starts_with(header.as_bytes()));
+        assert_eq!(pixel_at(0, 0), [255, 255, 255]);
+        assert_eq!(pixel_at(4, 0), [0, 0, 0]);
+        assert_eq!(pixel_at((32 + 7) * UART_BITMAP_SCALE, 0), [255, 255, 255]);
     }
 
     #[test]
@@ -989,6 +2014,21 @@ mod tests {
         assert!(set_register(&mut cpu, "A8=0").is_err());
         assert!(set_register(&mut cpu, "SR=0x10000").is_err());
         assert!(set_register(&mut cpu, "PC=0").is_err());
+    }
+
+    #[test]
+    fn interrupt_injection_spec_validates_count_level_and_vector() {
+        assert_eq!(
+            parse_interrupt_injection("39000000:1:205").unwrap(),
+            InterruptInjection {
+                instruction_count: 39_000_000,
+                level: 1,
+                vector: 205,
+            }
+        );
+        assert!(parse_interrupt_injection("10:0:205").is_err());
+        assert!(parse_interrupt_injection("10:8:205").is_err());
+        assert!(parse_interrupt_injection("10:1:205:extra").is_err());
     }
 
     #[test]
@@ -1107,6 +2147,21 @@ mod tests {
     }
 
     #[test]
+    fn seeded_mmio_overrides_modeled_ddr_status_on_reads() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.attach_ddr_bootstrap();
+        assert_eq!(bus.read32(0xFC0B_806C).unwrap(), 0);
+
+        bus.seed_mmio32("0xFC0B806C=0x00000008").unwrap();
+
+        assert_eq!(bus.read32(0xFC0B_806C).unwrap(), 0x8);
+        assert_eq!(
+            bus.access_events.last().unwrap().source,
+            AccessSource::Seeded
+        );
+    }
+
+    #[test]
     fn synthetic_fallback_keeps_ddr_model_and_unmapped_ddr_offsets_strict() {
         let mut bus = ProbeBus::new(FlatRam::new(0, 16));
         bus.enable_synthetic_mcf_mmio();
@@ -1126,6 +2181,157 @@ mod tests {
     }
 
     #[test]
+    fn pit_bootstrap_model_releases_pif_poll_without_default_synthesis() {
+        let mut synthetic = ProbeBus::new(FlatRam::new(0, 16));
+        synthetic.enable_synthetic_mcf_mmio();
+        synthetic.write16(0xFC08_4000, 0x0033).unwrap();
+        assert_eq!(synthetic.read16(0xFC08_4000).unwrap(), 0);
+
+        let mut modeled = ProbeBus::new(FlatRam::new(0, 16));
+        modeled.enable_synthetic_mcf_mmio();
+        modeled.attach_pit_bootstrap();
+        modeled.write16(0xFC08_4002, 0x0083).unwrap();
+        modeled.write16(0xFC08_4000, 0x0033).unwrap();
+        for _ in 0..=u16::MAX {
+            modeled.advance_instruction();
+        }
+
+        assert_ne!(modeled.read16(0xFC08_4000).unwrap() & 0x0004, 0);
+        assert_eq!(modeled.access_events[0].source, AccessSource::Modeled);
+    }
+
+    #[test]
+    fn uart8_tx_model_sets_txready_and_captures_output_bytes() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.enable_synthetic_mcf_mmio();
+        bus.attach_uart8_tx();
+
+        bus.write8(UART8_BASE + 8, 0x04).unwrap();
+        assert_eq!(bus.read8(UART8_BASE + 4).unwrap() & 0x04, 0x04);
+        bus.write8(UART8_BASE + 0x0C, b'A').unwrap();
+
+        assert_eq!(bus.uart8.as_ref().unwrap().transmitted(), 1);
+        assert_eq!(bus.uart8.as_ref().unwrap().captured(), b"A");
+        assert!(bus
+            .access_events
+            .iter()
+            .all(|event| event.source == AccessSource::Modeled));
+    }
+
+    #[test]
+    fn cpu_retirement_ticks_pit_and_exits_pif_poll() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
+        bus.attach_pit_bootstrap();
+        bus.write16(0xFC08_0000, 0x0013).unwrap();
+        bus.write16(0xFC08_0002, 2).unwrap();
+        bus.load_ram(
+            0x1000,
+            &[0x30, 0x10, 0x08, 0x00, 0x00, 0x02, 0x67, 0x00, 0xFF, 0xF8],
+        )
+        .unwrap();
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x1000;
+        cpu.a[0] = 0xFC08_0000;
+
+        let report = cpu.run(&mut bus, 10);
+
+        assert_eq!(report.cpu.pc, 0x100C);
+        assert_eq!(
+            report.stop,
+            RunStop::Error(CpuError::Illegal { pc: 0x100A, op: 0 })
+        );
+        assert_eq!(bus.read16(0xFC08_0000).unwrap() & 0x0004, 0x0004);
+    }
+
+    #[test]
+    fn natural_pit0_interrupt_uses_intc2_vector_and_returns_with_rte() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
+        bus.attach_pit_bootstrap();
+        bus.attach_intc2();
+        bus.write16(0xFC08_0000, 0x0019).unwrap();
+        bus.write16(0xFC08_0002, 0).unwrap();
+        bus.write8(0xFC05_004D, 1).unwrap();
+        bus.write8(0xFC05_001D, 13).unwrap();
+        bus.write32(0xCD * 4, 0x1100).unwrap();
+        bus.load_ram(0x1000, &[0x4E, 0x71, 0x60, 0xFE]).unwrap();
+        bus.load_ram(
+            0x1100,
+            &[0x33, 0xFC, 0x00, 0x04, 0xFC, 0x08, 0x00, 0x00, 0x4E, 0x73],
+        )
+        .unwrap();
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x1000;
+        cpu.a[7] = 0x2000;
+        cpu.sr = 0x2000;
+
+        let report = cpu.run(&mut bus, 6);
+
+        assert_eq!(
+            report.natural_interrupt,
+            Some(dt2_core::coldfire::InterruptDelivery {
+                instruction_count: 1,
+                source: 13,
+                level: 1,
+                vector: 205,
+            })
+        );
+        assert_eq!(report.cpu.pc, 0x1002);
+        assert_eq!(report.cpu.a[7], 0x2000);
+        assert_eq!(report.cpu.sr, 0x2000);
+        assert_eq!(bus.read16(0xFC08_0000).unwrap() & 0x0004, 0);
+    }
+
+    #[test]
+    fn natural_pit0_interrupt_respects_intc2_source_mask() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
+        bus.attach_pit_bootstrap();
+        bus.attach_intc2();
+        bus.write16(0xFC08_0000, 0x0019).unwrap();
+        bus.write16(0xFC08_0002, 0).unwrap();
+        bus.write8(0xFC05_004D, 1).unwrap();
+        bus.load_ram(0x1000, &[0x4E, 0x71, 0x60, 0xFE]).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x1000;
+        cpu.a[7] = 0x2000;
+        cpu.sr = 0x2000;
+
+        let report = cpu.run(&mut bus, 3);
+
+        assert_eq!(report.natural_interrupt, None);
+        assert_eq!(report.cpu.pc, 0x1002);
+        assert_ne!(bus.read16(0xFC08_0000).unwrap() & 0x0004, 0);
+    }
+
+    #[test]
+    fn loop_detector_fast_forwards_stable_pit_poll() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
+        bus.attach_pit_bootstrap();
+        bus.enable_loop_detection();
+        bus.write16(0xFC08_4000, 0x0013).unwrap();
+        bus.write16(0xFC08_4002, 0x0083).unwrap();
+        bus.load_ram(
+            0x1000,
+            &[
+                0x32, 0x39, 0xFC, 0x08, 0x40, 0x00, 0x74, 0x04, 0xC2, 0x82, 0x4A, 0x41, 0x67, 0xF2,
+                0x4E, 0x71, 0x60, 0xFE,
+            ],
+        )
+        .unwrap();
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x1000;
+
+        let report = cpu.run(&mut bus, 200);
+
+        assert!(report.fast_forwarded_instructions > 0);
+        assert!(report.instructions + report.fast_forwarded_instructions <= 200);
+        assert!(bus
+            .loop_reports
+            .iter()
+            .any(|report| { report.pc == 0x1000 && report.read_addresses == [PIT1_PCSR] }));
+        assert_ne!(bus.read16(0xFC08_4000).unwrap() & 0x0004, 0);
+    }
+
+    #[test]
     fn access_trace_caps_events_and_unique_addresses() {
         let mut bus = ProbeBus::new(FlatRam::new(0, 16));
         bus.enable_synthetic_mcf_mmio();
@@ -1142,6 +2348,23 @@ mod tests {
         assert_eq!(bus.access_addresses.len(), MAX_ACCESS_ADDRESSES);
         assert_eq!(bus.suppressed_access_events, 2);
         assert!(bus.write8(0xE000_0000, 0).is_err());
+    }
+
+    #[test]
+    fn mmio_access_summary_tracks_first_pc_counts_and_synthetic_source() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.enable_synthetic_mcf_mmio();
+        bus.begin_instruction(0x1000);
+        bus.write8(0xFC00_0000, 0x12).unwrap();
+        bus.begin_instruction(0x1004);
+        let last_value = bus.read8(0xFC00_0000).unwrap();
+
+        let summary = bus.access_summaries.get(&0xFC00_0000).unwrap();
+        assert_eq!(summary.first_pc, 0x1000);
+        assert_eq!(summary.reads, 1);
+        assert_eq!(summary.writes, 1);
+        assert_eq!(summary.last_value, u32::from(last_value));
+        assert!(summary.unmodeled);
     }
 
     #[test]
@@ -1194,12 +2417,26 @@ mod tests {
         let mut bus = ProbeBus::new(FlatRam::new(0x4000_0000, 0x0800_0000));
         bus.attach_mcf_sram_overlay();
 
+        bus.load_ram(0x8000_03FC, &[0x4E, 0x71]).unwrap();
         bus.seed_ram32("0x80000000=0x12345678").unwrap();
         bus.write32(0x4000_0000, 0xAABB_CCDD).unwrap();
 
         assert_eq!(bus.read32(0x8001_0000).unwrap(), 0x1234_5678);
+        assert_eq!(bus.read16(0x8000_03FC).unwrap(), 0x4E71);
         assert_eq!(bus.read32(0x4000_0000).unwrap(), 0xAABB_CCDD);
         assert!(bus.seed_ram32("0x90000000=1").is_err());
+    }
+
+    #[test]
+    fn mcf_sram_overlay_can_map_the_sbf_reset_alias() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x4000_0000, 0x0800_0000));
+        bus.attach_mcf_sram_overlay_with_sbf_alias(true);
+        bus.write32(0, 0x8001_0000).unwrap();
+        bus.write32(4, 0x8000_0DE8).unwrap();
+
+        assert_eq!(bus.read32(0x8000_0000).unwrap(), 0x8001_0000);
+        assert_eq!(bus.read32(0x8000_0004).unwrap(), 0x8000_0DE8);
+        assert_eq!(bus.read32(0x4000_0000).unwrap(), 0);
     }
 
     #[test]

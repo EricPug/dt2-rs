@@ -5,6 +5,23 @@ pub struct BusError {
     pub write: bool,
 }
 
+pub struct LoopContext<'a> {
+    pub from_pc: u32,
+    pub pc: u32,
+    pub d: &'a [u32; 8],
+    pub a: &'a [u32; 8],
+    pub sr: u16,
+    pub instructions: usize,
+    pub remaining: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterruptRequest {
+    pub source: u8,
+    pub level: u8,
+    pub vector: u8,
+}
+
 /// Big-endian system bus seen by a CPU core.
 pub trait Bus {
     fn read8(&mut self, addr: u32) -> Result<u8, BusError>;
@@ -13,6 +30,31 @@ pub trait Bus {
     fn write8(&mut self, addr: u32, v: u8) -> Result<(), BusError>;
     fn write16(&mut self, addr: u32, v: u16) -> Result<(), BusError>;
     fn write32(&mut self, addr: u32, v: u32) -> Result<(), BusError>;
+
+    /// Identify the instruction about to access the bus, for diagnostics.
+    fn begin_instruction(&mut self, _pc: u32) {}
+
+    /// Mark reads performed to fetch opcodes or extension words.
+    fn begin_instruction_fetch(&mut self) {}
+    fn end_instruction_fetch(&mut self) {}
+
+    fn report_tst(&mut self, _pc: u32, _operand: &str, _value: u32, _size_bytes: u8, _sr: u16) {}
+
+    fn report_branch(&mut self, _pc: u32, _condition: u8, _taken: bool, _target: u32, _sr: u16) {}
+
+    /// Fast-forward only when the bus can prove a repeated loop is side-effect free.
+    fn fast_forward_loop(&mut self, _context: LoopContext<'_>) -> usize {
+        0
+    }
+
+    /// Return the highest currently eligible peripheral interrupt request.
+    fn pending_interrupt(&mut self) -> Option<InterruptRequest> {
+        None
+    }
+
+    /// Advance deterministic peripherals once for each retired CPU instruction.
+    /// This is not a substitute for instruction-cycle or bus-clock timing.
+    fn advance_instruction(&mut self) {}
 }
 
 /// One flat RAM block, for tests and tools.
