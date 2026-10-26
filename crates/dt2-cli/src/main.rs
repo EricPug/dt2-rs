@@ -33,7 +33,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT0_ONESHOT PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length WATCH_WRITE=address TRACE_REGS=pc D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT0_ONESHOT PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length WATCH_WRITE=address TRACE_REGS=pc TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -373,6 +373,134 @@ fn run_binary(args: &[String]) {
             })
         })
     });
+    let trace_a0_range = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("TRACE_A0_RANGE=").map(|range| {
+            let (start, end) = range.split_once(':').unwrap_or_else(|| {
+                eprintln!("invalid TRACE_A0_RANGE spec: {range}; expected start:end");
+                std::process::exit(2)
+            });
+            let start = parse_address(start).unwrap_or_else(|error| {
+                eprintln!("invalid TRACE_A0_RANGE start: {error}");
+                std::process::exit(2)
+            });
+            let end = parse_address(end).unwrap_or_else(|error| {
+                eprintln!("invalid TRACE_A0_RANGE end: {error}");
+                std::process::exit(2)
+            });
+            if start >= end {
+                eprintln!("TRACE_A0_RANGE start must be less than end");
+                std::process::exit(2)
+            }
+            (start, end)
+        })
+    });
+    let trace_pc_range = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("TRACE_PC_RANGE=").map(|range| {
+            let (start, end) = range.split_once(':').unwrap_or_else(|| {
+                eprintln!("invalid TRACE_PC_RANGE spec: {range}; expected start:end");
+                std::process::exit(2)
+            });
+            let start = parse_address(start).unwrap_or_else(|error| {
+                eprintln!("invalid TRACE_PC_RANGE start: {error}");
+                std::process::exit(2)
+            });
+            let end = parse_address(end).unwrap_or_else(|error| {
+                eprintln!("invalid TRACE_PC_RANGE end: {error}");
+                std::process::exit(2)
+            });
+            if start >= end {
+                eprintln!("TRACE_PC_RANGE start must be less than end");
+                std::process::exit(2)
+            }
+            (start, end)
+        })
+    });
+    let ram_remap = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("RAM_REMAP=").map(|spec| {
+            let mut parts = spec.split(':');
+            let source = parts.next().unwrap_or_default();
+            let destination = parts.next().unwrap_or_default();
+            let length = parts.next().unwrap_or_default();
+            if source.is_empty() || destination.is_empty() || length.is_empty() || parts.next().is_some() {
+                eprintln!("invalid RAM_REMAP spec: {spec}; expected from:to:length");
+                std::process::exit(2)
+            }
+            let source = parse_address(source).unwrap_or_else(|error| {
+                eprintln!("invalid RAM_REMAP source: {error}");
+                std::process::exit(2)
+            });
+            let destination = parse_address(destination).unwrap_or_else(|error| {
+                eprintln!("invalid RAM_REMAP destination: {error}");
+                std::process::exit(2)
+            });
+            let length = parse_address(length).unwrap_or_else(|error| {
+                eprintln!("invalid RAM_REMAP length: {error}");
+                std::process::exit(2)
+            });
+            if length == 0
+                || source.checked_add(length).is_none()
+                || destination.checked_add(length).is_none()
+                || !range_fits(ram_base, ram_size, source, length as usize)
+                || !range_fits(ram_base, ram_size, destination, length as usize)
+            {
+                eprintln!("RAM_REMAP range must be nonempty and fit inside configured RAM");
+                std::process::exit(2)
+            }
+            RamRemap {
+                source,
+                destination,
+                length,
+            }
+        })
+    });
+    let ram_snapshot = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("RAM_SNAPSHOT=").map(|spec| {
+            let values: Vec<_> = spec.split(':').collect();
+            if values.len() != 8 {
+                eprintln!("invalid RAM_SNAPSHOT spec: {spec}; expected watch:src:dst:length:trigger_start:trigger_end:read_start:read_end");
+                std::process::exit(2)
+            }
+            let mut parsed = [0u32; 8];
+            for (index, value) in values.iter().enumerate() {
+                parsed[index] = parse_address(value).unwrap_or_else(|error| {
+                    eprintln!("invalid RAM_SNAPSHOT value: {error}");
+                    std::process::exit(2)
+                });
+            }
+            let [watch, source, destination, length, trigger_pc_start, trigger_pc_end, read_pc_start, read_pc_end] = parsed;
+            let source_end = source.checked_add(length);
+            let destination_end = destination.checked_add(length);
+            if length == 0
+                || trigger_pc_start >= trigger_pc_end
+                || read_pc_start >= read_pc_end
+                || !range_fits(ram_base, ram_size, source, length as usize)
+                || !range_fits(ram_base, ram_size, destination, length as usize)
+                || source_end.is_none()
+                || destination_end.is_none()
+                || watch < source
+                || watch >= source_end.unwrap()
+                || (source < destination_end.unwrap() && destination < source_end.unwrap())
+            {
+                eprintln!("RAM_SNAPSHOT ranges must fit RAM, be disjoint, and contain the watch address");
+                std::process::exit(2)
+            }
+            RamSnapshot {
+                watch,
+                source,
+                destination,
+                length,
+                trigger_pc_start,
+                trigger_pc_end,
+                read_pc_start,
+                read_pc_end,
+                active: false,
+            }
+        })
+    });
+    if ram_snapshot.is_some() && ram_remap.is_some() {
+        eprintln!("RAM_SNAPSHOT cannot be combined with RAM_REMAP");
+        std::process::exit(2);
+    }
     let interrupt_injection = args[6..].iter().find_map(|assignment| {
         assignment.strip_prefix("INJECT_IRQ=").map(|spec| {
             parse_interrupt_injection(spec).unwrap_or_else(|error| {
@@ -459,6 +587,18 @@ fn run_binary(args: &[String]) {
     if let Some(pc) = trace_register_pc {
         bus.trace_registers_at(pc);
     }
+    if let Some(range) = trace_a0_range {
+        bus.trace_first_a0_in_range(range);
+    }
+    if let Some(range) = trace_pc_range {
+        bus.trace_pc_range(range);
+    }
+    if let Some(remap) = ram_remap {
+        bus.set_ram_remap(remap);
+    }
+    if let Some(snapshot) = ram_snapshot {
+        bus.set_ram_snapshot(snapshot);
+    }
     if loop_detect {
         bus.enable_loop_detection();
     }
@@ -482,6 +622,10 @@ fn run_binary(args: &[String]) {
             || assignment == "PIT0_ONESHOT"
             || assignment.starts_with("WATCH_WRITE=")
             || assignment.starts_with("TRACE_REGS=")
+            || assignment.starts_with("TRACE_A0_RANGE=")
+            || assignment.starts_with("TRACE_PC_RANGE=")
+            || assignment.starts_with("RAM_REMAP=")
+            || assignment.starts_with("RAM_SNAPSHOT=")
             || assignment.starts_with("PIT_TICKS_PER_INSTRUCTION=")
             || assignment == "LOOP_DETECT"
             || assignment.starts_with("INJECT_IRQ=")
@@ -573,6 +717,31 @@ fn run_binary(args: &[String]) {
     }
     if args.len() > 6 {
         println!("initial overrides: {}", args[6..].join(" "));
+    }
+    if let Some(remap) = ram_remap {
+        println!(
+            "RAM remap: {:#010x}..{:#010x} -> {:#010x}..{:#010x}",
+            remap.source,
+            remap.source + remap.length,
+            remap.destination,
+            remap.destination + remap.length
+        );
+    }
+    if let Some(snapshot) = ram_snapshot {
+        println!(
+            "RAM snapshot on write {:#010x} at PCs {:#010x}..{:#010x}: {:#010x}..{:#010x} -> {:#010x}; read PCs {:#010x}..{:#010x}",
+            snapshot.watch,
+            snapshot.trigger_pc_start,
+            snapshot.trigger_pc_end,
+            snapshot.source,
+            snapshot.source + snapshot.length,
+            snapshot.destination,
+            snapshot.read_pc_start,
+            snapshot.read_pc_end
+        );
+    }
+    if let Some(snapshot) = &bus.ram_snapshot {
+        println!("RAM snapshot captured: {}", snapshot.active);
     }
     if pit0_oneshot {
         println!("PIT0 one-shot diagnostic: expose the first unmasked PIT0 request; suppress later PIT0 requests");
@@ -826,6 +995,8 @@ fn parse_register_index(index: &str, register: &str) -> Result<usize, String> {
 
 struct ProbeBus {
     ram: Box<dyn Bus>,
+    ram_remap: Option<RamRemap>,
+    ram_snapshot: Option<RamSnapshot>,
     sram_overlay: Option<Mcf5441xSram>,
     sram_overlay_sbf_alias: bool,
     mmio: BTreeMap<u32, u8>,
@@ -841,6 +1012,9 @@ struct ProbeBus {
     watched_writes: VecDeque<WatchedWrite>,
     trace_register_pc: Option<u32>,
     register_trace: VecDeque<RegisterTrace>,
+    trace_a0_range: Option<(u32, u32)>,
+    first_a0_range_trace: Option<RegisterTrace>,
+    trace_pc_range: Option<(u32, u32)>,
     synthetic_mcf_mmio: bool,
     access_events: Vec<AccessEvent>,
     access_addresses: BTreeSet<u32>,
@@ -859,6 +1033,26 @@ struct ProbeBus {
     rte_count: usize,
     rte_history: VecDeque<RteDiagnostic>,
     recent_mmio_accesses: VecDeque<(u32, AccessEvent)>,
+}
+
+#[derive(Clone, Copy)]
+struct RamRemap {
+    source: u32,
+    destination: u32,
+    length: u32,
+}
+
+#[derive(Clone, Copy)]
+struct RamSnapshot {
+    watch: u32,
+    source: u32,
+    destination: u32,
+    length: u32,
+    trigger_pc_start: u32,
+    trigger_pc_end: u32,
+    read_pc_start: u32,
+    read_pc_end: u32,
+    active: bool,
 }
 
 const DSPI0_BASE: u32 = 0xFC05_C000;
@@ -984,6 +1178,8 @@ impl ProbeBus {
     fn new(ram: impl Bus + 'static) -> Self {
         Self {
             ram: Box::new(ram),
+            ram_remap: None,
+            ram_snapshot: None,
             sram_overlay: None,
             sram_overlay_sbf_alias: false,
             mmio: BTreeMap::new(),
@@ -999,6 +1195,9 @@ impl ProbeBus {
             watched_writes: VecDeque::new(),
             trace_register_pc: None,
             register_trace: VecDeque::new(),
+            trace_a0_range: None,
+            first_a0_range_trace: None,
+            trace_pc_range: None,
             synthetic_mcf_mmio: false,
             access_events: Vec::new(),
             access_addresses: BTreeSet::new(),
@@ -1034,6 +1233,69 @@ impl ProbeBus {
 
     fn trace_registers_at(&mut self, pc: u32) {
         self.trace_register_pc = Some(pc);
+    }
+
+    fn trace_first_a0_in_range(&mut self, range: (u32, u32)) {
+        self.trace_a0_range = Some(range);
+    }
+
+    fn trace_pc_range(&mut self, range: (u32, u32)) {
+        self.trace_pc_range = Some(range);
+    }
+
+    fn set_ram_remap(&mut self, remap: RamRemap) {
+        self.ram_remap = Some(remap);
+    }
+
+    fn set_ram_snapshot(&mut self, snapshot: RamSnapshot) {
+        self.ram_snapshot = Some(snapshot);
+    }
+
+    fn snapshot_read_address(&self, address: u32) -> u32 {
+        self.ram_snapshot
+            .filter(|snapshot| {
+                snapshot.active
+                    && (snapshot.read_pc_start..snapshot.read_pc_end).contains(&self.current_pc)
+                    && address >= snapshot.source
+                    && address - snapshot.source < snapshot.length
+            })
+            .map_or(address, |snapshot| {
+                snapshot.destination + (address - snapshot.source)
+            })
+    }
+
+    fn snapshot_source_on_write(
+        &mut self,
+        address: u32,
+        width_bytes: u32,
+    ) -> Result<(), BusError> {
+        let Some(snapshot) = self.ram_snapshot.filter(|snapshot| {
+            !snapshot.active
+                && snapshot.watch >= address
+                && snapshot.watch - address < width_bytes
+                && (snapshot.trigger_pc_start..snapshot.trigger_pc_end)
+                    .contains(&self.current_pc)
+        }) else {
+            return Ok(());
+        };
+        for offset in 0..snapshot.length {
+            let value = self.ram.read8(snapshot.source + offset)?;
+            self.ram.write8(snapshot.destination + offset, value)?;
+        }
+        if let Some(active) = &mut self.ram_snapshot {
+            active.active = true;
+        }
+        Ok(())
+    }
+
+    fn remapped_ram_address(&self, address: u32) -> u32 {
+        self.ram_remap
+            .filter(|remap| {
+                address >= remap.source && address - remap.source < remap.length
+            })
+            .map_or(address, |remap| {
+                remap.destination + (address - remap.source)
+            })
     }
 
     fn record_watched_write(&mut self, address: u32, width: u8, value: u32) {
@@ -1271,16 +1533,30 @@ impl ProbeBus {
     }
 
     fn print_register_trace(&self) {
-        let Some(pc) = self.trace_register_pc else {
-            return;
-        };
-        println!(
-            "register trace at PC={pc:#010x}: {} snapshots (showing most recent)",
-            self.register_trace.len()
-        );
-        for trace in &self.register_trace {
+        if let Some(pc) = self.trace_register_pc {
             println!(
-                "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x}",
+                "register trace at PC={pc:#010x}: {} snapshots (showing most recent)",
+                self.register_trace.len()
+            );
+            for trace in &self.register_trace {
+                println!(
+                    "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x}",
+                    trace.pc,
+                    trace.sr,
+                    trace.d[0],
+                    trace.d[1],
+                    trace.d[2],
+                    trace.d[3],
+                    trace.a[0],
+                    trace.a[1],
+                    trace.a[2],
+                    trace.a[3]
+                );
+            }
+        }
+        if let (Some((start, end)), Some(trace)) = (self.trace_a0_range, &self.first_a0_range_trace) {
+            println!(
+            "first snapshot with A0 in {start:#010x}..{end:#010x}: PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x}",
                 trace.pc,
                 trace.sr,
                 trace.d[0],
@@ -1455,7 +1731,8 @@ impl ProbeBus {
         if self.synthetic_access(address) {
             Ok(0)
         } else {
-            self.ram.read8(address)
+            let address = self.snapshot_read_address(address);
+            self.ram.read8(self.remapped_ram_address(address))
         }
     }
 
@@ -1557,7 +1834,7 @@ impl ProbeBus {
         if self.synthetic_access(address) {
             Ok(())
         } else {
-            self.ram.write8(address, value)
+            self.ram.write8(self.remapped_ram_address(address), value)
         }
     }
 
@@ -1727,7 +2004,8 @@ impl ProbeBus {
         let result = if let Some(sram) = self.sram_for(address) {
             sram.write32(address, value)
         } else {
-            self.ram.write32(address, value)
+            self.ram
+                .write32(self.remapped_ram_address(address), value)
         };
         result.map_err(|error| format!("RAM seed outside mapped memory at {:#010x}", error.addr))
     }
@@ -1739,7 +2017,7 @@ impl ProbeBus {
                 if let Some(sram) = self.sram_for(current) {
                     sram.read8(current)
                 } else {
-                    self.ram.read8(current)
+                    self.ram.read8(self.remapped_ram_address(current))
                 }
             })
             .collect()
@@ -1768,6 +2046,22 @@ impl Bus for ProbeBus {
     }
 
     fn report_instruction_state(&mut self, pc: u32, d: &[u32; 8], a: &[u32; 8], sr: u16) {
+        let trace_pc_matches = self
+            .trace_pc_range
+            .is_none_or(|(start, end)| (start..end).contains(&pc));
+        if trace_pc_matches
+            && self.first_a0_range_trace.is_none()
+            && self
+                .trace_a0_range
+                .is_some_and(|(start, end)| (start..end).contains(&a[0]))
+        {
+            self.first_a0_range_trace = Some(RegisterTrace {
+                pc,
+                d: *d,
+                a: *a,
+                sr,
+            });
+        }
         if self.trace_register_pc != Some(pc) {
             return;
         }
@@ -2026,6 +2320,7 @@ impl Bus for ProbeBus {
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         let source = self.source_for_access(address, 1);
         self.write8_inner(address, value)?;
+        self.snapshot_source_on_write(address, 1)?;
         self.record_watched_write(address, 1, u32::from(value));
         self.record_loop_access(address, true);
         self.record_access(AccessEvent {
@@ -2041,6 +2336,7 @@ impl Bus for ProbeBus {
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         let source = self.source_for_access(address, 2);
         self.write16_inner(address, value)?;
+        self.snapshot_source_on_write(address, 2)?;
         self.record_watched_write(address, 2, u32::from(value));
         self.record_loop_access(address, true);
         self.record_access(AccessEvent {
@@ -2056,6 +2352,7 @@ impl Bus for ProbeBus {
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         let source = self.source_for_access(address, 4);
         self.write32_inner(address, value)?;
+        self.snapshot_source_on_write(address, 4)?;
         self.record_watched_write(address, 4, value);
         self.record_loop_access(address, true);
         self.record_access(AccessEvent {
@@ -2563,6 +2860,77 @@ mod tests {
         assert_eq!(bus.register_trace.len(), MAX_REGISTER_TRACE);
         assert_eq!(bus.register_trace.front().unwrap().d[0], 1);
         assert_eq!(bus.register_trace.back().unwrap().d[0], 16);
+    }
+
+    #[test]
+    fn register_trace_captures_first_a0_threshold_crossing() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.trace_registers_at(0x1000);
+        bus.trace_first_a0_in_range((0x2000, 0x2002));
+        let data_registers = [0xAABB_CCDD; 8];
+        let mut address_registers = [0; 8];
+        bus.trace_pc_range((0x1000, 0x1001));
+        bus.report_instruction_state(0x1001, &data_registers, &address_registers, 0x2020);
+        address_registers[0] = 0x1FFF;
+        bus.report_instruction_state(0x1000, &data_registers, &address_registers, 0x2000);
+        address_registers[0] = 0x2000;
+        bus.report_instruction_state(0x1000, &data_registers, &address_registers, 0x2010);
+        address_registers[0] = 0x2001;
+        bus.report_instruction_state(0x1000, &data_registers, &address_registers, 0x2011);
+
+        let crossing = bus.first_a0_range_trace.as_ref().unwrap();
+        assert_eq!(crossing.a[0], 0x2000);
+        assert_eq!(crossing.sr, 0x2010);
+        assert_eq!(crossing.d[0], 0xAABB_CCDD);
+    }
+
+    #[test]
+    fn ram_remap_aliases_only_the_configured_window() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x4000_0000, 0x0800_0000));
+        bus.set_ram_remap(RamRemap {
+            source: 0x4020_0000,
+            destination: 0x4400_0000,
+            length: 0x0020_0000,
+        });
+        bus.write32(0x4020_0010, 0xAABB_CCDD).unwrap();
+        bus.write32(0x403F_FFFC, 0x1234_5678).unwrap();
+
+        assert_eq!(bus.read32(0x4400_0010).unwrap(), 0xAABB_CCDD);
+        assert_eq!(bus.read32(0x403F_FFFC).unwrap(), 0x1234_5678);
+        assert_eq!(bus.dump_ram(0x4020_0010, 4).unwrap(), [0xAA, 0xBB, 0xCC, 0xDD]);
+        assert_eq!(bus.read32(0x4020_0000).unwrap(), 0);
+        assert_eq!(bus.read32(0x4040_0000).unwrap(), 0);
+    }
+
+    #[test]
+    fn ram_snapshot_remaps_decoder_reads_after_final_source_write() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x4000_0000, 0x0800_0000));
+        bus.set_ram_snapshot(RamSnapshot {
+            watch: 0x4020_000F,
+            source: 0x4020_0000,
+            destination: 0x4400_0000,
+            length: 16,
+            trigger_pc_start: 0x8000_4980,
+            trigger_pc_end: 0x8000_4984,
+            read_pc_start: 0x8000_5800,
+            read_pc_end: 0x8000_5880,
+            active: false,
+        });
+        for offset in 0..16 {
+            bus.begin_instruction(0x8000_4982);
+            bus.write8(0x4020_0000 + offset, offset as u8 + 1)
+                .unwrap();
+        }
+
+        bus.begin_instruction(0x8000_5800);
+        assert_eq!(bus.read8(0x4020_0000).unwrap(), 1);
+        bus.begin_instruction(0x8000_5800);
+        bus.write8(0x4020_0000, 0xFF).unwrap();
+
+        assert_eq!(bus.dump_ram(0x4020_0000, 1).unwrap(), [0xFF]);
+        assert_eq!(bus.dump_ram(0x4400_0000, 16).unwrap(), (1..=16).collect::<Vec<_>>());
+        bus.begin_instruction(0x8000_5890);
+        assert_eq!(bus.read8(0x4020_0000).unwrap(), 0xFF);
     }
 
     #[test]

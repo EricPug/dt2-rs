@@ -42,6 +42,12 @@ first one, useful for isolating post-interrupt code but not representative of
 normal timer behavior. Runs print a bounded RTE history with restored PCs.
 `WATCH_WRITE=address` reports the first 16 CPU writes overlapping one address,
 and `TRACE_REGS=pc` reports the most recent 16 register snapshots at one PC.
+`RAM_REMAP=from:to:length` aliases one bounded DDR window for a diagnostic run.
+`RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end`
+copies the input window when the watched write occurs in the trigger PC range and
+redirects reads from the source window only in the selected decoder PC range;
+writes remain at their original addresses. This deliberately changes memory
+aliasing to test source/output overlap and is not a hardware memory model.
 `UART8_TX` captures transmitted UART8 bytes but does not model receive data or
 serial timing. These are opt-in diagnostic approximations; section-2 direct
 entry is not an SBF boot.
