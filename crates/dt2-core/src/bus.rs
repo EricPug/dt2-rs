@@ -42,6 +42,9 @@ pub trait Bus {
     /// Observe CPU registers at a guest instruction boundary for diagnostics.
     fn report_instruction_state(&mut self, _pc: u32, _d: &[u32; 8], _a: &[u32; 8], _sr: u16) {}
 
+    /// Update the MCF5441x RGPIO base-address control register.
+    fn set_rgpiobar(&mut self, _value: u32) {}
+
     /// Mark reads performed to fetch opcodes or extension words.
     fn begin_instruction_fetch(&mut self) {}
     fn end_instruction_fetch(&mut self) {}

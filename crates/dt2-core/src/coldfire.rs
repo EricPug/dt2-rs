@@ -10,6 +10,7 @@ pub const CCR_V: u16 = 0x02;
 pub const CCR_Z: u16 = 0x04;
 pub const CCR_N: u16 = 0x08;
 pub const CCR_X: u16 = 0x10;
+pub const RGPIOBAR_RESET: u32 = 0x8C00_0034;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CpuError {
@@ -37,6 +38,7 @@ pub struct CpuSnapshot {
     pub acr0: u32,
     pub vbr: u32,
     pub cacr: u32,
+    pub rgpiobar: u32,
     pub debug_csr: u32,
 }
 
@@ -112,7 +114,7 @@ enum Operand {
     Imm(u32),
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Cpu {
     pub d: [u32; 8],
     pub a: [u32; 8],
@@ -122,8 +124,27 @@ pub struct Cpu {
     pub acr0: u32,
     pub vbr: u32,
     pub cacr: u32,
+    pub rgpiobar: u32,
     pub debug_csr: u32,
     fast_forwarded_in_step: usize,
+}
+
+impl Default for Cpu {
+    fn default() -> Self {
+        Self {
+            d: [0; 8],
+            a: [0; 8],
+            pc: 0,
+            sr: 0,
+            rambar: 0,
+            acr0: 0,
+            vbr: 0,
+            cacr: 0,
+            rgpiobar: RGPIOBAR_RESET,
+            debug_csr: 0,
+            fast_forwarded_in_step: 0,
+        }
+    }
 }
 
 impl Cpu {
@@ -498,6 +519,9 @@ impl Cpu {
                 } else if op & 0xFFF8 == 0x0680 {
                     let immediate = self.fetch32(bus)?;
                     self.d[reg] = self.add(self.d[reg], immediate, Size::L, false);
+                } else if op & 0xFFF8 == 0x0480 {
+                    let immediate = self.fetch32(bus)?;
+                    self.d[reg] = self.sub(self.d[reg], immediate, Size::L, true);
                 } else if op & 0xFFF8 == 0x0C80 {
                     let immediate = self.fetch32(bus)?;
                     self.sub(self.d[reg], immediate, Size::L, false);
@@ -689,6 +713,10 @@ impl Cpu {
                         0x0004 => self.acr0 = value,
                         0x0801 => self.vbr = value,
                         0x0C05 => self.rambar = value,
+                        0x0009 => {
+                            self.rgpiobar = RGPIOBAR_RESET | (value & 3);
+                            bus.set_rgpiobar(self.rgpiobar);
+                        }
                         _ => return Err(CpuError::Illegal { pc: pc0, op: ext }),
                     }
                 } else if op == 0x4E71 {
@@ -1110,6 +1138,7 @@ impl Cpu {
                 acr0: self.acr0,
                 vbr: self.vbr,
                 cacr: self.cacr,
+                rgpiobar: self.rgpiobar,
                 debug_csr: self.debug_csr,
             },
             stop,
@@ -1455,6 +1484,19 @@ mod tests {
     }
 
     #[test]
+    fn subi_long_immediate_updates_destination_and_extend_flags() {
+        let (mut cpu, mut ram) = machine(&[0x0481, 0x0000, 0x0001]);
+        cpu.d[1] = 0;
+        cpu.sr = CCR_V;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[1], u32::MAX);
+        assert_eq!(cpu.sr, CCR_N | CCR_C | CCR_X);
+        assert_eq!(cpu.pc, 0x1006);
+    }
+
+    #[test]
     fn and_long_displacement_memory_to_data_register_updates_flags() {
         let (mut c, mut r) = machine(&[0xC2AF, 0x0014]);
         c.d[1] = 0xF00F_F00F;
@@ -1543,6 +1585,18 @@ mod tests {
         c.d[0] = 0x8000_0235;
         run(&mut c, &mut r, 1);
         assert_eq!(c.rambar, 0x8000_0235);
+        assert_eq!(c.pc, 0x1004);
+    }
+
+    #[test]
+    fn movec_data_register_to_rgpiobar_keeps_fixed_base_and_access_bits() {
+        let (mut c, mut r) = machine(&[0x4E7B, 0x0009]);
+        c.d[0] = 0x8C00_0035;
+        c.sr = 0x2000;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.rgpiobar, RGPIOBAR_RESET | 1);
         assert_eq!(c.pc, 0x1004);
     }
 

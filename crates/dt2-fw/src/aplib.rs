@@ -13,6 +13,13 @@ pub enum AplibError {
     BadStream,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub struct DepackTrace {
+    pub output: Vec<u8>,
+    pub used: usize,
+    pub checkpoints: Vec<(usize, usize)>,
+}
+
 /// A raw offset field equal to this is the end marker; anything else has it subtracted.
 const OFFSET_BIAS: u32 = 767;
 /// Gamma value that means "repeat the last offset".
@@ -59,16 +66,36 @@ impl Bits<'_> {
 
 /// Unpack a bare stream. Returns the output and the number of input bytes used.
 pub fn depack(src: &[u8]) -> Result<(Vec<u8>, usize), AplibError> {
+    let trace = depack_with_checkpoints(src, &[])?;
+    Ok((trace.output, trace.used))
+}
+
+/// Unpack a bare stream and record the input byte cursor at requested output lengths.
+/// Checkpoints are output lengths, not zero-based byte offsets.
+pub fn depack_with_checkpoints(
+    src: &[u8],
+    checkpoints: &[usize],
+) -> Result<DepackTrace, AplibError> {
     let mut r = Bits {
         src,
         pos: 0,
         tag: 0,
     };
     let mut out = Vec::with_capacity(src.len() * 3);
+    let mut traces = Vec::new();
+    let mut next_checkpoint = 0;
+    while checkpoints.get(next_checkpoint) == Some(&0) {
+        traces.push((0, r.pos));
+        next_checkpoint += 1;
+    }
     let mut last_off = 1u32;
     loop {
         if r.bit()? == 1 {
             out.push(r.byte()?);
+            while checkpoints.get(next_checkpoint) == Some(&out.len()) {
+                traces.push((out.len(), r.pos));
+                next_checkpoint += 1;
+            }
             continue;
         }
         let g = r.gamma()?;
@@ -77,7 +104,11 @@ pub fn depack(src: &[u8]) -> Result<(Vec<u8>, usize), AplibError> {
         } else {
             let raw = (g << 8).wrapping_add(r.byte()? as u32);
             if raw == OFFSET_BIAS {
-                return Ok((out, r.pos));
+                return Ok(DepackTrace {
+                    output: out,
+                    used: r.pos,
+                    checkpoints: traces,
+                });
             }
             last_off = raw.wrapping_sub(OFFSET_BIAS);
             last_off
@@ -93,6 +124,10 @@ pub fn depack(src: &[u8]) -> Result<(Vec<u8>, usize), AplibError> {
         }
         for _ in 0..=len {
             out.push(out[out.len() - off]);
+            while checkpoints.get(next_checkpoint) == Some(&out.len()) {
+                traces.push((out.len(), r.pos));
+                next_checkpoint += 1;
+            }
         }
     }
 }
@@ -158,6 +193,10 @@ mod tests {
         w.lit(b'B');
         let s = w.end();
         assert_eq!(depack(&s).unwrap(), (b"AB".to_vec(), s.len()));
+        assert_eq!(
+            depack_with_checkpoints(&s, &[1, 2]).unwrap().checkpoints,
+            [(1, 2), (2, 3)]
+        );
     }
 
     #[test]

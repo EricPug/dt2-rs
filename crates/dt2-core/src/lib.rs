@@ -4,5 +4,6 @@ pub mod ddr;
 pub mod dspi;
 pub mod intc2;
 pub mod pit;
+pub mod rgpio;
 pub mod spi_nor;
 pub mod uart;
