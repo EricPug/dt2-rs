@@ -43,6 +43,7 @@ pub struct CpuSnapshot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStop {
     InstructionLimit,
+    Breakpoint { pc: u32 },
     Halt { pc: u32 },
     Error(CpuError),
 }
@@ -1043,6 +1044,9 @@ impl Cpu {
         let stop = loop {
             if budget_used >= instruction_limit {
                 break RunStop::InstructionLimit;
+            }
+            if bus.stop_before_instruction(self.pc) {
+                break RunStop::Breakpoint { pc: self.pc };
             }
             if let Some(event) = injection {
                 let interrupt_mask = ((self.sr >> 8) & 7) as u8;

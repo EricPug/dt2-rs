@@ -34,6 +34,10 @@ peripheral reads and drops writes; it does not model hardware reset values or ti
 `INSPECT_TRAP0` prints the live TRAP #0 vector after execution stops.
 `DUMP_RAM=address:length` prints 1-256 bytes from mapped RAM/SRAM after execution;
 it does not read MMIO.
+`DUMP_RAM_FILE=address:length:path` writes 1-64 MiB of mapped RAM/SRAM to a raw
+binary file after execution; MMIO is not readable through this option.
+`STOP_PC=pc` stops before executing that instruction, allowing an exact handoff
+snapshot with `DUMP_RAM_FILE`.
 `PIT_BOOTSTRAP` advances modeled PIT counters by retired instruction, not bus
 cycles. With `INTC2_BOOTSTRAP`, the observed PIT0 source can naturally reach the
 partial INTC2 model; this remains an approximate timing model. `PIT0_ONESHOT` is

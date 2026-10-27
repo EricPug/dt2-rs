@@ -33,7 +33,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT0_ONESHOT PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length WATCH_WRITE=address TRACE_REGS=pc TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT0_ONESHOT PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -357,6 +357,14 @@ fn run_binary(args: &[String]) {
     let loop_detect = args[6..]
         .iter()
         .any(|assignment| assignment == "LOOP_DETECT");
+    let stop_pc = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("STOP_PC=").map(|pc| {
+            parse_address(pc).unwrap_or_else(|error| {
+                eprintln!("invalid STOP_PC address: {error}");
+                std::process::exit(2)
+            })
+        })
+    });
     let watch_write_address = args[6..].iter().find_map(|assignment| {
         assignment.strip_prefix("WATCH_WRITE=").map(|address| {
             parse_address(address).unwrap_or_else(|error| {
@@ -599,6 +607,9 @@ fn run_binary(args: &[String]) {
     if let Some(snapshot) = ram_snapshot {
         bus.set_ram_snapshot(snapshot);
     }
+    if let Some(pc) = stop_pc {
+        bus.set_stop_pc(pc);
+    }
     if loop_detect {
         bus.enable_loop_detection();
     }
@@ -612,6 +623,7 @@ fn run_binary(args: &[String]) {
     let mut cpu = Cpu::new();
     let mut cpu_overrides = Vec::new();
     let mut ram_dumps = Vec::new();
+    let mut ram_file_dumps = Vec::new();
     for assignment in &args[6..] {
         if assignment == "MCF5441X_SRAM"
             || assignment == "MCF5441X_SBF_BOOT"
@@ -620,6 +632,7 @@ fn run_binary(args: &[String]) {
             || assignment == "PIT_BOOTSTRAP"
             || assignment == "INTC2_BOOTSTRAP"
             || assignment == "PIT0_ONESHOT"
+            || assignment.starts_with("STOP_PC=")
             || assignment.starts_with("WATCH_WRITE=")
             || assignment.starts_with("TRACE_REGS=")
             || assignment.starts_with("TRACE_A0_RANGE=")
@@ -636,6 +649,13 @@ fn run_binary(args: &[String]) {
         }
         if let Some(spec) = assignment.strip_prefix("DUMP_RAM=") {
             ram_dumps.push(parse_ram_dump_spec(spec).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2)
+            }));
+            continue;
+        }
+        if let Some(spec) = assignment.strip_prefix("DUMP_RAM_FILE=") {
+            ram_file_dumps.push(parse_ram_file_dump_spec(spec).unwrap_or_else(|error| {
                 eprintln!("{error}");
                 std::process::exit(2)
             }));
@@ -698,6 +718,21 @@ fn run_binary(args: &[String]) {
             Err(error) => println!("RAM dump unmapped at {:#010x}", error.addr),
         }
     }
+    for (address, length, path) in ram_file_dumps {
+        match bus.dump_ram(address, length) {
+            Ok(bytes) => {
+                if let Err(error) = std::fs::write(&path, bytes) {
+                    eprintln!("cannot write RAM dump {path}: {error}");
+                    std::process::exit(2)
+                }
+                println!("wrote {length} RAM bytes from {address:#010x} to {path}");
+            }
+            Err(error) => {
+                eprintln!("RAM file dump unmapped at {:#010x}", error.addr);
+                std::process::exit(2)
+            }
+        }
+    }
 
     let ram_map = if mcf_sbf_boot {
         "MCF5441x SRAM with SBF address-zero reset alias"
@@ -742,6 +777,9 @@ fn run_binary(args: &[String]) {
     }
     if let Some(snapshot) = &bus.ram_snapshot {
         println!("RAM snapshot captured: {}", snapshot.active);
+    }
+    if let Some(pc) = stop_pc {
+        println!("stop breakpoint configured at PC={pc:#010x}");
     }
     if pit0_oneshot {
         println!("PIT0 one-shot diagnostic: expose the first unmasked PIT0 request; suppress later PIT0 requests");
@@ -911,6 +949,30 @@ fn parse_ram_dump_spec(spec: &str) -> Result<(u32, usize), String> {
     Ok((address, length))
 }
 
+fn parse_ram_file_dump_spec(spec: &str) -> Result<(u32, usize, String), String> {
+    let mut fields = spec.splitn(3, ':');
+    let address_text = fields
+        .next()
+        .ok_or_else(|| format!("invalid DUMP_RAM_FILE spec: {spec}"))?;
+    let length_text = fields
+        .next()
+        .ok_or_else(|| format!("invalid DUMP_RAM_FILE spec: {spec}"))?;
+    let path = fields
+        .next()
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| format!("invalid DUMP_RAM_FILE path: {spec}"))?;
+    let address = parse_address(address_text)?;
+    let length = usize::try_from(parse_address(length_text)?)
+        .map_err(|_| format!("invalid DUMP_RAM_FILE length: {length_text}"))?;
+    if length == 0 || length > 64 * 1024 * 1024 {
+        return Err(format!("DUMP_RAM_FILE length must be 1-67108864 bytes: {length}"));
+    }
+    if address.checked_add(length as u32).is_none() {
+        return Err(format!("DUMP_RAM_FILE range overflows address space: {spec}"));
+    }
+    Ok((address, length, path.to_string()))
+}
+
 fn parse_interrupt_injection(spec: &str) -> Result<InterruptInjection, String> {
     let mut fields = spec.split(':');
     let instruction_count = fields
@@ -997,6 +1059,7 @@ struct ProbeBus {
     ram: Box<dyn Bus>,
     ram_remap: Option<RamRemap>,
     ram_snapshot: Option<RamSnapshot>,
+    stop_pc: Option<u32>,
     sram_overlay: Option<Mcf5441xSram>,
     sram_overlay_sbf_alias: bool,
     mmio: BTreeMap<u32, u8>,
@@ -1180,6 +1243,7 @@ impl ProbeBus {
             ram: Box::new(ram),
             ram_remap: None,
             ram_snapshot: None,
+            stop_pc: None,
             sram_overlay: None,
             sram_overlay_sbf_alias: false,
             mmio: BTreeMap::new(),
@@ -1249,6 +1313,10 @@ impl ProbeBus {
 
     fn set_ram_snapshot(&mut self, snapshot: RamSnapshot) {
         self.ram_snapshot = Some(snapshot);
+    }
+
+    fn set_stop_pc(&mut self, pc: u32) {
+        self.stop_pc = Some(pc);
     }
 
     fn snapshot_read_address(&self, address: u32) -> u32 {
@@ -2045,6 +2113,10 @@ impl Bus for ProbeBus {
         self.current_pc = pc;
     }
 
+    fn stop_before_instruction(&mut self, pc: u32) -> bool {
+        self.stop_pc == Some(pc)
+    }
+
     fn report_instruction_state(&mut self, pc: u32, d: &[u32; 8], a: &[u32; 8], sr: u16) {
         let trace_pc_matches = self
             .trace_pc_range
@@ -2391,6 +2463,7 @@ impl Bus for ProbeBus {
 fn print_stop(stop: RunStop) {
     match stop {
         RunStop::InstructionLimit => println!("stop: instruction limit"),
+        RunStop::Breakpoint { pc } => println!("stop: breakpoint before instruction at {pc:#010x}"),
         RunStop::Halt { pc } => println!("HALT executed at PC={pc:#010x}"),
         RunStop::Error(CpuError::Illegal { pc, op }) => {
             println!("stop: unsupported opcode {op:#06x} at {pc:#010x}");
@@ -2766,6 +2839,21 @@ mod tests {
     }
 
     #[test]
+    fn stop_pc_breakpoint_stops_before_instruction_execution() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
+        bus.load_ram(0x1000, &[0x4E, 0x71]).unwrap();
+        bus.set_stop_pc(0x1000);
+        let mut cpu = Cpu::new();
+        cpu.pc = 0x1000;
+
+        let report = cpu.run(&mut bus, 10);
+
+        assert_eq!(report.instructions, 0);
+        assert_eq!(report.cpu.pc, 0x1000);
+        assert_eq!(report.stop, RunStop::Breakpoint { pc: 0x1000 });
+    }
+
+    #[test]
     fn natural_pit0_interrupt_uses_intc2_vector_and_returns_with_rte() {
         let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
         bus.attach_pit_bootstrap();
@@ -3035,6 +3123,24 @@ mod tests {
         assert!(parse_ram_dump_spec("0x40001000:0").is_err());
         assert!(parse_ram_dump_spec("0x40001000:257").is_err());
         assert!(parse_ram_dump_spec("0xfffffff0:32").is_err());
+    }
+
+    #[test]
+    fn ram_file_dump_spec_enforces_size_path_and_address_bounds() {
+        assert_eq!(
+            parse_ram_file_dump_spec("0x40001000:0x31fb60:out/section3.bin").unwrap(),
+            (0x4000_1000, 0x31fb60, "out/section3.bin".to_string())
+        );
+        assert_eq!(
+            parse_ram_file_dump_spec("0x40001000:16:/tmp/ram:section3.bin")
+                .unwrap()
+                .2,
+            "/tmp/ram:section3.bin"
+        );
+        assert!(parse_ram_file_dump_spec("0x40001000:0:out.bin").is_err());
+        assert!(parse_ram_file_dump_spec("0x40001000:0x4000001:out.bin").is_err());
+        assert!(parse_ram_file_dump_spec("0xfffffff0:32:out.bin").is_err());
+        assert!(parse_ram_file_dump_spec("0x40001000:32:").is_err());
     }
 
     #[test]
