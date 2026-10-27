@@ -51,6 +51,9 @@ saved section-3 handoff. `WATCH_WRITE=address` or `WATCH_WRITE=start:end` report
 overlapping writes with old/new bytes, guest PC, and instruction count.
 `TRACE_REGS=pc` reports the most recent 16 register snapshots at one PC, and
 `TRACE_A1=offset,...` captures A0/A1 pairs at output offsets.
+Run logs list DSPI0/DSPI1 PUSHR words first, with instruction count, PC, PCS mask,
+and post-write status. The DSPI model completes queued transfers instantly as a
+diagnostic override, even when MCR.HALT/MDIS is set; it is not hardware timing.
 `RAM_REMAP=from:to:length` aliases one bounded DDR window for a diagnostic run.
 `RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end`
 copies the input window when the watched write occurs in the trigger PC range and

@@ -122,7 +122,9 @@ impl Dspi {
     }
 
     fn pump(&mut self) {
-        while self.running() {
+        // Diagnostic instant-clock mode: queued PUSHR entries complete on write, even while
+        // MCR.HALT/MDIS is set. This models an external clocking peer, not the DSPI clock gate.
+        while self.flags & SR_EOQF == 0 {
             let Some(command) = self.tx.pop_front() else {
                 break;
             };
@@ -185,6 +187,11 @@ impl Dspi {
     }
 
     fn shift_frame(&mut self, data: u16, bits: u32) -> u16 {
+        let has_selected_device =
+            (0..8).any(|line| self.asserted & (1 << line) != 0 && self.devices[line].is_some());
+        if !has_selected_device {
+            return u16::MAX;
+        }
         let mut received = 0u16;
         for byte in (0..bits / 8).rev() {
             let mosi = (data >> (byte * 8)) as u8;
@@ -401,24 +408,24 @@ mod tests {
     }
 
     #[test]
-    fn frames_wait_in_the_fifo_while_halted() {
+    fn pushr_completes_immediately_even_when_dspi_is_halted() {
         let mut dspi = flash_dspi();
         dspi.write32(BASE + REG_MCR, MCR_RUN | MCR_HALT).unwrap();
         dspi.write32(BASE + REG_PUSHR, 0x0002_009F).unwrap();
         let sr = dspi.read32(BASE + REG_SR).unwrap();
-        assert_eq!(sr >> 12 & 0xF, 1);
-        assert_eq!(sr & SR_TCF, 0);
-
-        dspi.write32(BASE + REG_MCR, MCR_RUN).unwrap();
-        let sr = dspi.read32(BASE + REG_SR).unwrap();
         assert_eq!(sr >> 12 & 0xF, 0);
         assert_ne!(sr & SR_TCF, 0);
         assert_ne!(sr & SR_RFDF, 0);
+        assert_eq!(sr >> 4 & 0xF, 1);
+        assert_eq!(pop(&mut dspi), 0);
+        let sr = dspi.read32(BASE + REG_SR).unwrap();
+        assert_eq!(sr >> 4 & 0xF, 0);
+        assert_eq!(sr & 0xF, 1);
     }
 
     #[test]
     fn eoq_stops_the_queue_until_the_flag_is_cleared() {
-        let mut dspi = flash_dspi();
+        let mut dspi = Dspi::new(BASE);
         dspi.write32(BASE + REG_MCR, MCR_RUN).unwrap();
         dspi.write32(BASE + REG_PUSHR, 0x0802_0000).unwrap();
         dspi.write32(BASE + REG_PUSHR, 0x0002_0000).unwrap();
@@ -426,6 +433,13 @@ mod tests {
         assert_ne!(sr & SR_EOQF, 0);
         assert_eq!(sr & SR_TXRXS, 0);
         assert_eq!(sr >> 12 & 0xF, 1);
+        assert_eq!(sr >> 8 & 0xF, 1);
+        assert_eq!(sr >> 4 & 0xF, 1);
+        assert_eq!(sr & 0xF, 0);
+        assert_eq!(pop(&mut dspi), u32::from(u16::MAX));
+        let sr = dspi.read32(BASE + REG_SR).unwrap();
+        assert_eq!(sr >> 4 & 0xF, 0);
+        assert_eq!(sr & 0xF, 1);
 
         dspi.write32(BASE + REG_SR, SR_EOQF).unwrap();
         let sr = dspi.read32(BASE + REG_SR).unwrap();

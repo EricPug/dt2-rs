@@ -820,6 +820,18 @@ fn run_binary(args: &[String]) {
             });
             continue;
         }
+        if let Some(value) = assignment.strip_prefix("DSPI0_CTAR0=") {
+            let value = parse_address(value).unwrap_or_else(|error| {
+                eprintln!("invalid DSPI0_CTAR0 value: {error}");
+                std::process::exit(2)
+            });
+            bus.write32(DSPI0_BASE + 0x0C, value)
+                .unwrap_or_else(|error| {
+                    eprintln!("cannot set DSPI0 CTAR0: {error:?}");
+                    std::process::exit(2)
+                });
+            continue;
+        }
         let result = if let Some(ram_seed) = assignment.strip_prefix("RAM32@") {
             bus.seed_ram32(ram_seed)
         } else if let Some(mmio) = assignment.strip_prefix("MMIO8@") {
@@ -1242,6 +1254,10 @@ struct ProbeBus {
     current_sr: u16,
     uart8: Option<Uart8>,
     dspi1: Option<Dspi>,
+    dspi_push_events: Vec<DspiPushEvent>,
+    dspi_push_count: usize,
+    dspi_pop_events: Vec<DspiPopEvent>,
+    dspi_pop_count: usize,
     pit0_oneshot: bool,
     pit0_request_seen: bool,
     watch_write_range: Option<(u32, u32)>,
@@ -1302,6 +1318,8 @@ struct RamSnapshot {
 
 const DSPI0_BASE: u32 = 0xFC05_C000;
 const DSPI1_BASE: u32 = 0xFC03_C000;
+const MAX_DSPI_PUSH_EVENTS: usize = 262_144;
+const MAX_DSPI_POP_EVENTS: usize = 262_144;
 const MCF_SRAM_ALIAS_WINDOW: (u32, u32) = (0x8000_0000, 0x9000_0000);
 const MCF_PERIPHERAL_WINDOWS: [(u32, u32); 2] =
     [(0xEC00_0000, 0xED00_0000), (0xFC00_0000, 0xFD00_0000)];
@@ -1343,6 +1361,25 @@ struct AccessEvent {
     write: bool,
     value: u32,
     source: AccessSource,
+}
+
+#[derive(Clone, Copy)]
+struct DspiPushEvent {
+    instruction_count: usize,
+    pc: u32,
+    module: u8,
+    word: u32,
+    status_after: u32,
+}
+
+#[derive(Clone, Copy)]
+struct DspiPopEvent {
+    instruction_count: usize,
+    pc: u32,
+    module: u8,
+    width_bits: u8,
+    value: u32,
+    status_after: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1441,6 +1478,10 @@ impl ProbeBus {
             current_sr: 0x2000,
             uart8: None,
             dspi1: None,
+            dspi_push_events: Vec::new(),
+            dspi_push_count: 0,
+            dspi_pop_events: Vec::new(),
+            dspi_pop_count: 0,
             pit0_oneshot: false,
             pit0_request_seen: false,
             watch_write_range: None,
@@ -1820,6 +1861,68 @@ impl ProbeBus {
         self.access_events.push(event);
     }
 
+    fn record_dspi_push(&mut self, address: u32, word: u32) {
+        let module = if address == DSPI0_BASE + 0x34 {
+            0
+        } else if address == DSPI1_BASE + 0x34 {
+            1
+        } else {
+            return;
+        };
+        self.dspi_push_count = self.dspi_push_count.saturating_add(1);
+        if self.dspi_push_events.len() < MAX_DSPI_PUSH_EVENTS {
+            let status_after = if module == 0 {
+                self.dspi0
+                    .as_mut()
+                    .and_then(|dspi| dspi.read32(DSPI0_BASE + 0x2C).ok())
+            } else {
+                self.dspi1
+                    .as_mut()
+                    .and_then(|dspi| dspi.read32(DSPI1_BASE + 0x2C).ok())
+            }
+            .unwrap_or(0);
+            self.dspi_push_events.push(DspiPushEvent {
+                instruction_count: self.current_instruction_count,
+                pc: self.current_pc,
+                module,
+                word,
+                status_after,
+            });
+        }
+    }
+
+    fn record_dspi_pop(&mut self, address: u32, width_bits: u8, value: u32) {
+        let aligned = address & !3;
+        let (module, base) = if aligned == DSPI0_BASE + 0x38 {
+            (0, DSPI0_BASE)
+        } else if aligned == DSPI1_BASE + 0x38 {
+            (1, DSPI1_BASE)
+        } else {
+            return;
+        };
+        self.dspi_pop_count = self.dspi_pop_count.saturating_add(1);
+        if self.dspi_pop_events.len() < MAX_DSPI_POP_EVENTS {
+            let status_after = if module == 0 {
+                self.dspi0
+                    .as_mut()
+                    .and_then(|dspi| dspi.read32(base + 0x2C).ok())
+            } else {
+                self.dspi1
+                    .as_mut()
+                    .and_then(|dspi| dspi.read32(base + 0x2C).ok())
+            }
+            .unwrap_or(0);
+            self.dspi_pop_events.push(DspiPopEvent {
+                instruction_count: self.current_instruction_count,
+                pc: self.current_pc,
+                module,
+                width_bits,
+                value,
+                status_after,
+            });
+        }
+    }
+
     fn record_loop_access(&mut self, address: u32, write: bool) {
         if !self.loop_detection || self.instruction_fetch {
             return;
@@ -2035,6 +2138,52 @@ impl ProbeBus {
     }
 
     fn print_access_trace(&self) {
+        println!(
+            "DSPI PUSHR transfers: {} total, showing {}{}",
+            self.dspi_push_count,
+            self.dspi_push_events.len(),
+            if self.dspi_push_count > self.dspi_push_events.len() {
+                " (log limit reached)"
+            } else {
+                ""
+            }
+        );
+        for event in &self.dspi_push_events {
+            println!(
+                "  DSPI{} instruction={} PC={:#010x} PUSHR={:#010x} PCS={:#04x} SR={:#010x} TXCTR={} RXCTR={}",
+                event.module,
+                event.instruction_count,
+                event.pc,
+                event.word,
+                (event.word >> 16) & 0xFF,
+                event.status_after,
+                (event.status_after >> 12) & 0xF,
+                (event.status_after >> 4) & 0xF
+            );
+        }
+        println!(
+            "DSPI POPR reads: {} total, showing {}{}",
+            self.dspi_pop_count,
+            self.dspi_pop_events.len(),
+            if self.dspi_pop_count > self.dspi_pop_events.len() {
+                " (log limit reached)"
+            } else {
+                ""
+            }
+        );
+        for event in &self.dspi_pop_events {
+            println!(
+                "  DSPI{} instruction={} PC={:#010x} POPR{}={:#010x} SR={:#010x} RXCTR={} POPNXTPTR={}",
+                event.module,
+                event.instruction_count,
+                event.pc,
+                event.width_bits,
+                event.value,
+                event.status_after,
+                (event.status_after >> 4) & 0xF,
+                event.status_after & 0xF
+            );
+        }
         if self.synthetic_mcf_mmio {
             println!(
                 "MMIO diagnostic: synthetic responses are approximations, not hardware behavior"
@@ -2761,6 +2910,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
+                self.record_dspi_pop(address, 8, u32::from(value));
                 self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
                     address,
@@ -2779,6 +2929,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 2);
         match self.read16_inner(address) {
             Ok(value) => {
+                self.record_dspi_pop(address, 16, u32::from(value));
                 self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
                     address,
@@ -2797,6 +2948,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 4);
         match self.read32_inner(address) {
             Ok(value) => {
+                self.record_dspi_pop(address, 32, value);
                 self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
                     address,
@@ -2849,6 +3001,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 4);
         let old = self.watched_old_bytes(address, 4)?;
         self.write32_inner(address, value)?;
+        self.record_dspi_push(address, value);
         self.snapshot_source_on_write(address, 4)?;
         self.record_watched_write(address, 4, value, old);
         self.record_loop_access(address, true);
@@ -3787,6 +3940,19 @@ mod tests {
             .map(|_| bus.read32(DSPI0_BASE + 0x38).unwrap())
             .collect();
         assert_eq!(id, [0, 0xEF, 0x40, 0x18]);
+        assert_eq!(bus.dspi_push_count, 4);
+        assert!(bus.dspi_push_events.iter().all(|event| event.module == 0));
+        assert_eq!(bus.dspi_push_events[0].word, 0x8402_009F);
+        assert_eq!((bus.dspi_push_events[0].word >> 16) & 0xFF, 0x02);
+        assert_eq!(bus.dspi_pop_count, 4);
+        assert!(bus.dspi_pop_events.iter().all(|event| event.module == 0));
+        assert_eq!(
+            bus.dspi_pop_events
+                .iter()
+                .map(|event| event.value)
+                .collect::<Vec<_>>(),
+            [0, 0xEF, 0x40, 0x18]
+        );
         assert_eq!(bus.access_events.len(), 10);
         assert!(bus
             .access_events
@@ -3815,10 +3981,25 @@ mod tests {
         bus.attach_dspi1_registers();
         bus.write32(DSPI1_BASE, 0x8000_0000).unwrap();
         bus.write32(DSPI1_BASE + 0x0C, 0x3800_0000).unwrap();
+        bus.begin_instruction(0x400C_C858);
         bus.write32(DSPI1_BASE + 0x34, 0x0802_0055).unwrap();
 
-        assert_eq!(bus.read32(DSPI1_BASE + 0x38).unwrap(), 0);
-        assert_ne!(bus.read32(DSPI1_BASE + 0x2C).unwrap() & (1 << 28), 0);
+        assert_eq!(bus.read32(DSPI1_BASE + 0x38).unwrap(), 0xFFFF);
+        let status = bus.read32(DSPI1_BASE + 0x2C).unwrap();
+        assert_ne!(status & (1 << 28), 0);
+        assert_eq!(status >> 12 & 0xF, 0);
+        assert_eq!(status >> 8 & 0xF, 1);
+        assert_eq!(status >> 4 & 0xF, 0);
+        assert_eq!(status & 0xF, 1);
+        assert_eq!(bus.dspi_push_count, 1);
+        assert_eq!(bus.dspi_push_events[0].module, 1);
+        assert_eq!(bus.dspi_push_events[0].pc, 0x400C_C858);
+        assert_eq!(bus.dspi_push_events[0].word, 0x0802_0055);
+        assert_eq!((bus.dspi_push_events[0].word >> 16) & 0xFF, 0x02);
+        assert_eq!(bus.dspi_pop_events.len(), 1);
+        assert_eq!(bus.dspi_pop_events[0].module, 1);
+        assert_eq!(bus.dspi_pop_events[0].value, 0xFFFF);
+        assert_eq!(bus.dspi_pop_events[0].pc, 0x400C_C858);
     }
 
     #[test]
