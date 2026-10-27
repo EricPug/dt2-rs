@@ -36,6 +36,8 @@ peripheral reads and drops writes; it does not model hardware reset values or ti
 it does not read MMIO.
 `DUMP_RAM_FILE=address:length:path` writes 1-64 MiB of mapped RAM/SRAM to a raw
 binary file after execution; MMIO is not readable through this option.
+`RAM_LOAD_FILE=address:path` restores a raw file into mapped RAM/SRAM before
+execution, for resuming a saved diagnostic snapshot.
 `STOP_PC=pc` stops before executing that instruction, allowing an exact handoff
 snapshot with `DUMP_RAM_FILE`.
 `PIT_BOOTSTRAP` advances modeled PIT counters by retired instruction, not bus
@@ -44,8 +46,11 @@ partial INTC2 model; this remains an approximate timing model. `PIT0_ONESHOT` is
 an intentionally behavior-changing probe that suppresses PIT0 requests after the
 first one, useful for isolating post-interrupt code but not representative of
 normal timer behavior. Runs print a bounded RTE history with restored PCs.
-`WATCH_WRITE=address` reports the first 16 CPU writes overlapping one address,
-and `TRACE_REGS=pc` reports the most recent 16 register snapshots at one PC.
+`PIT0_PERIODIC` seeds PIT0/INTC2 for periodic interrupt delivery when resuming a
+saved section-3 handoff. `WATCH_WRITE=address` or `WATCH_WRITE=start:end` reports
+overlapping writes with old/new bytes, guest PC, and instruction count.
+`TRACE_REGS=pc` reports the most recent 16 register snapshots at one PC, and
+`TRACE_A1=offset,...` captures A0/A1 pairs at output offsets.
 `RAM_REMAP=from:to:length` aliases one bounded DDR window for a diagnostic run.
 `RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end`
 copies the input window when the watched write occurs in the trigger PC range and
@@ -55,3 +60,10 @@ aliasing to test source/output overlap and is not a hardware memory model.
 `UART8_TX` captures transmitted UART8 bytes but does not model receive data or
 serial timing. These are opt-in diagnostic approximations; section-2 direct
 entry is not an SBF boot.
+
+`trace-depack <packed-section.bin> [step output-end [output-start]]` logs host
+aPLib input cursors at selected output lengths. The verified section-3 handoff,
+periodic resume command, snapshots, callback-table check, and current device
+limitations are recorded in [docs/section3-handoff.md](docs/section3-handoff.md).
+Snapshot binaries and logs are local ignored artifacts under `out/` and are not
+part of the repository.
