@@ -36,6 +36,7 @@ pub struct CpuSnapshot {
     pub sr: u16,
     pub rambar: u32,
     pub acr0: u32,
+    pub acr1: u32,
     pub vbr: u32,
     pub cacr: u32,
     pub rgpiobar: u32,
@@ -122,6 +123,7 @@ pub struct Cpu {
     pub sr: u16,
     pub rambar: u32,
     pub acr0: u32,
+    pub acr1: u32,
     pub vbr: u32,
     pub cacr: u32,
     pub rgpiobar: u32,
@@ -138,6 +140,7 @@ impl Default for Cpu {
             sr: 0,
             rambar: 0,
             acr0: 0,
+            acr1: 0,
             vbr: 0,
             cacr: 0,
             rgpiobar: RGPIOBAR_RESET,
@@ -203,11 +206,8 @@ impl Cpu {
         pc0: u32,
         op: u16,
     ) -> Result<Operand, CpuError> {
-        let step = if size == Size::B && reg == 7 {
-            2
-        } else {
-            size.bytes()
-        };
+        // ColdFire adjusts A7 by 1 for byte operands; the 68000 rounds up to 2.
+        let step = size.bytes();
         Ok(match mode {
             0 => Operand::Dn(reg),
             1 => Operand::An(reg),
@@ -366,6 +366,49 @@ impl Cpu {
         res
     }
 
+    fn addx(&mut self, dst: u32, src: u32) -> u32 {
+        let extend = u64::from(self.sr & CCR_X != 0);
+        let wide = u64::from(dst) + u64::from(src) + extend;
+        let result = wide as u32;
+        let signed_wide = i64::from(dst as i32) + i64::from(src as i32) + extend as i64;
+        let mut flags = 0;
+        if result & 0x8000_0000 != 0 {
+            flags |= CCR_N;
+        }
+        if result == 0 && self.sr & CCR_Z != 0 {
+            flags |= CCR_Z;
+        }
+        if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&signed_wide) {
+            flags |= CCR_V;
+        }
+        if wide > u64::from(u32::MAX) {
+            flags |= CCR_C | CCR_X;
+        }
+        self.set_ccr(CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X, flags);
+        result
+    }
+
+    fn subx(&mut self, dst: u32, src: u32) -> u32 {
+        let extend = u64::from(self.sr & CCR_X != 0);
+        let result = dst.wrapping_sub(src).wrapping_sub(extend as u32);
+        let signed_wide = i64::from(dst as i32) - i64::from(src as i32) - extend as i64;
+        let mut flags = 0;
+        if result & 0x8000_0000 != 0 {
+            flags |= CCR_N;
+        }
+        if result == 0 && self.sr & CCR_Z != 0 {
+            flags |= CCR_Z;
+        }
+        if !(i64::from(i32::MIN)..=i64::from(i32::MAX)).contains(&signed_wide) {
+            flags |= CCR_V;
+        }
+        if u64::from(dst) < u64::from(src) + extend {
+            flags |= CCR_C | CCR_X;
+        }
+        self.set_ccr(CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X, flags);
+        result
+    }
+
     fn cond(&self, c: u16) -> bool {
         let (n, z, v, cy) = (
             self.sr & CCR_N != 0,
@@ -500,22 +543,23 @@ impl Cpu {
                         0x00C0 => self.write(bus, operand, size, value | mask, pc0, op)?,
                         _ => unreachable!(),
                     }
-                } else if op & 0xFFC0 == 0x08C0 && mode == 0 {
-                    let bit = (self.fetch16(bus)? & 31) as u32;
+                } else if op & 0xFF00 == 0x0800 {
+                    if mode == 1 || (mode == 7 && reg > 1) {
+                        return Err(ill);
+                    }
+                    let size = if mode == 0 { Size::L } else { Size::B };
+                    let bit = (self.fetch16(bus)? & if mode == 0 { 31 } else { 7 }) as u32;
+                    let operand = self.ea(bus, mode, reg, size, pc0, op)?;
                     let mask = 1 << bit;
-                    let old = self.d[reg];
-                    self.d[reg] = old | mask;
+                    let old = self.read(bus, operand, size)?;
                     self.set_ccr(CCR_Z, if old & mask == 0 { CCR_Z } else { 0 });
-                } else if op & 0xFFC0 == 0x0800 && mode == 0 {
-                    let bit = (self.fetch16(bus)? & 31) as u32;
-                    let mask = 1 << bit;
-                    self.set_ccr(CCR_Z, if self.d[reg] & mask == 0 { CCR_Z } else { 0 });
-                } else if op & 0xFFC0 == 0x0880 && mode == 0 {
-                    let bit = (self.fetch16(bus)? & 31) as u32;
-                    let mask = 1 << bit;
-                    let old = self.d[reg];
-                    self.d[reg] = old & !mask;
-                    self.set_ccr(CCR_Z, if old & mask == 0 { CCR_Z } else { 0 });
+                    match (op >> 6) & 3 {
+                        0 => {}
+                        1 => self.write(bus, operand, size, old ^ mask, pc0, op)?,
+                        2 => self.write(bus, operand, size, old & !mask, pc0, op)?,
+                        3 => self.write(bus, operand, size, old | mask, pc0, op)?,
+                        _ => unreachable!(),
+                    }
                 } else if op & 0xFFF8 == 0x0680 {
                     let immediate = self.fetch32(bus)?;
                     self.d[reg] = self.add(self.d[reg], immediate, Size::L, false);
@@ -562,7 +606,26 @@ impl Cpu {
                 }
             }
             4 => {
-                if op & 0xFFF8 == 0x4480 {
+                if op & 0xFFF8 == 0x4080 {
+                    let value = self.d[reg];
+                    let extend = u32::from(self.sr & CCR_X != 0);
+                    let result = 0u32.wrapping_sub(value).wrapping_sub(extend);
+                    let mut flags = 0;
+                    if result & 0x8000_0000 != 0 {
+                        flags |= CCR_N;
+                    }
+                    if result == 0 && self.sr & CCR_Z != 0 {
+                        flags |= CCR_Z;
+                    }
+                    if value == 0x8000_0000 && extend == 0 {
+                        flags |= CCR_V;
+                    }
+                    if value != 0 || extend != 0 {
+                        flags |= CCR_C | CCR_X;
+                    }
+                    self.d[reg] = result;
+                    self.set_ccr(CCR_N | CCR_Z | CCR_V | CCR_C | CCR_X, flags);
+                } else if op & 0xFFF8 == 0x4480 {
                     self.d[reg] = self.sub(0, self.d[reg], Size::L, true);
                 } else if op & 0xFFF0 == 0x4E40 {
                     self.take_trap(bus, pc0, op, u32::from(op & 0xF))?;
@@ -582,7 +645,45 @@ impl Cpu {
                     self.a[7] = frame_sp.wrapping_add(4 + u32::from(format));
                     self.sr = restored_sr;
                     self.pc = restored_pc;
-                } else if op & 0xFFC0 == 0x4C00 {
+                } else if op & 0xFFC0 == 0x4C40 {
+                    // REM (Dr != Dq) writing only Dr is inferred, not confirmed against the manual.
+                    // DIVS/DIVU.L <ea>,Dq and REMS/REMU.L <ea>,Dr:Dq (32-bit only).
+                    if !matches!(mode, 0 | 2 | 3 | 4 | 5) {
+                        return Err(ill);
+                    }
+                    let extension = self.fetch16(bus)?;
+                    if extension & 0x87F8 != 0 {
+                        return Err(CpuError::Illegal {
+                            pc: pc0,
+                            op: extension,
+                        });
+                    }
+                    let signed = extension & 0x0800 != 0;
+                    let dq = ((extension >> 12) & 7) as usize;
+                    let dr = (extension & 7) as usize;
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let divisor = self.read(bus, source, Size::L)?;
+                    let dividend = self.d[dq];
+                    let division = if signed {
+                        (dividend as i32)
+                            .checked_div(divisor as i32)
+                            .zip((dividend as i32).checked_rem(divisor as i32))
+                            .map(|(q, r)| (q as u32, r as u32))
+                    } else {
+                        dividend.checked_div(divisor).zip(dividend.checked_rem(divisor))
+                    };
+                    let Some((quotient, remainder)) = division else {
+                        return Err(CpuError::UnsupportedExceptionState { pc: pc0, op });
+                    };
+                    let result = if dr == dq {
+                        self.d[dq] = quotient;
+                        quotient
+                    } else {
+                        self.d[dr] = remainder;
+                        remainder
+                    };
+                    self.flags_move(result, Size::L);
+                                } else if op & 0xFFC0 == 0x4C00 {
                     if !matches!(mode, 0 | 2 | 3 | 4 | 5) {
                         return Err(ill);
                     }
@@ -711,6 +812,7 @@ impl Cpu {
                     match ext & 0x0FFF {
                         0x0002 => self.cacr = value,
                         0x0004 => self.acr0 = value,
+                        0x0005 => self.acr1 = value,
                         0x0801 => self.vbr = value,
                         0x0C05 => self.rambar = value,
                         0x0009 => {
@@ -765,6 +867,10 @@ impl Cpu {
                 }
             }
             5 => {
+                if op == 0x51FC {
+                    // TRAPF has a false condition and therefore never traps.
+                    return Ok(());
+                }
                 if (op >> 6) & 3 == 3 {
                     // Scc.B Dn: the only form ColdFire provides.
                     if mode != 0 {
@@ -850,15 +956,10 @@ impl Cpu {
                 }
             }
             0xE => {
-                // Long shifts: ASR (type 00, right), LSR/LSL (type 01).
+                // Long shifts: ASR/ASL (type 00), LSR/LSL (type 01).
                 let left = op & 0x0100 != 0;
                 let shift_type = (op >> 3) & 3;
-                let supported = op & 0x00C0 == 0x0080
-                    && match shift_type {
-                        0 => !left,
-                        1 => true,
-                        _ => false,
-                    };
+                let supported = op & 0x00C0 == 0x0080 && shift_type <= 1;
                 if !supported {
                     return Err(ill);
                 }
@@ -874,11 +975,17 @@ impl Cpu {
                 let original = self.d[reg];
                 let (result, carry) = match (shift_type, left) {
                     (_, _) if count == 0 => (original, false),
-                    (0, _) if count < 32 => (
+                    (0, true) if count < 32 => (
+                        original << count,
+                        original & (1 << (32 - count)) != 0,
+                    ),
+                    (0, true) if count == 32 => (0, original & 1 != 0),
+                    (0, true) => (0, false),
+                    (0, false) if count < 32 => (
                         ((original as i32) >> count) as u32,
                         original & (1 << (count - 1)) != 0,
                     ),
-                    (0, _) => (
+                    (0, false) => (
                         if original & 0x8000_0000 != 0 {
                             u32::MAX
                         } else {
@@ -908,12 +1015,31 @@ impl Cpu {
                 if carry {
                     flags |= CCR_C | CCR_X;
                 }
+                if shift_type == 0 && left && count != 0 {
+                    // V: the sign bit changed at any point during the shift.
+                    let overflow = if count >= 32 {
+                        original != 0
+                    } else {
+                        let top = u64::from(original) >> (31 - count);
+                        top != 0 && top != (1u64 << (count + 1)) - 1
+                    };
+                    if overflow {
+                        flags |= CCR_V;
+                    }
+                }
                 self.set_ccr(
                     CCR_N | CCR_Z | CCR_V | CCR_C | if count == 0 { 0 } else { CCR_X },
                     flags,
                 );
             }
             0xF => {
+                // CPUSHL dc/ic/bc,(An): there is no cache model, so the push is a no-op.
+                if matches!(op & 0xFFF8, 0xF468 | 0xF4A8 | 0xF4E8) {
+                    if self.sr & 0x2000 == 0 {
+                        return Err(CpuError::Privilege { pc: pc0, op });
+                    }
+                    return Ok(());
+                }
                 if op & 0xFFC0 != 0xFBC0 {
                     return Err(ill);
                 }
@@ -969,7 +1095,7 @@ impl Cpu {
                     self.d[dst] = result;
                     self.flags_move(result, Size::L);
                 }
-                6 if mode != 1 => {
+                6 if mode >= 2 => {
                     let src = ((op >> 9) & 7) as usize;
                     let destination = self.ea(bus, mode, reg, Size::L, pc0, op)?;
                     let destination_value = self.read(bus, destination, Size::L)?;
@@ -979,6 +1105,19 @@ impl Cpu {
                 }
                 _ => return Err(ill),
             },
+            0xC if op & 0xF1C0 == 0xC1C0 => {
+                let dst = ((op >> 9) & 7) as usize;
+                let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);
+                if mode == 1 {
+                    return Err(ill);
+                }
+                let source = self.ea(bus, mode, reg, Size::W, pc0, op)?;
+                let source_value = self.read(bus, source, Size::W)? as u16 as i16 as i32;
+                let destination_value = self.d[dst] as u16 as i16 as i32;
+                let result = destination_value.wrapping_mul(source_value) as u32;
+                self.d[dst] = result;
+                self.flags_move(result, Size::L);
+            }
             0xC => match (op >> 6) & 7 {
                 2 if mode != 1 => {
                     let dst = ((op >> 9) & 7) as usize;
@@ -988,7 +1127,7 @@ impl Cpu {
                     self.d[dst] = result;
                     self.flags_move(result, Size::L);
                 }
-                6 if mode != 1 => {
+                6 if mode >= 2 => {
                     let src = ((op >> 9) & 7) as usize;
                     let destination = self.ea(bus, mode, reg, Size::L, pc0, op)?;
                     let destination_value = self.read(bus, destination, Size::L)?;
@@ -998,6 +1137,16 @@ impl Cpu {
                 }
                 _ => return Err(ill),
             },
+            9 if op & 0xF1F8 == 0x9180 => {
+                let dst = ((op >> 9) & 7) as usize;
+                let src = (op & 7) as usize;
+                self.d[dst] = self.subx(self.d[dst], self.d[src]);
+            }
+            0xD if op & 0xF1F8 == 0xD180 => {
+                let dst = ((op >> 9) & 7) as usize;
+                let src = (op & 7) as usize;
+                self.d[dst] = self.addx(self.d[dst], self.d[src]);
+            }
             nib @ (9 | 0xB | 0xD) => {
                 let r = ((op >> 9) & 7) as usize;
                 let opmode = (op >> 6) & 7;
@@ -1006,7 +1155,7 @@ impl Cpu {
                     (0xB, 1) => (Size::W, false),
                     (_, 2) => (Size::L, false),
                     (0xB, 6) if mode != 1 => (Size::L, true),
-                    (9 | 0xD, 6) => (Size::L, true),
+                    (9 | 0xD, 6) if mode >= 2 => (Size::L, true),
                     (_, 7) => {
                         // ADDA/SUBA/CMPA.L
                         let o = self.ea(bus, mode, reg, Size::L, pc0, op)?;
@@ -1136,6 +1285,7 @@ impl Cpu {
                 sr: self.sr,
                 rambar: self.rambar,
                 acr0: self.acr0,
+                acr1: self.acr1,
                 vbr: self.vbr,
                 cacr: self.cacr,
                 rgpiobar: self.rgpiobar,
@@ -1190,6 +1340,18 @@ mod tests {
         run(&mut c, &mut r, 7);
         assert_eq!(c.d[0], 0);
         assert_eq!(c.pc, 0x1006);
+    }
+
+    #[test]
+    fn trapf_is_a_no_op() {
+        let (mut c, mut r) = machine(&[0x51FC, 0x4E71]);
+        c.sr = 0x2004;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.pc, 0x1002);
+        assert_eq!(c.sr, 0x2004);
+        assert_eq!(c.a[7], 0x2000);
     }
 
     #[test]
@@ -1400,6 +1562,20 @@ mod tests {
     }
 
     #[test]
+    fn bchg_immediate_displacement_memory_toggles_wrapped_byte_bit() {
+        let (mut cpu, mut ram) = machine(&[0x086F, 0x001F, 0x0008]);
+        cpu.a[7] = 0x1010;
+        ram.write8(0x1018, 0x80).unwrap();
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(ram.read8(0x1018).unwrap(), 0x00);
+        assert_eq!(cpu.sr, CCR_X | CCR_V | CCR_C);
+        assert_eq!(cpu.pc, 0x1006);
+    }
+
+    #[test]
     fn dynamic_bclr_absolute_memory_clears_data_bit_and_updates_zero() {
         let (mut c, mut r) = machine(&[0x01B9, 0x0000, 0x2014]);
         c.d[0] = 3;
@@ -1497,6 +1673,47 @@ mod tests {
     }
 
     #[test]
+    fn subx_long_register_uses_destination_and_source_order() {
+        let (mut cpu, mut ram) = machine(&[0x9182]);
+        cpu.d[0] = 0x0192_1FB6;
+        cpu.d[2] = 0x0064_87ED;
+        cpu.sr = CCR_N | CCR_Z | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[0], 0x012D_97C9);
+        assert_eq!(cpu.d[2], 0x0064_87ED);
+        assert_eq!(cpu.sr, 0);
+    }
+
+    #[test]
+    fn subx_long_consumes_extend_and_cumulates_zero() {
+        let (mut cpu, mut ram) = machine(&[0x9182]);
+        cpu.d[0] = 1;
+        cpu.d[2] = 0;
+        cpu.sr = CCR_X | CCR_Z | CCR_V;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[0], 0);
+        assert_eq!(cpu.sr, CCR_Z);
+    }
+
+    #[test]
+    fn addx_long_register_consumes_extend_and_cumulates_zero() {
+        let (mut cpu, mut ram) = machine(&[0xD182]);
+        cpu.d[0] = u32::MAX;
+        cpu.d[2] = 0;
+        cpu.sr = CCR_X | CCR_Z | CCR_V;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[0], 0);
+        assert_eq!(cpu.d[2], 0);
+        assert_eq!(cpu.sr, CCR_X | CCR_Z | CCR_C);
+    }
+
+    #[test]
     fn and_long_displacement_memory_to_data_register_updates_flags() {
         let (mut c, mut r) = machine(&[0xC2AF, 0x0014]);
         c.d[1] = 0xF00F_F00F;
@@ -1567,6 +1784,95 @@ mod tests {
         assert_eq!(c.d[2], 0x8000_0000);
         assert_eq!(c.d[3], 1);
         assert_eq!(c.sr, CCR_X | CCR_N);
+    }
+
+    #[test]
+    fn negx_long_data_register_propagates_extend_and_cumulative_zero() {
+        let (mut cpu, mut ram) = machine(&[0x4080]);
+        cpu.d[0] = 0;
+        cpu.sr = CCR_X | CCR_Z | CCR_V;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[0], u32::MAX);
+        assert_eq!(cpu.sr, CCR_X | CCR_N | CCR_C);
+        assert_eq!(cpu.pc, 0x1002);
+
+        let (mut cpu, mut ram) = machine(&[0x4080]);
+        cpu.d[0] = 0;
+        cpu.sr = CCR_Z | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[0], 0);
+        assert_eq!(cpu.sr, CCR_Z);
+    }
+
+    #[test]
+    fn addx_subx_clear_extend_ignores_x_and_sets_zero_only_if_previously_set() {
+        for (op, a, b, expected) in [(0xD182u16, 5u32, 3u32, 8u32), (0x9182, 5, 3, 2)] {
+            let (mut cpu, mut ram) = machine(&[op]);
+            cpu.d[0] = a;
+            cpu.d[2] = b;
+            cpu.sr = 0;
+            run(&mut cpu, &mut ram, 1);
+            assert_eq!((cpu.d[0], cpu.sr), (expected, 0));
+
+            let (mut cpu, mut ram) = machine(&[op]);
+            cpu.d[0] = a;
+            cpu.d[2] = b;
+            cpu.sr = CCR_X;
+            run(&mut cpu, &mut ram, 1);
+            assert_eq!(cpu.d[0], if op == 0xD182 { 9 } else { 1 });
+            assert_eq!(cpu.sr & CCR_X, 0);
+        }
+    }
+
+    #[test]
+    fn negx_clear_extend_negates_and_set_extend_borrows() {
+        let (mut cpu, mut ram) = machine(&[0x4080]);
+        cpu.d[0] = 1;
+        cpu.sr = 0;
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.d[0], u32::MAX);
+        assert_eq!(cpu.sr, CCR_N | CCR_C | CCR_X);
+
+        let (mut cpu, mut ram) = machine(&[0x4080]);
+        cpu.d[0] = 1;
+        cpu.sr = CCR_X;
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.d[0], u32::MAX - 1);
+    }
+
+    #[test]
+    fn x_form_look_alikes_and_rotates_are_illegal() {
+        // ADDX/SUBX -(Ay),-(Ax), ADD/SUB/AND/OR Dn,Dm (opmode 6), ROXL/ROXR/ROL/ROR.L Dn.
+        for op in [
+            0xD188u16, 0x9188, 0xC180, 0x8180, 0xE190, 0xE090, 0xE198, 0xE098, 0xE198 | 0x20, 0x4090,
+        ] {
+            for x in [0, CCR_X] {
+                let (mut cpu, mut ram) = machine(&[op]);
+                cpu.sr = x;
+                assert_eq!(
+                    cpu.step(&mut ram),
+                    Err(CpuError::Illegal { pc: 0x1000, op }),
+                    "op {op:#06x} x={x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn byte_a7_predecrement_and_postincrement_step_by_one() {
+        let (mut c, mut r) = machine(&[0x4227, 0x101F]);
+        r.write8(0x1FFF, 0x5A).unwrap();
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.a[7], 0x1FFF);
+        assert_eq!(r.read8(0x1FFF).unwrap(), 0);
+        r.write8(0x1FFF, 0x5A).unwrap();
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.a[7], 0x2000);
+        assert_eq!(c.d[0] & 0xFF, 0x5A);
     }
 
     #[test]
@@ -1657,6 +1963,102 @@ mod tests {
     }
 
     #[test]
+    fn muls_word_immediate_sign_extends_both_operands() {
+        let (mut cpu, mut ram) = machine(&[0xC3FC, 0x2AAB]);
+        cpu.d[1] = 0x1234_FFFD;
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[1], 0xFFFF_7FFF);
+        assert_eq!(cpu.sr, CCR_X | CCR_N);
+        assert_eq!(cpu.pc, 0x1004);
+    }
+
+    #[test]
+    fn divs_long_register_form_updates_quotient_and_flags() {
+        let (mut cpu, mut ram) = machine(&[0x4C40, 0x2802]);
+        cpu.d[0] = 0x0002_625A;
+        cpu.d[2] = 0x07DE_2900;
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[2], 0x0000_034C);
+        assert_eq!(cpu.sr, CCR_X);
+        assert_eq!(cpu.pc, 0x1004);
+    }
+
+    #[test]
+    fn div_and_rem_long_forms_select_signedness_and_destination() {
+        // (ext, dividend D4, divisor D0, expect D4, expect D1)
+        let cases: [(u16, u32, u32, u32, u32); 5] = [
+            (0x4804, (-7i32) as u32, 2, (-3i32) as u32, 0x1111_1111),
+            (0x4004, 0xFFFF_FFF9, 2, 0x7FFF_FFFC, 0x1111_1111),
+            (0x4801, (-7i32) as u32, 2, (-7i32) as u32, (-1i32) as u32),
+            (0x4001, 0xFFFF_FFF9, 4, 0xFFFF_FFF9, 1),
+            (0x4801, 7, (-2i32) as u32, 7, 1),
+        ];
+        for (ext, dividend, divisor, d4, d1) in cases {
+            let (mut c, mut r) = machine(&[0x4C40, ext]);
+            c.d[4] = dividend;
+            c.d[0] = divisor;
+            c.d[1] = 0x1111_1111;
+            run(&mut c, &mut r, 1);
+            assert_eq!((c.d[4], c.d[1]), (d4, d1), "ext {ext:#06x}");
+            assert_eq!(c.pc, 0x1004);
+        }
+    }
+
+    #[test]
+    fn div_long_with_same_register_keeps_quotient_and_ignores_remainder() {
+        for (dividend, divisor, quotient) in [(7i32, 2i32, 3i32), (-7, 2, -3), (7, -2, -3)] {
+            let (mut c, mut r) = machine(&[0x4C40, 0x4804]);
+            c.d[4] = dividend as u32;
+            c.d[0] = divisor as u32;
+            c.d[1] = 0x1111_1111;
+            run(&mut c, &mut r, 1);
+            assert_eq!((c.d[4], c.d[1]), (quotient as u32, 0x1111_1111));
+        }
+    }
+
+    #[test]
+    fn rem_long_sets_flags_from_remainder() {
+        let (mut c, mut r) = machine(&[0x4C40, 0x4801]);
+        c.d[4] = (-7i32) as u32;
+        c.d[0] = 2;
+        c.sr = CCR_X | CCR_V | CCR_C;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.sr, CCR_X | CCR_N);
+    }
+
+    #[test]
+    fn div_long_rejects_64_bit_form_and_zero_divisor_stops() {
+        let (mut c, mut r) = machine(&[0x4C40, 0x4C04]);
+        assert!(matches!(c.step(&mut r), Err(CpuError::Illegal { .. })));
+        let (mut c, mut r) = machine(&[0x4C40, 0x4804]);
+        c.d[4] = 5;
+        assert!(matches!(
+            c.step(&mut r),
+            Err(CpuError::UnsupportedExceptionState { .. })
+        ));
+    }
+
+    #[test]
+    fn cpushl_is_a_privileged_no_op_for_each_cache_selection() {
+        for op in [0xF468u16, 0xF4A9, 0xF4EF] {
+            let (mut c, mut r) = machine(&[op]);
+            c.sr = 0x2000;
+            let before = c.d;
+            run(&mut c, &mut r, 1);
+            assert_eq!((c.pc, c.d), (0x1002, before));
+            let (mut c, mut r) = machine(&[op]);
+            c.sr = 0;
+            assert_eq!(c.step(&mut r), Err(CpuError::Privilege { pc: 0x1000, op }));
+        }
+    }
+
+    #[test]
     fn movec_data_register_to_vbr() {
         let (mut c, mut r) = machine(&[0x4E7B, 0x0801]);
         c.d[0] = 0x8000_0000;
@@ -1678,6 +2080,14 @@ mod tests {
         c.d[0] = 0x4007_E020;
         run(&mut c, &mut r, 1);
         assert_eq!(c.acr0, 0x4007_E020);
+    }
+
+    #[test]
+    fn movec_data_register_to_acr1() {
+        let (mut c, mut r) = machine(&[0x4E7B, 0x0005]);
+        c.d[0] = 0x0000_E020;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.acr1, 0x0000_E020);
     }
 
     #[test]
@@ -2251,13 +2661,49 @@ mod tests {
 
     #[test]
     fn shifts_other_than_immediate_long_asr_lsr_lsl_are_not_decoded() {
-        for op in [0xE180u16, 0xE898, 0xE848] {
+        for op in [0xE898u16, 0xE848] {
             let (mut c, mut r) = machine(&[op]);
             assert!(matches!(
                 c.run(&mut r, 1).stop,
                 RunStop::Error(CpuError::Illegal { .. })
             ));
         }
+    }
+
+    #[test]
+    fn asl_long_flags_x_c_v_n_z() {
+        const ALL: u16 = CCR_X | CCR_N | CCR_Z | CCR_V | CCR_C;
+        // (opcode, D0, D1 count, initial SR, result, expected CCR)
+        let cases: [(u16, u32, u32, u16, u32, u16); 9] = [
+            (0xE380, 0x1000_0001, 0, ALL, 0x2000_0002, 0),
+            (0xE380, 0x4000_0000, 0, 0, 0x8000_0000, CCR_N | CCR_V),
+            (0xE380, 0x8000_0000, 0, 0, 0, CCR_X | CCR_C | CCR_Z | CCR_V),
+            (0xE380, 0xC000_0000, 0, 0, 0x8000_0000, CCR_X | CCR_C | CCR_N),
+            (0xE180, 0x00FF_0000, 0, 0, 0xFF00_0000, CCR_N | CCR_V),
+            (0xE180, 0xFF00_0000, 0, 0, 0, CCR_X | CCR_C | CCR_Z | CCR_V),
+            (0xE3A0, 0x4000_0000, 0, CCR_X | CCR_V | CCR_C, 0x4000_0000, CCR_X),
+            (0xE3A0, 0x0000_0001, 32, 0, 0, CCR_X | CCR_C | CCR_Z | CCR_V),
+            (0xE3A0, 0xFFFF_FFFF, 40, CCR_X, 0, CCR_Z | CCR_V),
+        ];
+        for (op, d0, d1, sr, result, ccr) in cases {
+            let (mut c, mut r) = machine(&[op]);
+            c.d[0] = d0;
+            c.d[1] = d1;
+            c.sr = sr;
+            run(&mut c, &mut r, 1);
+            assert_eq!(c.d[0], result, "op {op:#06x} d0={d0:#x} count={d1}");
+            assert_eq!(c.sr & ALL, ccr, "op {op:#06x} d0={d0:#x} count={d1}");
+        }
+    }
+
+    #[test]
+    fn asl_long_zero_result_without_sign_change_has_no_overflow() {
+        let (mut c, mut r) = machine(&[0xE380]);
+        c.d[0] = 0;
+        c.sr = CCR_X | CCR_V;
+        run(&mut c, &mut r, 1);
+        assert_eq!(c.d[0], 0);
+        assert_eq!(c.sr & (CCR_X | CCR_Z | CCR_V | CCR_C), CCR_Z);
     }
 
     #[test]

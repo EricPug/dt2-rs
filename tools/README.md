@@ -1,0 +1,8 @@
+- `run-section3.sh`: runs the section-3 boot scenario with a given `dt2-cli` binary and instruction limit.
+- `probe-from-snapshot.sh`: restores a machine snapshot (`SNAP`, default `out/idle2.snap`) and runs an experiment with extra flags.
+- `build-opcode-probe.sh`: builds a scratch `dt2-cli` that dumps distinct executed opcode words (`OPCODE_DUMP=path`) plus the `decode_probe` helper.
+- `opcode_probe_patch.py`: the source patch `build-opcode-probe.sh` applies to the scratch copy.
+- `decode_probe.rs`: example that steps one instruction from hex bytes and prints accept/length/reject.
+- `opcode-diff.py`: compares the emulator's decode of executed opcodes with Capstone; ColdFire-only MVS/MVZ/FF1 are expected differences.
+- `render-uploads.py`: renders distinct display-upload buffers (`DUMP_CALL` output) as 4bpp and 8bpp PNGs and counts distinct frames.
+- `render-uart-frames.py`: replays a full UART8 TX byte dump (`UART8_TX_FILE`) into a 64x128 framebuffer and saves PNGs and a montage.

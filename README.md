@@ -46,11 +46,21 @@ partial INTC2 model; this remains an approximate timing model. `PIT0_ONESHOT` is
 an intentionally behavior-changing probe that suppresses PIT0 requests after the
 first one, useful for isolating post-interrupt code but not representative of
 normal timer behavior. Runs print a bounded RTE history with restored PCs.
+`PIT_FIRST_TICK_DELAY=n` adds `n` modeled ticks after PIT0 is first enabled and
+before its initial counter interval; it is a timing probe, not a hardware clock
+setting.
 `PIT0_PERIODIC` seeds PIT0/INTC2 for periodic interrupt delivery when resuming a
-saved section-3 handoff. `WATCH_WRITE=address` or `WATCH_WRITE=start:end` reports
-overlapping writes with old/new bytes, guest PC, and instruction count.
-`TRACE_REGS=pc` reports the most recent 16 register snapshots at one PC, and
-`TRACE_A1=offset,...` captures A0/A1 pairs at output offsets.
+saved section-3 handoff. `PIT2_PERIODIC` is an opt-in approximate 60 Hz PIT2
+source-15 probe; it is not a measured OS1.17 timer rate. `WATCH_WRITE=address`
+or `WATCH_WRITE=start:end` reports overlapping writes with old/new bytes, guest
+PC, instruction count, and pre-instruction D/A/SR registers. `TRACE_REGS=pc`
+reports the most recent 192 register
+snapshots at one PC; `TRACE_TAIL=n` reports the last 1-1024 pre-instruction
+snapshots with PC, SR, D0-D7, and A0-A7. `TRACE_A1=offset,...` captures A0/A1
+pairs at output offsets. `SCHED_TRACE` logs scheduler list transitions with the
+current TCB, mapped task entry, registers, and raw TCB/live/saved stack words.
+`CONVERT_TRACE` records the conversion output index and the outer CMP/BGT flags
+and branch result around `0x401811d2`.
 Run logs list DSPI0/DSPI1 PUSHR words first, with instruction count, PC, PCS mask,
 and post-write status. The DSPI model completes queued transfers instantly as a
 diagnostic override, even when MCR.HALT/MDIS is set; it is not hardware timing.
@@ -60,9 +70,20 @@ copies the input window when the watched write occurs in the trigger PC range an
 redirects reads from the source window only in the selected decoder PC range;
 writes remain at their original addresses. This deliberately changes memory
 aliasing to test source/output overlap and is not a hardware memory model.
-`UART8_TX` captures transmitted UART8 bytes but does not model receive data or
-serial timing. These are opt-in diagnostic approximations; section-2 direct
-entry is not an SBF boot.
+`UART8_TX` captures transmitted UART8 bytes; `UART8_TX_READY` seeds TXRDY/TXEMP
+at startup without injecting a panel response; `UART8_RX=hex` queues explicit
+receive bytes for a diagnostic handshake. These options do not model serial
+timing or eDMA.
+`PANEL_STUB` answers section 2's `60 01` panel-discovery request through its
+polled SRAM ring, then answers the section-3 UART8 handshake and DMA-delivers a
+group-0 button press, encoder-0 delta, and button release after TCD34 is enabled.
+Its panel records are synthetic diagnostics, not hardware behavior.
+`DTIM1_BOOTSTRAP` models DMA Timer 1 reference compare and INTC0 source 33;
+`DTIM1_TICKS_PER_INSTRUCTION=n` sets an approximate instruction-to-bus-tick
+scale. `DSPI2_BOOTSTRAP` enables the DSPI2 register/FIFO model with no attached
+slave, so reads return the diagnostic `0xffff` fill. These are opt-in probes,
+not evidence of an attached timer clock or peripheral response.
+These are opt-in approximations; section-2 direct entry is not an SBF boot.
 
 `trace-depack <packed-section.bin> [step output-end [output-start]]` logs host
 aPLib input cursors at selected output lengths. The verified section-3 handoff,

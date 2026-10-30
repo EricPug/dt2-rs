@@ -217,6 +217,29 @@ impl Bus for Intc2 {
     }
 }
 
+
+impl Intc2 {
+    pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        for v in [self.imrh, self.imrl, self.intfrch, self.intfrcl] {
+            w.u32(v);
+        }
+        w.bytes(&self.icr);
+    }
+
+    pub fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.imrh = r.u32()?;
+        self.imrl = r.u32()?;
+        self.intfrch = r.u32()?;
+        self.intfrcl = r.u32()?;
+        let icr = r.bytes()?;
+        if icr.len() != self.icr.len() {
+            return Err("INTC ICR size mismatch".into());
+        }
+        self.icr.copy_from_slice(icr);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

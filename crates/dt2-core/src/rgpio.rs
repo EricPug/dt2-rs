@@ -10,11 +10,24 @@ pub struct Rgpio {
     direction: u16,
     data: u16,
     enable: u16,
+    input_high: u16,
+    ready_model: bool,
+    busy_polls: std::cell::Cell<u8>,
 }
 
 impl Rgpio {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Diagnostic: pins forced high when read, standing in for an unmodeled external driver.
+    pub fn set_input_high(&mut self, mask: u16) {
+        self.input_high = mask;
+    }
+
+    /// Diagnostic: pin 0 reads low for one poll after pin 7 rises, then high (a synthetic ready line).
+    pub fn set_ready_model(&mut self, enabled: bool) {
+        self.ready_model = enabled;
     }
 
     pub fn contains(address: u32) -> bool {
@@ -34,7 +47,15 @@ impl Rgpio {
         }
         Ok(match address - RGPIO_BASE {
             0x0 | 0x8 | 0xC => self.direction,
-            0x2 | 0x6 | 0xA | 0xE => self.data,
+            0x2 | 0x6 | 0xA | 0xE => {
+                let mut value = self.data | self.input_high;
+                if self.ready_model && address - RGPIO_BASE == 0x2 {
+                    let busy = self.busy_polls.get();
+                    value = if busy > 0 { value & !1 } else { value | 1 };
+                    self.busy_polls.set(busy.saturating_sub(1));
+                }
+                value
+            }
             0x4 => self.enable,
             _ => return Err(Self::error(address, false)),
         })
@@ -43,6 +64,10 @@ impl Rgpio {
     fn write_word(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         if address & 1 != 0 || !Self::contains(address) {
             return Err(Self::error(address, true));
+        }
+        let rising_strobe = value & 0x80 != 0 && self.data & 0x80 == 0;
+        if rising_strobe && matches!(address - RGPIO_BASE, 0x2 | 0xA) {
+            self.busy_polls.set(1);
         }
         match address - RGPIO_BASE {
             0x0 => self.direction = value,
@@ -132,6 +157,22 @@ impl Bus for Rgpio {
             address.wrapping_add(2),
             u16::from_be_bytes([bytes[2], bytes[3]]),
         )
+    }
+}
+
+
+impl Rgpio {
+    pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        w.u16(self.direction);
+        w.u16(self.data);
+        w.u16(self.enable);
+    }
+
+    pub fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.direction = r.u16()?;
+        self.data = r.u16()?;
+        self.enable = r.u16()?;
+        Ok(())
     }
 }
 

@@ -1,0 +1,5 @@
+#!/bin/bash
+# usage: run-section3.sh <dt2-cli binary> <instruction-limit> [extra run-bin args]; runs the section-3 boot scenario from the repo root.
+bin=$1; limit=$2; shift 2
+cd "$(dirname "$0")/.." || exit 1
+"$bin" run-bin out/section3-pre-entry-image.bin 0x40000000 0x10000000 0x40000400 0x400004e8 "$limit" A7=0x8000fff0 SR=0x2500 D0=0x40000400 D1=0x980 A0=0x400004e8 A1=0x4031ff60 RAMBAR=0x80000235 VBR=0x80000000 CACR=0x0008c000 MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY SYNTHETIC_MCF_MMIO PIT_BOOTSTRAP PIT_TICKS_PER_INSTRUCTION=1 INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=1 DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP UART8_TX_READY UART8_RX=700b000000200130012000 DDR_BOOTSTRAP DSPI0_FLASH=1:out/dt2-os-1.17-container-nor.bin DSPI0_CTAR0=0x3e000020 MMIO16@0xEC09000E=0x187D MMIO16@0xEC09001A=0 MMIO32@0xFC0C0004=0 MMIO32@0xFC0C0008=0x10 MMIO32@0xFC0B806C=0x8 RAM_LOAD_FILE=0x40000000:out/section3-panel-discovery-pre-entry-ddr.bin RAM_LOAD_FILE=0x80000000:out/section3-panel-discovery-pre-entry-sram.bin "$@"

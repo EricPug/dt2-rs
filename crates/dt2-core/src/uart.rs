@@ -1,9 +1,11 @@
 //! MCF5441x UART8 transmit sink (MCF54418RM chapter 41).
 //!
 //! Characters are accepted immediately when TXRDY is set. Serial bit timing,
-//! receive data, and interrupt generation are not modeled.
+//! eDMA transfers, and interrupt generation are not modeled. Tests may queue
+//! bytes for the polled receive path.
 
 use crate::bus::{Bus, BusError};
+use std::collections::VecDeque;
 
 pub const UART8_BASE: u32 = 0xEC07_0000;
 const UART8_END: u32 = UART8_BASE + 0x40;
@@ -20,6 +22,7 @@ const UOP1: u32 = 0x38;
 const UOP0: u32 = 0x3C;
 const USR_TXEMP: u8 = 1 << 3;
 const USR_TXRDY: u8 = 1 << 2;
+const USR_RXRDY: u8 = 1;
 const UCR_TX_ENABLE: u8 = 0x04;
 const UCR_TX_DISABLE: u8 = 0x08;
 const UCR_RESET_MODE_POINTER: u8 = 0x10;
@@ -39,6 +42,7 @@ pub struct Uart8 {
     output_port: u8,
     transmitted: u64,
     captured: Vec<u8>,
+    received: VecDeque<u8>,
 }
 
 impl Uart8 {
@@ -55,6 +59,7 @@ impl Uart8 {
             output_port: 0,
             transmitted: 0,
             captured: Vec::new(),
+            received: VecDeque::new(),
         }
     }
 
@@ -68,6 +73,23 @@ impl Uart8 {
 
     pub fn captured(&self) -> &[u8] {
         &self.captured
+    }
+
+    pub fn queue_receive(&mut self, bytes: &[u8]) {
+        self.receiver_enabled = true;
+        self.received.extend(bytes.iter().copied());
+    }
+
+    pub fn received_remaining(&self) -> usize {
+        self.received.len()
+    }
+
+    pub fn enable_transmitter(&mut self) {
+        self.transmitter_enabled = true;
+    }
+
+    pub fn take_received_for_dma(&mut self) -> Vec<u8> {
+        self.received.drain(..).collect()
     }
 
     fn error(address: u32, write: bool) -> BusError {
@@ -92,12 +114,21 @@ impl Uart8 {
                 self.mode_register_pointer = (self.mode_register_pointer + 1) & 1;
                 Ok(value)
             }
-            USR_UCSR => Ok(if self.transmitter_enabled {
-                USR_TXRDY | USR_TXEMP
+            USR_UCSR => {
+                let mut status = 0;
+                if self.transmitter_enabled {
+                    status |= USR_TXRDY | USR_TXEMP;
+                }
+                if self.receiver_enabled && !self.received.is_empty() {
+                    status |= USR_RXRDY;
+                }
+                Ok(status)
+            }
+            URB_UTB => Ok(if self.receiver_enabled {
+                self.received.pop_front().unwrap_or(0xFF)
             } else {
-                0
+                0xFF
             }),
-            URB_UTB => Ok(0xFF),
             UIPCR_UACR => Ok(0),
             UISR_UIMR => Ok(0),
             UIP => Ok(0xFF),
@@ -187,6 +218,41 @@ impl Bus for Uart8 {
     fn advance_instruction(&mut self) {}
 }
 
+
+impl Uart8 {
+    pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        w.bytes(&self.mode_registers);
+        w.u64(self.mode_register_pointer as u64);
+        w.u8(self.clock_select);
+        w.bool(self.transmitter_enabled);
+        w.bool(self.receiver_enabled);
+        w.u8(self.uacr);
+        w.u8(self.uimr);
+        w.bytes(&self.baud);
+        w.u8(self.output_port);
+        w.u64(self.transmitted);
+        w.bytes(&self.captured);
+        let received: Vec<u8> = self.received.iter().copied().collect();
+        w.bytes(&received);
+    }
+
+    pub fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.mode_registers.copy_from_slice(r.bytes()?);
+        self.mode_register_pointer = r.u64()? as usize;
+        self.clock_select = r.u8()?;
+        self.transmitter_enabled = r.bool()?;
+        self.receiver_enabled = r.bool()?;
+        self.uacr = r.u8()?;
+        self.uimr = r.u8()?;
+        self.baud.copy_from_slice(r.bytes()?);
+        self.output_port = r.u8()?;
+        self.transmitted = r.u64()?;
+        self.captured = r.bytes()?.to_vec();
+        self.received = r.bytes()?.iter().copied().collect();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +288,33 @@ mod tests {
 
         assert_eq!(uart.read8(UART8_BASE + USR_UCSR).unwrap(), 0);
         assert_eq!(uart.read8(UART8_BASE + URB_UTB).unwrap(), 0xFF);
+    }
+
+    #[test]
+    fn queued_receive_bytes_set_rxready_and_are_read_in_order() {
+        let mut uart = Uart8::new();
+        uart.queue_receive(&[0x70, 0x0B, 0x00]);
+
+        assert_eq!(
+            uart.read8(UART8_BASE + USR_UCSR).unwrap() & USR_RXRDY,
+            USR_RXRDY
+        );
+        assert_eq!(uart.read8(UART8_BASE + URB_UTB).unwrap(), 0x70);
+        assert_eq!(uart.read8(UART8_BASE + URB_UTB).unwrap(), 0x0B);
+        assert_eq!(uart.read8(UART8_BASE + URB_UTB).unwrap(), 0x00);
+        assert_eq!(uart.read8(UART8_BASE + URB_UTB).unwrap(), 0xFF);
+        assert_eq!(uart.read8(UART8_BASE + USR_UCSR).unwrap() & USR_RXRDY, 0);
+        assert_eq!(uart.received_remaining(), 0);
+    }
+
+    #[test]
+    fn queued_receive_bytes_can_be_drained_by_dma() {
+        let mut uart = Uart8::new();
+        uart.queue_receive(&[0x20, 0x00, 0x30, 0x00]);
+
+        assert_eq!(uart.take_received_for_dma(), [0x20, 0x00, 0x30, 0x00]);
+        assert_eq!(uart.received_remaining(), 0);
+        assert_eq!(uart.read8(UART8_BASE + USR_UCSR).unwrap() & USR_RXRDY, 0);
     }
 
     #[test]

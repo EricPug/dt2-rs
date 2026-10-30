@@ -521,6 +521,98 @@ impl Bus for DdrController {
     }
 }
 
+
+impl DdrController {
+    pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        w.u32(self.padcr);
+        w.u32(self.cr00);
+        w.u32(self.cr01);
+        w.u32(self.cr02);
+        w.u32(self.cr03);
+        w.u32(self.cr04);
+        w.u32(self.cr05);
+        w.u32(self.cr06);
+        w.u32(self.cr07);
+        w.u32(self.cr08);
+        w.u32(self.cr09);
+        w.u32(self.cr10);
+        w.u32(self.cr11);
+        w.u32(self.cr12);
+        w.u32(self.cr13);
+        w.u32(self.cr14);
+        w.u32(self.cr15);
+        w.u32(self.cr16);
+        w.u32(self.cr17);
+        w.u32(self.cr18);
+        w.u32(self.cr19);
+        w.u32(self.cr20);
+        w.u32(self.cr21);
+        w.u32(self.cr22);
+        w.u32(self.cr23);
+        w.u32(self.cr24);
+        w.u32(self.cr25);
+        w.u32(self.cr26);
+        w.u32(self.cr28);
+        w.u32(self.cr29);
+        w.u32(self.cr31);
+        w.u32(self.cr40);
+        w.u32(self.cr41);
+        w.u32(self.cr42);
+        w.u32(self.cr43);
+        w.u32(self.cr45);
+        w.u32(self.cr56);
+        w.u32(self.cr57);
+        w.u32(self.cr58);
+        w.u32(self.cr59);
+        w.u32(self.cr60);
+    }
+
+    pub fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.padcr = r.u32()?;
+        self.cr00 = r.u32()?;
+        self.cr01 = r.u32()?;
+        self.cr02 = r.u32()?;
+        self.cr03 = r.u32()?;
+        self.cr04 = r.u32()?;
+        self.cr05 = r.u32()?;
+        self.cr06 = r.u32()?;
+        self.cr07 = r.u32()?;
+        self.cr08 = r.u32()?;
+        self.cr09 = r.u32()?;
+        self.cr10 = r.u32()?;
+        self.cr11 = r.u32()?;
+        self.cr12 = r.u32()?;
+        self.cr13 = r.u32()?;
+        self.cr14 = r.u32()?;
+        self.cr15 = r.u32()?;
+        self.cr16 = r.u32()?;
+        self.cr17 = r.u32()?;
+        self.cr18 = r.u32()?;
+        self.cr19 = r.u32()?;
+        self.cr20 = r.u32()?;
+        self.cr21 = r.u32()?;
+        self.cr22 = r.u32()?;
+        self.cr23 = r.u32()?;
+        self.cr24 = r.u32()?;
+        self.cr25 = r.u32()?;
+        self.cr26 = r.u32()?;
+        self.cr28 = r.u32()?;
+        self.cr29 = r.u32()?;
+        self.cr31 = r.u32()?;
+        self.cr40 = r.u32()?;
+        self.cr41 = r.u32()?;
+        self.cr42 = r.u32()?;
+        self.cr43 = r.u32()?;
+        self.cr45 = r.u32()?;
+        self.cr56 = r.u32()?;
+        self.cr57 = r.u32()?;
+        self.cr58 = r.u32()?;
+        self.cr59 = r.u32()?;
+        self.cr60 = r.u32()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

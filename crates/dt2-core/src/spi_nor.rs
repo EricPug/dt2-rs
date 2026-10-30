@@ -53,6 +53,24 @@ impl W25q128jv {
 }
 
 impl SpiDevice for W25q128jv {
+    fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        w.u16(self.command.map_or(0, |c| 0x100 | u16::from(c)));
+        w.u64(self.received as u64);
+        w.u32(self.address);
+        w.bool(self.write_enabled);
+        w.u16(self.unsupported.map_or(0, |c| 0x100 | u16::from(c)));
+    }
+
+    fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        let opt = |v: u16| (v & 0x100 != 0).then_some(v as u8);
+        self.command = opt(r.u16()?);
+        self.received = r.u64()? as usize;
+        self.address = r.u32()?;
+        self.write_enabled = r.bool()?;
+        self.unsupported = opt(r.u16()?);
+        Ok(())
+    }
+
     fn select(&mut self) {
         self.command = None;
         self.received = 0;

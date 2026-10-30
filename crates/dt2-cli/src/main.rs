@@ -3,6 +3,8 @@ use dt2_core::{
     coldfire::{Cpu, CpuError, InterruptInjection, RunStop},
     ddr::DdrController,
     dspi::Dspi,
+    dtim1::DmaTimer1,
+    intc0::Intc0,
     intc2::Intc2,
     pit::PitController,
     rgpio::Rgpio,
@@ -38,7 +40,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP DSPI1_BOOTSTRAP PIT0_ONESHOT PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -305,6 +307,35 @@ fn parse_uart_hex_log(log: &str) -> Result<Vec<u8>, String> {
         .collect()
 }
 
+fn parse_uart_rx_bytes(hex: &str) -> Result<Vec<u8>, String> {
+    if hex.is_empty() || hex.len() % 2 != 0 {
+        return Err("UART8_RX must contain a non-empty even number of hex digits".to_string());
+    }
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let byte = std::str::from_utf8(pair).expect("ASCII hex input");
+            u8::from_str_radix(byte, 16).map_err(|_| format!("invalid UART8_RX hex byte: {byte}"))
+        })
+        .collect()
+}
+
+fn panel_stub_handshake_reply() -> &'static [u8] {
+    &[0x70, 0x0B, 0x00, 0x00, 0x00]
+}
+
+const PANEL_STUB_DISCOVERY_QUERY: [u8; 2] = [0x60, 0x01];
+
+fn panel_stub_input_records() -> &'static [u8] {
+    &[0x20, 0x01, 0x30, 0x01, 0x20, 0x00]
+}
+
+fn panel_stub_discovery_records() -> &'static [u8] {
+    &[
+        0x20, 0x00, 0x21, 0x00, 0x22, 0x00, 0x23, 0x00, 0x24, 0x00, 0x25, 0x00, 0x26, 0x00,
+    ]
+}
+
 fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
     let expected = UART_RECORD_HEADER_BYTES + UART_RECORD_BYTES * UART_RECORD_COUNT + 1;
     if bytes.len() != expected {
@@ -360,7 +391,7 @@ fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP INTC2_BOOTSTRAP PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT INJECT_IRQ=count:level:vector UART8_TX SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value TRACE_TAIL=n ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -426,15 +457,30 @@ fn run_binary(args: &[String]) {
     let intc2_bootstrap = args[6..]
         .iter()
         .any(|assignment| assignment == "INTC2_BOOTSTRAP");
+    let dtim1_bootstrap = args[6..]
+        .iter()
+        .any(|assignment| assignment == "DTIM1_BOOTSTRAP");
+    let pit2_periodic = args[6..]
+        .iter()
+        .any(|assignment| assignment == "PIT2_PERIODIC");
     let dspi1_bootstrap = args[6..]
         .iter()
         .any(|assignment| assignment == "DSPI1_BOOTSTRAP");
+    let dspi2_bootstrap = args[6..]
+        .iter()
+        .any(|assignment| assignment == "DSPI2_BOOTSTRAP");
     let pit0_oneshot = args[6..]
         .iter()
         .any(|assignment| assignment == "PIT0_ONESHOT");
     let loop_detect = args[6..]
         .iter()
         .any(|assignment| assignment == "LOOP_DETECT");
+    let scheduler_trace = args[6..]
+        .iter()
+        .any(|assignment| assignment == "SCHED_TRACE");
+    let conversion_trace = args[6..]
+        .iter()
+        .any(|assignment| assignment == "CONVERT_TRACE");
     let stop_pc = args[6..].iter().find_map(|assignment| {
         assignment.strip_prefix("STOP_PC=").map(|pc| {
             parse_address(pc).unwrap_or_else(|error| {
@@ -475,6 +521,20 @@ fn run_binary(args: &[String]) {
             })
         })
     });
+    let trace_tail = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("TRACE_TAIL="))
+        .map(|value| {
+            value
+                .parse::<usize>()
+                .ok()
+                .filter(|length| (1..=1024).contains(length))
+                .unwrap_or_else(|| {
+                    eprintln!("TRACE_TAIL must be an integer from 1 through 1024");
+                    std::process::exit(2)
+                })
+        })
+        .unwrap_or(0);
     let trace_a1_checkpoints: Vec<u32> = args[6..]
         .iter()
         .filter_map(|assignment| assignment.strip_prefix("TRACE_A1="))
@@ -643,11 +703,70 @@ fn run_binary(args: &[String]) {
         eprintln!("PIT_TICKS_PER_INSTRUCTION requires PIT_BOOTSTRAP");
         std::process::exit(2);
     }
+    let pit_first_tick_delay = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("PIT_FIRST_TICK_DELAY="))
+        .map(|value| match value.parse::<u64>() {
+            Ok(ticks) if ticks > 0 => ticks,
+            _ => {
+                eprintln!("PIT_FIRST_TICK_DELAY must be a positive integer");
+                std::process::exit(2)
+            }
+        })
+        .unwrap_or(0);
+    if pit_first_tick_delay > 0 && !pit_bootstrap {
+        eprintln!("PIT_FIRST_TICK_DELAY requires PIT_BOOTSTRAP");
+        std::process::exit(2);
+    }
+    let dtim1_tick_setting = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("DTIM1_TICKS_PER_INSTRUCTION="));
+    let dtim1_ticks_per_instruction = match dtim1_tick_setting {
+        Some(value) => match value.parse::<u32>() {
+            Ok(ticks) if ticks > 0 => ticks,
+            _ => {
+                eprintln!("DTIM1_TICKS_PER_INSTRUCTION must be a positive integer");
+                std::process::exit(2)
+            }
+        },
+        None => 1,
+    };
+    if dtim1_tick_setting.is_some() && !dtim1_bootstrap {
+        eprintln!("DTIM1_TICKS_PER_INSTRUCTION requires DTIM1_BOOTSTRAP");
+        std::process::exit(2);
+    }
     if pit0_oneshot && (!pit_bootstrap || !intc2_bootstrap) {
         eprintln!("PIT0_ONESHOT requires PIT_BOOTSTRAP and INTC2_BOOTSTRAP");
         std::process::exit(2);
     }
+    if pit2_periodic && (!pit_bootstrap || !intc2_bootstrap) {
+        eprintln!("PIT2_PERIODIC requires PIT_BOOTSTRAP and INTC2_BOOTSTRAP");
+        std::process::exit(2);
+    }
     let uart8_tx = args[6..].iter().any(|assignment| assignment == "UART8_TX");
+    let uart8_tx_ready = args[6..]
+        .iter()
+        .any(|assignment| assignment == "UART8_TX_READY");
+    let uart8_rx = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("UART8_RX="))
+        .map(|hex| {
+            parse_uart_rx_bytes(hex).unwrap_or_else(|error| {
+                eprintln!("{error}");
+                std::process::exit(2)
+            })
+        });
+    let panel_stub = args[6..]
+        .iter()
+        .any(|assignment| assignment == "PANEL_STUB");
+    if panel_stub && uart8_rx.is_some() {
+        eprintln!("PANEL_STUB cannot be combined with UART8_RX=hex");
+        std::process::exit(2);
+    }
+    if panel_stub && !range_fits(ram_base, ram_size, 0x4FE3_A000, 0x400) {
+        eprintln!("PANEL_STUB requires mapped RAM covering 0x4fe3a000..0x4fe3a400");
+        std::process::exit(2);
+    }
     let inspect_trap0 = args[6..]
         .iter()
         .any(|assignment| assignment == "INSPECT_TRAP0");
@@ -691,12 +810,30 @@ fn run_binary(args: &[String]) {
         } else {
             bus.attach_pit_bootstrap_with_ticks(pit_ticks_per_instruction);
         }
+        if pit_first_tick_delay > 0 {
+            bus.pit
+                .as_mut()
+                .unwrap()
+                .set_first_tick_delay(pit_first_tick_delay);
+        }
     }
     if intc2_bootstrap {
         bus.attach_intc2();
     }
+    if dtim1_bootstrap {
+        bus.attach_dtim1_bootstrap(dtim1_ticks_per_instruction);
+    }
     if dspi1_bootstrap {
         bus.attach_dspi1_registers();
+    }
+    if dspi2_bootstrap {
+        bus.attach_dspi2_registers();
+    }
+    if scheduler_trace {
+        bus.enable_scheduler_trace();
+    }
+    if conversion_trace {
+        bus.enable_conversion_trace();
     }
     if pit0_oneshot {
         bus.enable_pit0_oneshot();
@@ -706,6 +843,9 @@ fn run_binary(args: &[String]) {
     }
     if let Some(pc) = trace_register_pc {
         bus.trace_registers_at(pc);
+    }
+    if trace_tail > 0 {
+        bus.trace_instruction_tail(trace_tail);
     }
     bus.trace_a1_checkpoints(&trace_a1_checkpoints);
     if let Some(range) = trace_a0_range {
@@ -726,8 +866,17 @@ fn run_binary(args: &[String]) {
     if loop_detect {
         bus.enable_loop_detection();
     }
-    if uart8_tx {
+    if uart8_tx || uart8_tx_ready || uart8_rx.is_some() || panel_stub {
         bus.attach_uart8_tx();
+    }
+    if uart8_tx_ready {
+        bus.enable_uart8_tx_ready();
+    }
+    if panel_stub {
+        bus.enable_panel_stub();
+    }
+    if let Some(bytes) = &uart8_rx {
+        bus.queue_uart8_rx(bytes);
     }
     bus.load_ram(image_address, &bytes).unwrap_or_else(|error| {
         eprintln!("{error}");
@@ -751,20 +900,40 @@ fn run_binary(args: &[String]) {
             || assignment == "SYNTHETIC_MCF_MMIO"
             || assignment == "PIT_BOOTSTRAP"
             || assignment == "INTC2_BOOTSTRAP"
+            || assignment == "DTIM1_BOOTSTRAP"
             || assignment == "DSPI1_BOOTSTRAP"
+            || assignment == "DSPI2_BOOTSTRAP"
             || assignment == "PIT0_ONESHOT"
+            || assignment == "PIT2_PERIODIC"
+            || assignment.starts_with("SNAPSHOT_SAVE=")
+            || assignment.starts_with("SNAPSHOT_LOAD=")
+            || assignment.starts_with("UART8_RX_LATE=")
+            || assignment.starts_with("RGPIO_INPUT_HIGH=")
+            || assignment.starts_with("RGPIO_TRACE=")
+            || assignment == "RGPIO_READY_MODEL"
+            || assignment.starts_with("UART8_TX_FILE=")
+            || assignment.starts_with("UART8_RX_PERIODIC=")
+            || assignment.starts_with("DUMP_CALL=")
             || assignment.starts_with("STOP_PC=")
             || assignment.starts_with("WATCH_WRITE=")
             || assignment.starts_with("TRACE_REGS=")
+            || assignment.starts_with("TRACE_TAIL=")
             || assignment.starts_with("TRACE_A1=")
             || assignment.starts_with("TRACE_A0_RANGE=")
             || assignment.starts_with("TRACE_PC_RANGE=")
             || assignment.starts_with("RAM_REMAP=")
             || assignment.starts_with("RAM_SNAPSHOT=")
             || assignment.starts_with("PIT_TICKS_PER_INSTRUCTION=")
+            || assignment.starts_with("PIT_FIRST_TICK_DELAY=")
+            || assignment.starts_with("DTIM1_TICKS_PER_INSTRUCTION=")
             || assignment == "LOOP_DETECT"
+            || assignment == "SCHED_TRACE"
+            || assignment == "CONVERT_TRACE"
             || assignment.starts_with("INJECT_IRQ=")
             || assignment == "UART8_TX"
+            || assignment == "UART8_TX_READY"
+            || assignment.starts_with("UART8_RX=")
+            || assignment == "PANEL_STUB"
             || assignment == "INSPECT_TRAP0"
         {
             continue;
@@ -772,6 +941,13 @@ fn run_binary(args: &[String]) {
         if assignment == "PIT0_PERIODIC" {
             bus.configure_pit0_periodic().unwrap_or_else(|error| {
                 eprintln!("cannot configure PIT0_PERIODIC: {error:?}");
+                std::process::exit(2)
+            });
+            continue;
+        }
+        if assignment == "PIT2_PERIODIC" {
+            bus.configure_pit2_periodic().unwrap_or_else(|error| {
+                eprintln!("cannot configure PIT2_PERIODIC: {error:?}");
                 std::process::exit(2)
             });
             continue;
@@ -863,6 +1039,90 @@ fn run_binary(args: &[String]) {
             std::process::exit(2)
         });
     }
+    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("SNAPSHOT_LOAD=")) {
+        let data = std::fs::read(path).unwrap_or_else(|error| {
+            eprintln!("cannot read SNAPSHOT_LOAD {path}: {error}");
+            std::process::exit(2)
+        });
+        bus.load_snapshot(&mut cpu, &data, ram_base, ram_size as u32)
+            .unwrap_or_else(|error| {
+                eprintln!("cannot restore snapshot: {error}");
+                std::process::exit(2)
+            });
+        println!("restored snapshot {path}: PC={:#010x}", cpu.pc);
+    }
+    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_TX_FILE=")) {
+        let open = |path: &str| {
+            std::fs::File::create(path).map(std::io::BufWriter::new).unwrap_or_else(|error| {
+                eprintln!("cannot create {path}: {error}");
+                std::process::exit(2)
+            })
+        };
+        bus.uart8_tx_file = Some((open(path), open(&format!("{path}.times"))));
+    }
+    if let Some(spec) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_RX_PERIODIC=")) {
+        let (period, messages) = spec.split_once(':').unwrap_or_else(|| {
+            eprintln!("UART8_RX_PERIODIC expects period:hex[,hex...]");
+            std::process::exit(2)
+        });
+        let period: usize = period.parse().unwrap_or_else(|_| {
+            eprintln!("invalid UART8_RX_PERIODIC period");
+            std::process::exit(2)
+        });
+        let messages: Vec<Vec<u8>> = messages
+            .split(',')
+            .map(|hex| {
+                parse_uart_rx_bytes(hex).unwrap_or_else(|error| {
+                    eprintln!("{error}");
+                    std::process::exit(2)
+                })
+            })
+            .collect();
+        bus.uart8_rx_periodic = Some((period, messages, 0, 0));
+    }
+    if args[6..].iter().any(|a| a == "RGPIO_READY_MODEL") {
+        bus.rgpio_ready_model = true;
+    }
+    for spec in args[6..].iter().filter_map(|a| a.strip_prefix("DUMP_CALL=")) {
+        let fields: Vec<&str> = spec.splitn(4, ':').collect();
+        let parsed = (fields.len() == 4)
+            .then(|| {
+                Some(CallDump {
+                    pc: parse_address(fields[0]).ok()?,
+                    buffer_arg: fields[1].parse().ok().filter(|index| *index < 3)?,
+                    length: fields[2].parse().ok()?,
+                    prefix: fields[3].to_string(),
+                })
+            })
+            .flatten();
+        bus.dump_calls.push(parsed.unwrap_or_else(|| {
+            eprintln!("DUMP_CALL expects pc:buffer-arg(0-2):length:path-prefix, got {spec}");
+            std::process::exit(2)
+        }));
+    }
+    if let Some(limit) = args[6..].iter().find_map(|a| a.strip_prefix("RGPIO_TRACE=")) {
+        bus.rgpio_trace_limit = limit.parse().unwrap_or_else(|_| {
+            eprintln!("RGPIO_TRACE must be an integer");
+            std::process::exit(2)
+        });
+    }
+    if let Some(mask) = args[6..].iter().find_map(|a| a.strip_prefix("RGPIO_INPUT_HIGH=")) {
+        bus.rgpio_input_high = parse_address(mask).unwrap_or_else(|error| {
+            eprintln!("invalid RGPIO_INPUT_HIGH: {error}");
+            std::process::exit(2)
+        }) as u16;
+    }
+    if let Some(hex) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_RX_LATE=")) {
+        let bytes = parse_uart_rx_bytes(hex).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2)
+        });
+        bus.deliver_uart8_rx_now(&bytes).unwrap_or_else(|error| {
+            eprintln!("cannot deliver UART8_RX_LATE at {:#010x}", error.addr);
+            std::process::exit(2)
+        });
+        println!("UART8_RX_LATE: delivered {} byte(s) through the RX DMA ring", bytes.len());
+    }
     let run_started = Instant::now();
     let report = cpu.run_with_interrupt(&mut bus, instruction_limit, interrupt_injection);
     let elapsed_seconds = run_started.elapsed().as_secs_f64();
@@ -872,6 +1132,24 @@ fn run_binary(args: &[String]) {
         0.0
     };
 
+    if let Some((bytes, times)) = &mut bus.uart8_tx_file {
+        use std::io::Write;
+        let _ = bytes.flush();
+        let _ = times.flush();
+    }
+    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("SNAPSHOT_SAVE=")) {
+        let data = bus
+            .save_snapshot(&cpu, ram_base, ram_size as u32)
+            .unwrap_or_else(|error| {
+                eprintln!("cannot save snapshot: {error}");
+                std::process::exit(2)
+            });
+        std::fs::write(path, &data).unwrap_or_else(|error| {
+            eprintln!("cannot write SNAPSHOT_SAVE {path}: {error}");
+            std::process::exit(2)
+        });
+        println!("saved snapshot {path}: {} bytes", data.len());
+    }
     for (address, length) in ram_dumps {
         match bus.dump_ram(address, length) {
             Ok(bytes) => print_ram_dump(address, &bytes),
@@ -941,14 +1219,32 @@ fn run_binary(args: &[String]) {
     if let Some(pc) = stop_pc {
         println!("stop breakpoint configured at PC={pc:#010x}");
     }
+    if panel_stub {
+        println!("panel stub: answers section-2 discovery and section-3 UART8 handshake; input records are synthetic; eDMA timing is diagnostic");
+    }
+    if uart8_tx_ready {
+        println!("UART8_TX_READY diagnostic: TXRDY/TXEMP asserted from startup; no panel response or RX records are injected");
+    }
     if pit0_oneshot {
         println!("PIT0 one-shot diagnostic: expose the first unmasked PIT0 request; suppress later PIT0 requests");
+    }
+    if pit2_periodic {
+        println!("PIT2 periodic diagnostic: approximate 60 Hz timer source 15; not a measured OS1.17 rate");
+    }
+    if dtim1_bootstrap {
+        println!("DTIM1 diagnostic: reference-compare timer 1 with {dtim1_ticks_per_instruction} bus tick(s) per retired instruction; approximate timing; INTC0 source 33 is modeled");
     }
     if dspi1_bootstrap {
         println!("DSPI1 model: registers/FIFO only, no attached slave; received data is zero");
     }
+    if dspi2_bootstrap {
+        println!("DSPI2 model: registers/FIFO only, no attached slave; received data is 0xffff");
+    }
     bus.print_watched_writes();
     bus.print_register_trace();
+    bus.print_instruction_trace_tail();
+    bus.print_scheduler_trace();
+    bus.print_conversion_trace();
     println!("executed {} instructions", report.instructions);
     println!(
         "runner throughput: {elapsed_seconds:.3}s, {instructions_per_second:.0} instructions/s"
@@ -979,7 +1275,7 @@ fn run_binary(args: &[String]) {
     }
     if bus.pit.is_some() {
         println!(
-            "PIT model: {pit_ticks_per_instruction} timer tick(s) per retired instruction;{}approximate timing, no INTC delivery",
+            "PIT model: {pit_ticks_per_instruction} timer tick(s) per retired instruction;{}approximate timing; INTC delivery requires INTC2_BOOTSTRAP",
             if pit_ticks_per_instruction > 1 {
                 " accelerated "
             } else {
@@ -988,14 +1284,22 @@ fn run_binary(args: &[String]) {
         );
     }
     if let Some(pit) = &bus.pit {
-        if let Some((pcsr, pmr, counter)) = pit.timer_state(1) {
-            println!("PIT1 state: PCSR={pcsr:#06x} PMR={pmr:#06x} PCNTR={counter:#06x}");
+        for module in 0..4 {
+            if let Some((pcsr, pmr, counter)) = pit.timer_state(module) {
+                println!(
+                    "PIT{module} state: PCSR={pcsr:#06x} PMR={pmr:#06x} PCNTR={counter:#06x}"
+                );
+            }
         }
+    }
+    if pit_first_tick_delay > 0 {
+        println!("PIT0 first-tick diagnostic delay: {pit_first_tick_delay} modeled bus ticks after the first enable; approximate timing");
     }
     if let Some(uart) = &bus.uart8 {
         println!(
-            "UART8 model: TX-only sink, no RX or serial timing; captured {} bytes",
-            uart.transmitted()
+            "UART8 model: TX/RX byte stream, serial timing not modeled; captured {} bytes, {} RX bytes remain",
+            uart.transmitted(),
+            uart.received_remaining()
         );
         if !uart.captured().is_empty() {
             let hex = uart
@@ -1041,17 +1345,19 @@ fn run_binary(args: &[String]) {
         }
     }
     bus.print_access_trace();
+    bus.print_uart8_trace();
     bus.print_loop_reports();
     bus.print_last_control_flow();
     bus.print_rte_history();
     bus.print_halt_context(report.stop);
     print_stop(report.stop);
     println!(
-        "PC={:#010x} SR={:#06x} RAMBAR={:#010x} ACR0={:#010x} VBR={:#010x} CACR={:#010x} RGPIOBAR={:#010x} DEBUG_CSR={:#010x}",
+        "PC={:#010x} SR={:#06x} RAMBAR={:#010x} ACR0={:#010x} ACR1={:#010x} VBR={:#010x} CACR={:#010x} RGPIOBAR={:#010x} DEBUG_CSR={:#010x}",
         report.cpu.pc,
         report.cpu.sr,
         report.cpu.rambar,
         report.cpu.acr0,
+        report.cpu.acr1,
         report.cpu.vbr,
         report.cpu.cacr,
         report.cpu.rgpiobar,
@@ -1082,6 +1388,30 @@ fn parse_address(value: &str) -> Result<u32, String> {
 
 fn hex_bytes(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn print_scheduler_words(label: &str, address: Option<u32>, words: &[u32]) {
+    let rendered = words
+        .iter()
+        .map(|word| format!("{word:#010x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if let Some(address) = address {
+        println!("    {label} at {address:#010x}: {rendered}");
+    } else {
+        println!("    {label}: {rendered}");
+    }
+}
+
+fn scheduler_event_kind(pc: u32) -> &'static str {
+    match pc {
+        0x4000_13EC | 0x4000_145E => "ready-list removal/block transition",
+        0x4000_14BA => "ready-list insertion/wakeup transition",
+        0x4000_1344 => "task-return trampoline",
+        0x4000_141A | 0x4000_13A6 => "semaphore pend",
+        0x4000_1608 => "delay call",
+        _ => "scheduler event",
+    }
 }
 
 fn range_fits(base: u32, size: usize, address: u32, length: usize) -> bool {
@@ -1199,11 +1529,12 @@ fn set_register(cpu: &mut Cpu, assignment: &str) -> Result<(), String> {
     match register {
         "RAMBAR" => cpu.rambar = value,
         "ACR0" => cpu.acr0 = value,
+        "ACR1" => cpu.acr1 = value,
         "VBR" => cpu.vbr = value,
         "CACR" => cpu.cacr = value,
         _ => {}
     }
-    if matches!(register, "RAMBAR" | "ACR0" | "VBR" | "CACR") {
+    if matches!(register, "RAMBAR" | "ACR0" | "ACR1" | "VBR" | "CACR") {
         return Ok(());
     }
     if let Some(index) = register.strip_prefix('D') {
@@ -1246,13 +1577,36 @@ struct ProbeBus {
     sram_overlay_sbf_alias: bool,
     mmio: BTreeMap<u32, u8>,
     dspi0: Option<Dspi>,
+    dspi2: Option<Dspi>,
     ddr: Option<DdrController>,
     pit: Option<PitController>,
+    dtim1: Option<DmaTimer1>,
+    intc0: Option<Intc0>,
     intc2: Option<Intc2>,
     rgpio: Option<Rgpio>,
     rgpiobar: u32,
     current_sr: u16,
+    current_d: [u32; 8],
+    current_a: [u32; 8],
     uart8: Option<Uart8>,
+    panel_stub: bool,
+    panel_stub_discovery_queued: bool,
+    panel_stub_handshake_queued: bool,
+    panel_stub_tx_tail: VecDeque<u8>,
+    uart8_dma_daddr: u32,
+    uart8_dma_ring_base: u32,
+    uart8_dma_enabled: bool,
+    uart8_rx_irq_pending: bool,
+    uart8_tx_irq_pending: bool,
+    rgpio_input_high: u16,
+    rgpio_ready_model: bool,
+    uart8_rx_periodic: Option<(usize, Vec<Vec<u8>>, usize, usize)>,
+    uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
+    dump_calls: Vec<CallDump>,
+    dump_call_count: usize,
+    edma_tcd: BTreeMap<u32, u8>,
+    uart8_trace_events: Vec<Uart8TraceEvent>,
+    suppressed_uart8_trace_events: usize,
     dspi1: Option<Dspi>,
     dspi_push_events: Vec<DspiPushEvent>,
     dspi_push_count: usize,
@@ -1267,6 +1621,14 @@ struct ProbeBus {
     watched_completion_tail: Option<(usize, Vec<u8>)>,
     trace_register_pc: Option<u32>,
     register_trace: VecDeque<RegisterTrace>,
+    instruction_trace_tail_limit: usize,
+    instruction_trace_tail: VecDeque<RegisterTrace>,
+    scheduler_trace_enabled: bool,
+    scheduler_trace_events: VecDeque<SchedulerTraceEvent>,
+    scheduler_task_entries: BTreeMap<u32, u32>,
+    scheduler_task_creations: Vec<SchedulerTaskCreation>,
+    conversion_trace_enabled: bool,
+    conversion_trace_events: VecDeque<ConversionTraceEvent>,
     trace_a1_checkpoints: Vec<(u32, Option<RegisterTrace>)>,
     trace_a1_next_index: usize,
     trace_a0_range: Option<(u32, u32)>,
@@ -1278,6 +1640,8 @@ struct ProbeBus {
     section3_mmio_count: usize,
     rgpio_access_events: Vec<(u32, AccessEvent)>,
     rgpio_access_count: usize,
+    rgpio_trace_limit: usize,
+    rgpio_trace: Vec<RgpioTraceEntry>,
     access_addresses: BTreeSet<u32>,
     access_summaries: BTreeMap<u32, AccessSummary>,
     current_pc: u32,
@@ -1294,6 +1658,14 @@ struct ProbeBus {
     rte_count: usize,
     rte_history: VecDeque<RteDiagnostic>,
     recent_mmio_accesses: VecDeque<(u32, AccessEvent)>,
+}
+
+#[derive(Clone)]
+struct CallDump {
+    pc: u32,
+    buffer_arg: usize,
+    length: usize,
+    prefix: String,
 }
 
 #[derive(Clone, Copy)]
@@ -1318,8 +1690,20 @@ struct RamSnapshot {
 
 const DSPI0_BASE: u32 = 0xFC05_C000;
 const DSPI1_BASE: u32 = 0xFC03_C000;
+const DSPI2_BASE: u32 = 0xEC03_8000;
+const UART8_URB: u32 = 0xEC07_000C;
+const UART8_TCD34_DADDR: u32 = 0xFC04_5450;
+const UART8_TCD34_REQUEST: u32 = 0xFC04_4018;
+const UART8_TCD34_CINT: u32 = 0xFC04_401C;
+const UART8_TCD34_REQUEST_VALUE: u8 = 0x22;
+const EDMA_SERQ: u32 = 0xFC04_4018;
+const EDMA_TCD_WINDOW: std::ops::Range<u32> = 0xFC04_5000..0xFC04_6000;
+const UART8_TX_DMA_CHANNEL: u8 = 0x23;
+const UART8_DMA_RING_MASK: u32 = 0x3FF;
+const PANEL_STUB_QUERY: [u8; 4] = [0x60, 0x02, 0x70, 0x00];
 const MAX_DSPI_PUSH_EVENTS: usize = 262_144;
 const MAX_DSPI_POP_EVENTS: usize = 262_144;
+const MAX_UART8_TRACE_EVENTS: usize = 32_768;
 const MCF_SRAM_ALIAS_WINDOW: (u32, u32) = (0x8000_0000, 0x9000_0000);
 const MCF_PERIPHERAL_WINDOWS: [(u32, u32); 2] =
     [(0xEC00_0000, 0xED00_0000), (0xFC00_0000, 0xFD00_0000)];
@@ -1330,7 +1714,9 @@ const MAX_LOOP_TRACKED_PCS: usize = 4096;
 const MAX_LOOP_HISTORY: usize = 4096;
 const MAX_RTE_HISTORY: usize = 16;
 const MAX_WATCHED_WRITES: usize = 16_384;
-const MAX_REGISTER_TRACE: usize = 16;
+const MAX_REGISTER_TRACE: usize = 192;
+const MAX_SCHED_TRACE_EVENTS: usize = 1024;
+const MAX_CONVERSION_TRACE_EVENTS: usize = 4096;
 const PIT1_PCSR: u32 = 0xFC08_4000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1352,6 +1738,15 @@ impl AccessSource {
             Self::Mixed => "mixed",
         }
     }
+}
+
+// Consecutive identical accesses (a polling loop) are folded into one entry.
+struct RgpioTraceEntry {
+    instruction: usize,
+    pc: u32,
+    event: AccessEvent,
+    sp: u32,
+    repeats: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1380,6 +1775,17 @@ struct DspiPopEvent {
     width_bits: u8,
     value: u32,
     status_after: u32,
+}
+
+#[derive(Clone, Copy)]
+struct Uart8TraceEvent {
+    instruction_count: usize,
+    pc: u32,
+    address: u32,
+    value: u8,
+    write: bool,
+    dma: bool,
+    dma_destination: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1442,13 +1848,54 @@ struct WatchedWrite {
     width_bits: u8,
     old_bytes: Vec<u8>,
     new_bytes: Vec<u8>,
+    d: [u32; 8],
+    a: [u32; 8],
+    sr: u16,
 }
 
 struct RegisterTrace {
+    instruction_count: usize,
     pc: u32,
     d: [u32; 8],
     a: [u32; 8],
     sr: u16,
+}
+
+struct SchedulerTraceEvent {
+    instruction_count: usize,
+    pc: u32,
+    d: [u32; 8],
+    a: [u32; 8],
+    sr: u16,
+    current_tcb: Option<u32>,
+    tcb_saved_sp: Option<u32>,
+    task_entry: Option<u32>,
+    saved_sp_word0: Option<u32>,
+    tcb_words: Vec<u32>,
+    live_stack_words: Vec<u32>,
+    saved_stack_words: Vec<u32>,
+}
+
+struct SchedulerTaskCreation {
+    instruction_count: usize,
+    tcb: u32,
+    entry: u32,
+    priority: u32,
+    stack_base: u32,
+    stack_size: u32,
+}
+
+struct ConversionTraceEvent {
+    instruction_count: usize,
+    pc: u32,
+    d1: u32,
+    loop_index: Option<u32>,
+    output_base: u32,
+    compare_left: u32,
+    compare_right: u32,
+    sr: u16,
+    branch_taken: Option<bool>,
+    branch_target: Option<u32>,
 }
 
 struct BranchDiagnostic {
@@ -1470,13 +1917,36 @@ impl ProbeBus {
             sram_overlay_sbf_alias: false,
             mmio: BTreeMap::new(),
             dspi0: None,
+            dspi2: None,
             ddr: None,
             pit: None,
+            dtim1: None,
+            intc0: None,
             intc2: None,
             rgpio: None,
             rgpiobar: dt2_core::coldfire::RGPIOBAR_RESET,
             current_sr: 0x2000,
+            current_d: [0; 8],
+            current_a: [0; 8],
             uart8: None,
+            panel_stub: false,
+            panel_stub_discovery_queued: false,
+            panel_stub_handshake_queued: false,
+            panel_stub_tx_tail: VecDeque::new(),
+            uart8_dma_daddr: 0,
+            uart8_dma_ring_base: 0,
+            uart8_dma_enabled: false,
+            uart8_rx_irq_pending: false,
+            uart8_tx_irq_pending: false,
+            rgpio_input_high: 0,
+            rgpio_ready_model: false,
+            uart8_rx_periodic: None,
+            uart8_tx_file: None,
+            dump_calls: Vec::new(),
+            dump_call_count: 0,
+            edma_tcd: BTreeMap::new(),
+            uart8_trace_events: Vec::new(),
+            suppressed_uart8_trace_events: 0,
             dspi1: None,
             dspi_push_events: Vec::new(),
             dspi_push_count: 0,
@@ -1491,6 +1961,14 @@ impl ProbeBus {
             watched_completion_tail: None,
             trace_register_pc: None,
             register_trace: VecDeque::new(),
+            instruction_trace_tail_limit: 0,
+            instruction_trace_tail: VecDeque::new(),
+            scheduler_trace_enabled: false,
+            scheduler_trace_events: VecDeque::new(),
+            scheduler_task_entries: BTreeMap::new(),
+            scheduler_task_creations: Vec::new(),
+            conversion_trace_enabled: false,
+            conversion_trace_events: VecDeque::new(),
             trace_a1_checkpoints: Vec::new(),
             trace_a1_next_index: 0,
             trace_a0_range: None,
@@ -1502,6 +1980,8 @@ impl ProbeBus {
             section3_mmio_count: 0,
             rgpio_access_events: Vec::new(),
             rgpio_access_count: 0,
+            rgpio_trace_limit: 0,
+            rgpio_trace: Vec::new(),
             access_addresses: BTreeSet::new(),
             access_summaries: BTreeMap::new(),
             current_pc: 0,
@@ -1578,6 +2058,29 @@ impl ProbeBus {
         self.trace_register_pc = Some(pc);
     }
 
+    fn trace_instruction_tail(&mut self, length: usize) {
+        self.instruction_trace_tail_limit = length;
+        self.instruction_trace_tail.clear();
+    }
+
+    fn enable_scheduler_trace(&mut self) {
+        self.scheduler_trace_enabled = true;
+        self.scheduler_trace_events.clear();
+    }
+
+    fn enable_conversion_trace(&mut self) {
+        self.conversion_trace_enabled = true;
+        self.conversion_trace_events.clear();
+    }
+
+    fn record_conversion_trace(&mut self, mut event: ConversionTraceEvent) {
+        if self.conversion_trace_events.len() == MAX_CONVERSION_TRACE_EVENTS {
+            self.conversion_trace_events.pop_front();
+        }
+        event.instruction_count = self.current_instruction_count;
+        self.conversion_trace_events.push_back(event);
+    }
+
     fn trace_a1_checkpoints(&mut self, checkpoints: &[u32]) {
         self.trace_a1_checkpoints = checkpoints
             .iter()
@@ -1617,7 +2120,11 @@ impl ProbeBus {
 
     fn rgpio_for(&mut self, address: u32) -> Option<&mut Rgpio> {
         let enabled = self.rgpio_enabled(address);
-        self.rgpio.as_mut().filter(|_| enabled)
+        let input_high = self.rgpio_input_high;
+        let rgpio = self.rgpio.as_mut().filter(|_| enabled)?;
+        rgpio.set_input_high(input_high);
+        rgpio.set_ready_model(self.rgpio_ready_model);
+        Some(rgpio)
     }
 
     fn snapshot_read_address(&self, address: u32) -> u32 {
@@ -1672,7 +2179,7 @@ impl ProbeBus {
         };
         self.watched_write_count += 1;
         if self.watched_writes.len() >= MAX_WATCHED_WRITES {
-            return;
+            self.watched_writes.pop_front();
         }
         let value_bytes = value.to_be_bytes();
         let value_start = 4 - usize::from(width_bytes) + (watched_address - address) as usize;
@@ -1684,6 +2191,9 @@ impl ProbeBus {
             width_bits: width_bytes * 8,
             old_bytes,
             new_bytes,
+            d: self.current_d,
+            a: self.current_a,
+            sr: self.current_sr,
         });
 
         let Some((_, watch_end)) = self.watch_write_range else {
@@ -1806,6 +2316,26 @@ impl ProbeBus {
             self.rgpio_access_count = self.rgpio_access_count.saturating_add(1);
             if self.rgpio_access_events.len() < 32 {
                 self.rgpio_access_events.push((self.current_pc, event));
+            }
+            if self.rgpio_trace_limit > 0 {
+                let same = self.rgpio_trace.last().is_some_and(|last| {
+                    last.pc == self.current_pc
+                        && last.event.write == event.write
+                        && last.event.address == event.address
+                        && last.event.value == event.value
+                        && last.event.width == event.width
+                });
+                if same {
+                    self.rgpio_trace.last_mut().unwrap().repeats += 1;
+                } else if self.rgpio_trace.len() < self.rgpio_trace_limit {
+                    self.rgpio_trace.push(RgpioTraceEntry {
+                        instruction: self.current_instruction_count,
+                        pc: self.current_pc,
+                        event,
+                        sp: self.current_a[7],
+                        repeats: 1,
+                    });
+                }
             }
         }
         if (0x4000_0000..0x8000_0000).contains(&self.current_pc) {
@@ -1998,7 +2528,7 @@ impl ProbeBus {
             return;
         };
         println!(
-            "write watch at {start:#010x}..{end:#010x}: {} matching writes (showing {})",
+            "write watch at {start:#010x}..{end:#010x}: {} matching writes (showing most recent {})",
             self.watched_write_count,
             self.watched_writes.len()
         );
@@ -2007,13 +2537,16 @@ impl ProbeBus {
         }
         for write in &self.watched_writes {
             println!(
-                "  write{} instruction={} PC={:#010x} address={:#010x} old={} new={}",
+                "  write{} instruction={} PC={:#010x} address={:#010x} old={} new={} SR={:#06x} D={:08x?} A={:08x?}",
                 write.width_bits,
                 write.instruction_count,
                 write.pc,
                 write.address,
                 hex_bytes(&write.old_bytes),
-                hex_bytes(&write.new_bytes)
+                hex_bytes(&write.new_bytes),
+                write.sr,
+                write.d,
+                write.a
             );
         }
         if let Some((instruction_count, bytes)) = &self.watched_completion_tail {
@@ -2032,7 +2565,7 @@ impl ProbeBus {
             );
             for trace in &self.register_trace {
                 println!(
-                    "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x}",
+                    "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
                     trace.pc,
                     trace.sr,
                     trace.d[0],
@@ -2042,14 +2575,18 @@ impl ProbeBus {
                     trace.a[0],
                     trace.a[1],
                     trace.a[2],
-                    trace.a[3]
+                    trace.a[3],
+                    trace.a[4],
+                    trace.a[5],
+                    trace.a[6],
+                    trace.a[7]
                 );
             }
         }
         if let (Some((start, end)), Some(trace)) = (self.trace_a0_range, &self.first_a0_range_trace)
         {
             println!(
-            "first snapshot with A0 in {start:#010x}..{end:#010x}: PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x}",
+            "first snapshot with A0 in {start:#010x}..{end:#010x}: PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
                 trace.pc,
                 trace.sr,
                 trace.d[0],
@@ -2059,7 +2596,11 @@ impl ProbeBus {
                 trace.a[0],
                 trace.a[1],
                 trace.a[2],
-                trace.a[3]
+                trace.a[3],
+                trace.a[4],
+                trace.a[5],
+                trace.a[6],
+                trace.a[7]
             );
         }
         for (threshold, trace) in &self.trace_a1_checkpoints {
@@ -2074,6 +2615,130 @@ impl ProbeBus {
             } else {
                 println!("runtime checkpoint {threshold:#x} not reached");
             }
+        }
+    }
+
+    fn print_instruction_trace_tail(&self) {
+        if self.instruction_trace_tail_limit == 0 {
+            return;
+        }
+        println!(
+            "instruction trace tail: {} snapshots (requested {})",
+            self.instruction_trace_tail.len(),
+            self.instruction_trace_tail_limit
+        );
+        for trace in &self.instruction_trace_tail {
+            println!(
+                "  instruction={} PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} D4={:#010x} D5={:#010x} D6={:#010x} D7={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
+                trace.instruction_count,
+                trace.pc,
+                trace.sr,
+                trace.d[0],
+                trace.d[1],
+                trace.d[2],
+                trace.d[3],
+                trace.d[4],
+                trace.d[5],
+                trace.d[6],
+                trace.d[7],
+                trace.a[0],
+                trace.a[1],
+                trace.a[2],
+                trace.a[3],
+                trace.a[4],
+                trace.a[5],
+                trace.a[6],
+                trace.a[7]
+            );
+        }
+    }
+
+    fn print_scheduler_trace(&self) {
+        if !self.scheduler_trace_enabled {
+            return;
+        }
+        println!(
+            "scheduler/task events: {} event(s) (captured at list PCs, semaphore pends, delay, and task return)",
+            self.scheduler_trace_events.len()
+        );
+        println!(
+            "scheduler task contexts: {}",
+            self.scheduler_task_creations.len()
+        );
+        for task in &self.scheduler_task_creations {
+            println!(
+                "  instruction={} TCB={:#010x} entry={:#010x} priority={} stack={:#010x}..{:#010x}",
+                task.instruction_count,
+                task.tcb,
+                task.entry,
+                task.priority,
+                task.stack_base,
+                task.stack_base.saturating_add(task.stack_size)
+            );
+        }
+        for event in &self.scheduler_trace_events {
+            let current_tcb = event
+                .current_tcb
+                .map_or_else(|| "none".to_string(), |address| format!("{address:#010x}"));
+            let saved_sp = event
+                .tcb_saved_sp
+                .map_or_else(|| "none".to_string(), |address| format!("{address:#010x}"));
+            let task_entry = event.task_entry.map_or_else(
+                || "unknown".to_string(),
+                |address| format!("{address:#010x}"),
+            );
+            let saved_sp_word0 = event
+                .saved_sp_word0
+                .map_or_else(|| "unmapped".to_string(), |word| format!("{word:#010x}"));
+            println!(
+                "  instruction={} PC={:#010x} kind={} SR={:#06x} current_TCB={} entry={} saved_SP={} saved_SP_word0={}",
+                event.instruction_count,
+                event.pc,
+                scheduler_event_kind(event.pc),
+                event.sr,
+                current_tcb,
+                task_entry,
+                saved_sp,
+                saved_sp_word0
+            );
+            println!("    D={:08x?} A={:08x?}", event.d, event.a);
+            print_scheduler_words("TCB", event.current_tcb, &event.tcb_words);
+            print_scheduler_words("live stack", Some(event.a[7]), &event.live_stack_words);
+            print_scheduler_words("saved stack", event.tcb_saved_sp, &event.saved_stack_words);
+        }
+    }
+
+    fn print_conversion_trace(&self) {
+        if !self.conversion_trace_enabled {
+            return;
+        }
+        println!(
+            "conversion trace: {} event(s); D1/output base and outer CMP.L [A7+0x44],D1/BGT outcomes",
+            self.conversion_trace_events.len()
+        );
+        for event in &self.conversion_trace_events {
+            let branch = event.branch_taken.map_or_else(
+                || "n/a".to_string(),
+                |taken| {
+                    format!(
+                        "taken={taken} target={:#010x}",
+                        event.branch_target.unwrap_or(0)
+                    )
+                },
+            );
+            println!(
+                "  instruction={} PC={:#010x} D1={:#010x} loop_index={:#010x?} output_base={:#010x} CMP.L D1={:#010x},[A7+0x44]={:#010x} CCR={:#04x} SR={:#06x} BGT {}",
+                event.instruction_count,
+                event.pc,
+                event.d1,
+                event.loop_index,
+                event.output_base,
+                event.compare_left,
+                event.compare_right,
+                event.sr & 0x1F,
+                event.sr,
+                branch
+            );
         }
     }
 
@@ -2237,6 +2902,22 @@ impl ProbeBus {
                 event.width, event.address, event.value
             );
         }
+        if self.rgpio_trace_limit > 0 {
+            println!("RGPIO full trace: {} distinct entries (repeats folded)", self.rgpio_trace.len());
+            for entry in &self.rgpio_trace {
+                let operation = if entry.event.write { "write" } else { "read" };
+                println!(
+                    "  n={} PC={:#010x} A7={:#010x} {operation}{} {:#010x} = {:#06x} x{}",
+                    entry.instruction,
+                    entry.pc,
+                    entry.sp,
+                    entry.event.width,
+                    entry.event.address,
+                    entry.event.value,
+                    entry.repeats
+                );
+            }
+        }
         println!(
             "section3 MMIO: {} events, showing first {}",
             self.section3_mmio_count,
@@ -2284,6 +2965,9 @@ impl ProbeBus {
         if let Some(value) = self.mmio.get(&address) {
             return Ok(*value);
         }
+        if let Some(value) = self.edma_tcd.get(&address) {
+            return Ok(*value);
+        }
         if let Some(dspi) = self.dspi_for(address) {
             return dspi.read8(address);
         }
@@ -2293,8 +2977,14 @@ impl ProbeBus {
         if let Some(pit) = self.pit_for(address) {
             return pit.read8(address);
         }
+        if let Some(dtim1) = self.dtim1_for(address) {
+            return dtim1.read8(address);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.read8(address);
+        }
+        if let Some(intc0) = self.intc0_for(address) {
+            return intc0.read8(address);
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.read8(address);
@@ -2338,8 +3028,14 @@ impl ProbeBus {
         if let Some(pit) = self.pit_for(address) {
             return pit.read16(address);
         }
+        if let Some(dtim1) = self.dtim1_for(address) {
+            return dtim1.read16(address);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.read16(address);
+        }
+        if let Some(intc0) = self.intc0_for(address) {
+            return intc0.read16(address);
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.read16(address);
@@ -2352,6 +3048,9 @@ impl ProbeBus {
     }
 
     fn read32_inner(&mut self, address: u32) -> Result<u32, BusError> {
+        if address == UART8_TCD34_DADDR && self.uart8_dma_enabled {
+            return Ok(self.uart8_dma_daddr);
+        }
         if let Some(rgpio) = self.rgpio_for(address) {
             return rgpio.read32(address);
         }
@@ -2373,8 +3072,14 @@ impl ProbeBus {
         if let Some(pit) = self.pit_for(address) {
             return pit.read32(address);
         }
+        if let Some(dtim1) = self.dtim1_for(address) {
+            return dtim1.read32(address);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.read32(address);
+        }
+        if let Some(intc0) = self.intc0_for(address) {
+            return intc0.read32(address);
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.read32(address);
@@ -2389,6 +3094,19 @@ impl ProbeBus {
     }
 
     fn write8_inner(&mut self, address: u32, value: u8) -> Result<(), BusError> {
+        if self.uart8.is_some() && EDMA_TCD_WINDOW.contains(&address) {
+            self.edma_tcd.insert(address, value);
+            return Ok(());
+        }
+        if address == EDMA_SERQ && self.uart8.is_some() {
+            let channel = value & 0x3F;
+            if channel >= 32 && channel != UART8_TCD34_REQUEST_VALUE {
+                self.run_edma_memory_to_peripheral(channel)?;
+            }
+        }
+        if address == UART8_TCD34_CINT && value & 0x3F == UART8_TX_DMA_CHANNEL {
+            self.uart8_tx_irq_pending = false;
+        }
         if let Some(rgpio) = self.rgpio_for(address) {
             return rgpio.write8(address, value);
         }
@@ -2401,11 +3119,39 @@ impl ProbeBus {
         if let Some(pit) = self.pit_for(address) {
             return pit.write8(address, value);
         }
-        if let Some(uart) = self.uart8_for(address) {
-            return uart.write8(address, value);
+        if let Some(dtim1) = self.dtim1_for(address) {
+            return dtim1.write8(address, value);
+        }
+        if self
+            .uart8
+            .as_ref()
+            .is_some_and(|_| Uart8::contains(address))
+        {
+            self.uart8.as_mut().unwrap().write8(address, value)?;
+            if address == UART8_URB {
+                if let Some((bytes, times)) = &mut self.uart8_tx_file {
+                    use std::io::Write;
+                    let _ = bytes.write_all(&[value]);
+                    let _ = times.write_all(&(self.current_instruction_count as u64).to_le_bytes());
+                }
+                self.panel_stub_tx_byte(value)?;
+            }
+            return Ok(());
+        }
+        if address == UART8_TCD34_REQUEST
+            && value == UART8_TCD34_REQUEST_VALUE
+            && self.uart8.is_some()
+        {
+            self.enable_uart8_dma()?;
+        }
+        if address == UART8_TCD34_CINT && value == UART8_TCD34_REQUEST_VALUE {
+            self.uart8_rx_irq_pending = false;
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.write8(address, value);
+        }
+        if let Some(intc0) = self.intc0_for(address) {
+            return intc0.write8(address, value);
         }
         if let Some(mapped) = self.mmio.get_mut(&address) {
             *mapped = value;
@@ -2442,8 +3188,14 @@ impl ProbeBus {
         if let Some(pit) = self.pit_for(address) {
             return pit.write16(address, value);
         }
+        if let Some(dtim1) = self.dtim1_for(address) {
+            return dtim1.write16(address, value);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.write16(address, value);
+        }
+        if let Some(intc0) = self.intc0_for(address) {
+            return intc0.write16(address, value);
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.write16(address, value);
@@ -2455,6 +3207,12 @@ impl ProbeBus {
     }
 
     fn write32_inner(&mut self, address: u32, value: u32) -> Result<(), BusError> {
+        if address == UART8_TCD34_DADDR && self.uart8.is_some() {
+            self.uart8_dma_daddr = value;
+            self.uart8_dma_ring_base = value;
+            self.uart8_dma_enabled = false;
+            return Ok(());
+        }
         if let Some(rgpio) = self.rgpio_for(address) {
             return rgpio.write32(address, value);
         }
@@ -2467,8 +3225,14 @@ impl ProbeBus {
         if let Some(pit) = self.pit_for(address) {
             return pit.write32(address, value);
         }
+        if let Some(dtim1) = self.dtim1_for(address) {
+            return dtim1.write32(address, value);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.write32(address, value);
+        }
+        if let Some(intc0) = self.intc0_for(address) {
+            return intc0.write32(address, value);
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.write32(address, value);
@@ -2506,6 +3270,10 @@ impl ProbeBus {
         self.dspi1 = Some(Dspi::new(DSPI1_BASE));
     }
 
+    fn attach_dspi2_registers(&mut self) {
+        self.dspi2 = Some(Dspi::new(DSPI2_BASE));
+    }
+
     fn dspi_for(&mut self, address: u32) -> Option<&mut Dspi> {
         if self
             .dspi0
@@ -2514,7 +3282,14 @@ impl ProbeBus {
         {
             return self.dspi0.as_mut();
         }
-        self.dspi1.as_mut().filter(|dspi| dspi.contains(address))
+        if self
+            .dspi1
+            .as_ref()
+            .is_some_and(|dspi| dspi.contains(address))
+        {
+            return self.dspi1.as_mut();
+        }
+        self.dspi2.as_mut().filter(|dspi| dspi.contains(address))
     }
 
     fn attach_ddr_bootstrap(&mut self) {
@@ -2538,18 +3313,250 @@ impl ProbeBus {
         self.write8(0xFC05_001D, 13)
     }
 
+    fn configure_pit2_periodic(&mut self) -> Result<(), BusError> {
+        self.write16(0xFC08_8000, 0x053F)?;
+        self.write16(0xFC08_8002, 0x8646)?;
+        self.write8(0xFC05_004F, 3)?;
+        self.write8(0xFC05_001D, 15)
+    }
+
     fn attach_intc2(&mut self) {
         self.intc2 = Some(Intc2::new());
+    }
+
+    fn attach_dtim1_bootstrap(&mut self, ticks_per_instruction: u32) {
+        self.dtim1 = Some(DmaTimer1::new(ticks_per_instruction));
+        self.intc0 = Some(Intc0::new());
     }
 
     fn attach_uart8_tx(&mut self) {
         self.uart8 = Some(Uart8::new());
     }
 
+    fn queue_uart8_rx(&mut self, bytes: &[u8]) {
+        if let Some(uart) = &mut self.uart8 {
+            uart.queue_receive(bytes);
+        }
+    }
+
+    fn enable_panel_stub(&mut self) {
+        self.panel_stub = true;
+        self.enable_uart8_tx_ready();
+    }
+
+    fn enable_uart8_tx_ready(&mut self) {
+        if let Some(uart) = &mut self.uart8 {
+            uart.enable_transmitter();
+        }
+    }
+
+    fn record_uart8_event(
+        &mut self,
+        address: u32,
+        value: u8,
+        write: bool,
+        dma: bool,
+        dma_destination: u32,
+    ) {
+        if self.uart8_trace_events.len() >= MAX_UART8_TRACE_EVENTS {
+            self.suppressed_uart8_trace_events =
+                self.suppressed_uart8_trace_events.saturating_add(1);
+            return;
+        }
+        self.uart8_trace_events.push(Uart8TraceEvent {
+            instruction_count: self.current_instruction_count,
+            pc: self.current_pc,
+            address,
+            value,
+            write,
+            dma,
+            dma_destination,
+        });
+    }
+
+    fn panel_stub_tx_byte(&mut self, value: u8) -> Result<(), BusError> {
+        if !self.panel_stub {
+            return Ok(());
+        }
+        self.panel_stub_tx_tail.push_back(value);
+        if self.panel_stub_tx_tail.len() > PANEL_STUB_QUERY.len() {
+            self.panel_stub_tx_tail.pop_front();
+        }
+        if !self.panel_stub_discovery_queued
+            && self
+                .panel_stub_tx_tail
+                .iter()
+                .rev()
+                .take(PANEL_STUB_DISCOVERY_QUERY.len())
+                .copied()
+                .eq(PANEL_STUB_DISCOVERY_QUERY.into_iter().rev())
+        {
+            self.panel_stub_discovery_queued = true;
+            let ring = 0x8000_8424;
+            for (offset, byte) in panel_stub_discovery_records().iter().copied().enumerate() {
+                self.write8_inner(ring + offset as u32, byte)?;
+            }
+            self.write32_inner(0x8000_8410, panel_stub_discovery_records().len() as u32)?;
+        }
+        if !self.panel_stub_handshake_queued
+            && self.panel_stub_tx_tail.iter().copied().eq(PANEL_STUB_QUERY)
+        {
+            self.panel_stub_handshake_queued = true;
+            if let Some(uart) = &mut self.uart8 {
+                uart.queue_receive(panel_stub_handshake_reply());
+            }
+        }
+        Ok(())
+    }
+
+    fn tcd_value(&self, address: u32, width: u32) -> u32 {
+        (0..width).fold(0, |value, offset| {
+            value << 8 | u32::from(self.edma_tcd.get(&(address + offset)).copied().unwrap_or(0))
+        })
+    }
+
+    // Diagnostic eDMA model: a started memory-to-peripheral channel completes immediately.
+    fn run_edma_memory_to_peripheral(&mut self, channel: u8) -> Result<(), BusError> {
+        let base = 0xFC04_5000 + 0x20 * u32::from(channel);
+        let source = self.tcd_value(base, 4);
+        let source_offset = self.tcd_value(base + 0x06, 2) as u16 as i16 as i32;
+        let minor_bytes = self.tcd_value(base + 0x08, 4).max(1);
+        let destination = self.tcd_value(base + 0x10, 4);
+        let iterations = self.tcd_value(base + 0x14, 2);
+        let reload = self.tcd_value(base + 0x1C, 2);
+        let csr = self.tcd_value(base + 0x1E, 2) as u16;
+        if iterations == 0 {
+            return Ok(());
+        }
+        let mut address = source;
+        for _ in 0..iterations * minor_bytes {
+            let byte = self.read8_inner(address)?;
+            self.write8_inner(destination, byte)?;
+            address = address.wrapping_add(source_offset as u32);
+        }
+        for (offset, byte) in (reload as u16).to_be_bytes().into_iter().enumerate() {
+            self.edma_tcd.insert(base + 0x14 + offset as u32, byte);
+        }
+        for (offset, byte) in (csr | 0x80).to_be_bytes().into_iter().enumerate() {
+            self.edma_tcd.insert(base + 0x1E + offset as u32, byte);
+        }
+        if channel == UART8_TX_DMA_CHANNEL && csr & 0x02 != 0 {
+            self.uart8_tx_irq_pending = true;
+        }
+        Ok(())
+    }
+
+    // Late panel input after a restore: DMA the bytes into the RX ring and raise the RX interrupt.
+    fn deliver_uart8_rx_now(&mut self, bytes: &[u8]) -> Result<(), BusError> {
+        if let Some(uart) = &mut self.uart8 {
+            uart.queue_receive(bytes);
+        }
+        let bytes = self
+            .uart8
+            .as_mut()
+            .map(Uart8::take_received_for_dma)
+            .unwrap_or_default();
+        for value in bytes.iter().copied() {
+            let destination = self.uart8_dma_daddr;
+            self.write8_inner(destination, value)?;
+            self.record_uart8_event(UART8_URB, value, false, true, destination);
+            self.uart8_dma_daddr = self.uart8_dma_ring_base.wrapping_add(
+                destination
+                    .wrapping_sub(self.uart8_dma_ring_base)
+                    .wrapping_add(1)
+                    & UART8_DMA_RING_MASK,
+            );
+        }
+        if !bytes.is_empty() {
+            self.uart8_rx_irq_pending = true;
+        }
+        Ok(())
+    }
+
+    fn enable_uart8_dma(&mut self) -> Result<(), BusError> {
+        if self.uart8_dma_enabled {
+            return Ok(());
+        }
+        self.uart8_dma_enabled = true;
+        self.uart8_dma_ring_base = self.uart8_dma_daddr;
+        if self.panel_stub
+            && self
+                .uart8
+                .as_ref()
+                .is_some_and(|uart| uart.received_remaining() == 0)
+        {
+            if let Some(uart) = &mut self.uart8 {
+                uart.queue_receive(if self.panel_stub_handshake_queued {
+                    panel_stub_input_records()
+                } else {
+                    panel_stub_discovery_records()
+                });
+            }
+        }
+        let bytes = self
+            .uart8
+            .as_mut()
+            .map(Uart8::take_received_for_dma)
+            .unwrap_or_default();
+        for value in bytes.iter().copied() {
+            let destination = self.uart8_dma_daddr;
+            self.write8_inner(destination, value)?;
+            self.record_uart8_event(UART8_URB, value, false, true, destination);
+            self.uart8_dma_daddr = self.uart8_dma_ring_base.wrapping_add(
+                destination
+                    .wrapping_sub(self.uart8_dma_ring_base)
+                    .wrapping_add(1)
+                    & UART8_DMA_RING_MASK,
+            );
+        }
+        if !bytes.is_empty() {
+            self.uart8_rx_irq_pending = true;
+        }
+        Ok(())
+    }
+
+    fn print_uart8_trace(&self) {
+        println!(
+            "UART8 byte events: {} total, showing {}{}",
+            self.uart8_trace_events.len() + self.suppressed_uart8_trace_events,
+            self.uart8_trace_events.len(),
+            if self.suppressed_uart8_trace_events > 0 {
+                " (log limit reached)"
+            } else {
+                ""
+            }
+        );
+        for event in &self.uart8_trace_events {
+            if event.dma {
+                println!(
+                    "  UART8 RX DMA instruction={} PC={:#010x} URB={:#04x} ring={:#010x}",
+                    event.instruction_count, event.pc, event.value, event.dma_destination
+                );
+            } else {
+                println!(
+                    "  UART8 {} instruction={} PC={:#010x} address={:#010x} value={:#04x}",
+                    if event.write { "write" } else { "read" },
+                    event.instruction_count,
+                    event.pc,
+                    event.address,
+                    event.value
+                );
+            }
+        }
+    }
+
     fn ddr_for(&mut self, address: u32) -> Option<&mut DdrController> {
         self.ddr
             .as_mut()
             .filter(|_| DdrController::contains(address))
+    }
+
+    fn dtim1_for(&mut self, address: u32) -> Option<&mut DmaTimer1> {
+        self.dtim1.as_mut().filter(|_| DmaTimer1::contains(address))
+    }
+
+    fn intc0_for(&mut self, address: u32) -> Option<&mut Intc0> {
+        self.intc0.as_mut().filter(|_| Intc0::contains(address))
     }
 
     fn pit_for(&mut self, address: u32) -> Option<&mut PitController> {
@@ -2571,6 +3578,247 @@ impl ProbeBus {
             .as_ref()
             .and_then(Dspi::unsupported)
             .or_else(|| self.dspi1.as_ref().and_then(Dspi::unsupported))
+    }
+
+    fn snapshot_ranges(&self, ram_base: u32, ram_size: u32) -> Vec<(u32, u32)> {
+        let mut ranges = vec![(ram_base, ram_size)];
+        if self.sram_overlay.is_some() {
+            ranges.push((0x8000_0000, 0x1_0000));
+        }
+        ranges
+    }
+
+    fn save_snapshot(&mut self, cpu: &Cpu, ram_base: u32, ram_size: u32) -> Result<Vec<u8>, String> {
+        use dt2_core::snapshot::Writer;
+        const PAGE: u32 = 4096;
+        let mut w = Writer::new();
+        w.bytes(b"DT2SNAP1");
+        for v in cpu.d.iter().chain(cpu.a.iter()) {
+            w.u32(*v);
+        }
+        for v in [
+            cpu.pc,
+            cpu.rambar,
+            cpu.acr0,
+            cpu.acr1,
+            cpu.vbr,
+            cpu.cacr,
+            cpu.rgpiobar,
+            cpu.debug_csr,
+        ] {
+            w.u32(v);
+        }
+        w.u16(cpu.sr);
+        w.u64(self.current_instruction_count as u64);
+        w.u32(self.rgpiobar);
+        w.u64(self.mmio.len() as u64);
+        for (address, byte) in &self.mmio {
+            w.u32(*address);
+            w.u8(*byte);
+        }
+        for flag in [
+            self.panel_stub_discovery_queued,
+            self.panel_stub_handshake_queued,
+            self.uart8_dma_enabled,
+            self.uart8_rx_irq_pending,
+            self.uart8_tx_irq_pending,
+            self.pit0_request_seen,
+        ] {
+            w.bool(flag);
+        }
+        w.u64(self.edma_tcd.len() as u64);
+        for (address, byte) in &self.edma_tcd {
+            w.u32(*address);
+            w.u8(*byte);
+        }
+        w.u32(self.uart8_dma_daddr);
+        w.u32(self.uart8_dma_ring_base);
+        let tail: Vec<u8> = self.panel_stub_tx_tail.iter().copied().collect();
+        w.bytes(&tail);
+        macro_rules! device {
+            ($field:ident) => {
+                w.bool(self.$field.is_some());
+                if let Some(device) = &self.$field {
+                    device.save_state(&mut w);
+                }
+            };
+        }
+        device!(dspi0);
+        device!(dspi1);
+        device!(dspi2);
+        device!(ddr);
+        device!(pit);
+        device!(dtim1);
+        device!(intc0);
+        device!(intc2);
+        device!(rgpio);
+        device!(uart8);
+        let ranges = self.snapshot_ranges(ram_base, ram_size);
+        w.u32(ranges.len() as u32);
+        for (base, size) in ranges {
+            w.u32(base);
+            w.u32(size);
+            let pages = size / PAGE;
+            let mut present = Vec::new();
+            let mut data = Vec::new();
+            for page in 0..pages {
+                let bytes = self
+                    .dump_ram(base + page * PAGE, PAGE as usize)
+                    .map_err(|e| format!("snapshot RAM read failed at {:#010x}", e.addr))?;
+                if bytes.iter().any(|b| *b != 0) {
+                    present.push(page);
+                    data.extend_from_slice(&bytes);
+                }
+            }
+            w.u64(present.len() as u64);
+            for page in present {
+                w.u32(page);
+            }
+            w.bytes(&data);
+        }
+        Ok(w.into_inner())
+    }
+
+    fn load_snapshot(
+        &mut self,
+        cpu: &mut Cpu,
+        data: &[u8],
+        ram_base: u32,
+        ram_size: u32,
+    ) -> Result<(), String> {
+        use dt2_core::snapshot::Reader;
+        const PAGE: u32 = 4096;
+        let mut r = Reader::new(data);
+        if r.bytes()? != b"DT2SNAP1" {
+            return Err("not a DT2 snapshot".into());
+        }
+        for v in cpu.d.iter_mut().chain(cpu.a.iter_mut()) {
+            *v = r.u32()?;
+        }
+        cpu.pc = r.u32()?;
+        cpu.rambar = r.u32()?;
+        cpu.acr0 = r.u32()?;
+        cpu.acr1 = r.u32()?;
+        cpu.vbr = r.u32()?;
+        cpu.cacr = r.u32()?;
+        cpu.rgpiobar = r.u32()?;
+        cpu.debug_csr = r.u32()?;
+        cpu.sr = r.u16()?;
+        self.current_instruction_count = r.u64()? as usize;
+        self.rgpiobar = r.u32()?;
+        let n = r.u64()?;
+        self.mmio.clear();
+        for _ in 0..n {
+            let address = r.u32()?;
+            self.mmio.insert(address, r.u8()?);
+        }
+        self.panel_stub_discovery_queued = r.bool()?;
+        self.panel_stub_handshake_queued = r.bool()?;
+        self.uart8_dma_enabled = r.bool()?;
+        self.uart8_rx_irq_pending = r.bool()?;
+        self.uart8_tx_irq_pending = r.bool()?;
+        self.pit0_request_seen = r.bool()?;
+        let n = r.u64()?;
+        self.edma_tcd.clear();
+        for _ in 0..n {
+            let address = r.u32()?;
+            self.edma_tcd.insert(address, r.u8()?);
+        }
+        self.uart8_dma_daddr = r.u32()?;
+        self.uart8_dma_ring_base = r.u32()?;
+        self.panel_stub_tx_tail = r.bytes()?.iter().copied().collect();
+        macro_rules! device {
+            ($field:ident) => {
+                let present = r.bool()?;
+                match (present, self.$field.as_mut()) {
+                    (true, Some(device)) => device.load_state(&mut r)?,
+                    (false, None) => {}
+                    _ => {
+                        return Err(format!(
+                            "snapshot/config mismatch for {}: re-run with the same device flags",
+                            stringify!($field)
+                        ))
+                    }
+                }
+            };
+        }
+        device!(dspi0);
+        device!(dspi1);
+        device!(dspi2);
+        device!(ddr);
+        device!(pit);
+        device!(dtim1);
+        device!(intc0);
+        device!(intc2);
+        // RGPIO is created lazily when the firmware writes RGPIOBAR.
+        let rgpio_present = r.bool()?;
+        if rgpio_present {
+            self.rgpio.get_or_insert_with(Rgpio::new).load_state(&mut r)?;
+        } else {
+            self.rgpio = None;
+        }
+        device!(uart8);
+        let ranges = self.snapshot_ranges(ram_base, ram_size);
+        if r.u32()? as usize != ranges.len() {
+            return Err("snapshot RAM range count mismatch".into());
+        }
+        for (base, size) in ranges {
+            if r.u32()? != base || r.u32()? != size {
+                return Err("snapshot RAM range mismatch".into());
+            }
+            let count = r.u64()?;
+            let present: Vec<u32> = (0..count).map(|_| r.u32()).collect::<Result<_, _>>()?;
+            let bytes = r.bytes()?;
+            let zero = vec![0u8; PAGE as usize];
+            let mut next = present.iter().copied().enumerate().peekable();
+            for page in 0..size / PAGE {
+                let address = base + page * PAGE;
+                let source = match next.peek() {
+                    Some((index, p)) if *p == page => {
+                        let start = index * PAGE as usize;
+                        let chunk = &bytes[start..start + PAGE as usize];
+                        next.next();
+                        chunk
+                    }
+                    _ => {
+                        let current = self
+                            .dump_ram(address, PAGE as usize)
+                            .map_err(|e| format!("snapshot RAM read failed at {:#010x}", e.addr))?;
+                        if current.iter().all(|b| *b == 0) {
+                            continue;
+                        }
+                        &zero
+                    }
+                };
+                self.load_ram(address, source)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Logs the first three stack arguments at a function entry and saves the buffer one of them points to.
+    fn dump_call_at(&mut self, pc: u32, sp: u32) {
+        for index in 0..self.dump_calls.len() {
+            if self.dump_calls[index].pc != pc {
+                continue;
+            }
+            let spec = self.dump_calls[index].clone();
+            let args: Vec<u32> = (1..=3)
+                .map(|slot| self.peek_ram_u32(sp.wrapping_add(4 * slot)).unwrap_or(0))
+                .collect();
+            let number = self.dump_call_count;
+            self.dump_call_count += 1;
+            let path = format!("{}-{number:03}.bin", spec.prefix);
+            let saved = self
+                .dump_ram(args[spec.buffer_arg], spec.length)
+                .ok()
+                .map(|bytes| std::fs::write(&path, bytes).is_ok())
+                .unwrap_or(false);
+            println!(
+                "call dump #{number}: instruction={} PC={pc:#010x} args=[{:#010x}, {:#010x}, {:#010x}] buffer={:#010x} saved={saved} {path}",
+                self.current_instruction_count, args[0], args[1], args[2], args[spec.buffer_arg]
+            );
+        }
     }
 
     fn load_ram(&mut self, address: u32, bytes: &[u8]) -> Result<(), String> {
@@ -2640,6 +3888,74 @@ impl ProbeBus {
             .collect()
     }
 
+    fn peek_ram_u32(&mut self, address: u32) -> Option<u32> {
+        let bytes = self.dump_ram(address, 4).ok()?;
+        Some(u32::from_be_bytes(bytes.try_into().ok()?))
+    }
+
+    fn peek_ram_words(&mut self, address: u32, count: usize) -> Vec<u32> {
+        (0..count)
+            .filter_map(|index| self.peek_ram_u32(address.wrapping_add((index * 4) as u32)))
+            .collect()
+    }
+
+    fn record_scheduler_task_creation(&mut self, stack_pointer: u32) {
+        let Some(tcb) = self.peek_ram_u32(stack_pointer.wrapping_add(4)) else {
+            return;
+        };
+        let Some(entry) = self.peek_ram_u32(stack_pointer.wrapping_add(8)) else {
+            return;
+        };
+        let Some(priority) = self.peek_ram_u32(stack_pointer.wrapping_add(12)) else {
+            return;
+        };
+        let Some(stack_base) = self.peek_ram_u32(stack_pointer.wrapping_add(16)) else {
+            return;
+        };
+        let Some(stack_size) = self.peek_ram_u32(stack_pointer.wrapping_add(20)) else {
+            return;
+        };
+        self.scheduler_task_entries.insert(tcb, entry);
+        self.scheduler_task_creations.push(SchedulerTaskCreation {
+            instruction_count: self.current_instruction_count,
+            tcb,
+            entry,
+            priority,
+            stack_base,
+            stack_size,
+        });
+    }
+
+    fn record_scheduler_transition(&mut self, pc: u32, d: &[u32; 8], a: &[u32; 8], sr: u16) {
+        if !matches!(pc, 0x4000_13EC | 0x4000_145E | 0x4000_14BA | 0x4000_1344) {
+            return;
+        }
+        let current_tcb = self.peek_ram_u32(0x47DB_3F64);
+        let task_entry = current_tcb.and_then(|tcb| self.scheduler_task_entries.get(&tcb).copied());
+        let tcb_words = current_tcb.map_or_else(Vec::new, |tcb| self.peek_ram_words(tcb, 22));
+        let tcb_saved_sp = current_tcb.and_then(|tcb| self.peek_ram_u32(tcb.wrapping_add(0x48)));
+        let saved_sp_word0 = tcb_saved_sp.and_then(|sp| self.peek_ram_u32(sp));
+        let live_stack_words = self.peek_ram_words(a[7], 8);
+        let saved_stack_words = tcb_saved_sp.map_or_else(Vec::new, |sp| self.peek_ram_words(sp, 8));
+        if self.scheduler_trace_events.len() == MAX_SCHED_TRACE_EVENTS {
+            self.scheduler_trace_events.pop_front();
+        }
+        self.scheduler_trace_events.push_back(SchedulerTraceEvent {
+            instruction_count: self.current_instruction_count,
+            pc,
+            d: *d,
+            a: *a,
+            sr,
+            current_tcb,
+            tcb_saved_sp,
+            task_entry,
+            saved_sp_word0,
+            tcb_words,
+            live_stack_words,
+            saved_stack_words,
+        });
+    }
+
     fn seed_mmio32(&mut self, assignment: &str) -> Result<(), String> {
         let (address, value) = assignment
             .split_once('=')
@@ -2661,6 +3977,16 @@ impl Bus for ProbeBus {
     fn begin_instruction(&mut self, pc: u32) {
         self.current_pc = pc;
         self.current_instruction_count = self.current_instruction_count.saturating_add(1);
+        if let Some((period, messages, next, cursor)) = self.uart8_rx_periodic.as_mut() {
+            if *next == 0 {
+                *next = self.current_instruction_count + *period;
+            } else if self.current_instruction_count >= *next {
+                let message = messages[*cursor % messages.len()].clone();
+                *cursor += 1;
+                *next += *period;
+                let _ = self.deliver_uart8_rx_now(&message);
+            }
+        }
     }
 
     fn stop_before_instruction(&mut self, pc: u32) -> bool {
@@ -2673,7 +3999,45 @@ impl Bus for ProbeBus {
     }
 
     fn report_instruction_state(&mut self, pc: u32, d: &[u32; 8], a: &[u32; 8], sr: u16) {
+        if !self.dump_calls.is_empty() {
+            self.dump_call_at(pc, a[7]);
+        }
         self.current_sr = sr;
+        self.current_d = *d;
+        self.current_a = *a;
+        let instruction_count = self.current_instruction_count;
+        if self.instruction_trace_tail_limit > 0 {
+            if self.instruction_trace_tail.len() == self.instruction_trace_tail_limit {
+                self.instruction_trace_tail.pop_front();
+            }
+            self.instruction_trace_tail.push_back(RegisterTrace {
+                instruction_count,
+                pc,
+                d: *d,
+                a: *a,
+                sr,
+            });
+        }
+        if self.scheduler_trace_enabled {
+            if pc == 0x4000_12C8 {
+                self.record_scheduler_task_creation(a[7]);
+            }
+            self.record_scheduler_transition(pc, d, a, sr);
+        }
+        if self.conversion_trace_enabled && pc == 0x4018_1218 {
+            self.record_conversion_trace(ConversionTraceEvent {
+                instruction_count: 0,
+                pc,
+                d1: d[1],
+                loop_index: None,
+                output_base: a[3],
+                compare_left: 0,
+                compare_right: 0,
+                sr,
+                branch_taken: None,
+                branch_target: None,
+            });
+        }
         let trace_pc_matches = self
             .trace_pc_range
             .is_none_or(|(start, end)| (start..end).contains(&pc));
@@ -2684,6 +4048,7 @@ impl Bus for ProbeBus {
                 .is_some_and(|(start, end)| (start..end).contains(&a[0]))
         {
             self.first_a0_range_trace = Some(RegisterTrace {
+                instruction_count,
                 pc,
                 d: *d,
                 a: *a,
@@ -2698,6 +4063,7 @@ impl Bus for ProbeBus {
                 break;
             }
             *trace = Some(RegisterTrace {
+                instruction_count,
                 pc,
                 d: *d,
                 a: *a,
@@ -2712,6 +4078,7 @@ impl Bus for ProbeBus {
             self.register_trace.pop_front();
         }
         self.register_trace.push_back(RegisterTrace {
+            instruction_count,
             pc,
             d: *d,
             a: *a,
@@ -2745,6 +4112,23 @@ impl Bus for ProbeBus {
             target,
             sr,
         });
+        if self.conversion_trace_enabled && pc == 0x4018_11D2 {
+            let loop_index = self.current_a[7]
+                .checked_add(0x44)
+                .and_then(|address| self.peek_ram_u32(address));
+            self.record_conversion_trace(ConversionTraceEvent {
+                instruction_count: 0,
+                pc,
+                d1: self.current_d[1],
+                loop_index,
+                output_base: 0,
+                compare_left: self.current_d[1],
+                compare_right: loop_index.unwrap_or(0),
+                sr,
+                branch_taken: Some(taken),
+                branch_target: Some(target),
+            });
+        }
     }
 
     fn report_rte(
@@ -2910,6 +4294,9 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
+                if Uart8::contains(address) {
+                    self.record_uart8_event(address, value, false, false, 0);
+                }
                 self.record_dspi_pop(address, 8, u32::from(value));
                 self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
@@ -2967,6 +4354,9 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 1);
         let old = self.watched_old_bytes(address, 1)?;
         self.write8_inner(address, value)?;
+        if Uart8::contains(address) {
+            self.record_uart8_event(address, value, true, false, 0);
+        }
         self.snapshot_source_on_write(address, 1)?;
         self.record_watched_write(address, 1, u32::from(value), old);
         self.record_loop_access(address, true);
@@ -3016,12 +4406,52 @@ impl Bus for ProbeBus {
     }
 
     fn pending_interrupt(&mut self) -> Option<InterruptRequest> {
-        let pit0_pending = self
-            .pit
+        if self.uart8_rx_irq_pending {
+            return Some(InterruptRequest {
+                source: 26,
+                level: 3,
+                vector: 154,
+            });
+        }
+        if self.uart8_tx_irq_pending {
+            return Some(InterruptRequest {
+                source: 27,
+                level: 3,
+                vector: 155,
+            });
+        }
+        let pending_sources = self.pit.as_ref().map_or(0, |pit| {
+            (0..4).fold(0u64, |sources, module| {
+                if pit.interrupt_pending(module) {
+                    sources | (1u64 << (13 + module))
+                } else {
+                    sources
+                }
+            })
+        });
+        let timer1_pending = self
+            .dtim1
             .as_ref()
-            .is_some_and(|pit| pit.interrupt_pending(0));
-        let pending_sources = if pit0_pending { 1u64 << 13 } else { 0 };
-        let request = self.intc2.as_ref()?.pending_interrupt(pending_sources)?;
+            .is_some_and(DmaTimer1::interrupt_pending);
+        let intc0_request = self
+            .intc0
+            .as_ref()
+            .and_then(|intc0| intc0.pending_dtim1(timer1_pending));
+        let intc2_request = self
+            .intc2
+            .as_ref()
+            .and_then(|intc2| intc2.pending_interrupt(pending_sources));
+        let request = match (intc0_request, intc2_request) {
+            (Some(intc0), Some(intc2)) => {
+                if intc0.level >= intc2.level {
+                    intc0
+                } else {
+                    intc2
+                }
+            }
+            (Some(request), None) | (None, Some(request)) => request,
+            (None, None) => return None,
+        };
         if request.source == 13 && self.pit0_oneshot {
             if self.pit0_request_seen {
                 return None;
@@ -3034,6 +4464,9 @@ impl Bus for ProbeBus {
     fn advance_instruction(&mut self) {
         if let Some(pit) = &mut self.pit {
             pit.advance_instruction();
+        }
+        if let Some(dtim1) = &mut self.dtim1 {
+            dtim1.advance_instruction();
         }
     }
 }
@@ -3427,6 +4860,136 @@ mod tests {
     }
 
     #[test]
+    fn uart8_tx_ready_option_does_not_consume_queued_rx_bytes() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.enable_synthetic_mcf_mmio();
+        bus.attach_uart8_tx();
+        bus.queue_uart8_rx(&[0xAA, 0x55]);
+
+        bus.enable_uart8_tx_ready();
+
+        assert_eq!(bus.read8(UART8_BASE + 4).unwrap(), 0x0D);
+        assert_eq!(bus.uart8.as_ref().unwrap().received_remaining(), 2);
+        assert_eq!(bus.read8(UART8_URB).unwrap(), 0xAA);
+        assert_eq!(bus.read8(UART8_URB).unwrap(), 0x55);
+    }
+
+    #[test]
+    fn uart8_rx_hex_spec_requires_complete_byte_pairs() {
+        assert_eq!(parse_uart_rx_bytes("700b00").unwrap(), [0x70, 0x0B, 0x00]);
+        assert!(parse_uart_rx_bytes("").is_err());
+        assert!(parse_uart_rx_bytes("700").is_err());
+        assert!(parse_uart_rx_bytes("70xz").is_err());
+    }
+
+    #[test]
+    fn panel_stub_replies_then_dma_delivers_input_and_requests_vector_154() {
+        let ring = 0x4FE3_A000;
+        let mut bus = ProbeBus::new(FlatRam::new(ring, 0x400));
+        bus.enable_synthetic_mcf_mmio();
+        bus.attach_uart8_tx();
+        bus.enable_panel_stub();
+        bus.begin_instruction(0x4000_1000);
+        assert_eq!(bus.read8(UART8_BASE + 4).unwrap() & 0x04, 0x04);
+
+        for byte in PANEL_STUB_QUERY {
+            bus.begin_instruction(0x4000_1010);
+            bus.write8(UART8_URB, byte).unwrap();
+        }
+        assert!(bus.panel_stub_handshake_queued);
+        for expected in panel_stub_handshake_reply() {
+            bus.begin_instruction(0x4000_1020);
+            assert_eq!(bus.read8(UART8_URB).unwrap(), *expected);
+        }
+
+        bus.begin_instruction(0x4000_1030);
+        bus.write32(UART8_TCD34_DADDR, ring).unwrap();
+        bus.begin_instruction(0x4000_1040);
+        bus.write8(UART8_TCD34_REQUEST, UART8_TCD34_REQUEST_VALUE)
+            .unwrap();
+
+        assert_eq!(
+            bus.dump_ram(ring, panel_stub_input_records().len())
+                .unwrap(),
+            panel_stub_input_records()
+        );
+        assert_eq!(
+            bus.pending_interrupt(),
+            Some(InterruptRequest {
+                source: 26,
+                level: 3,
+                vector: 154,
+            })
+        );
+        assert_eq!(
+            bus.uart8_trace_events
+                .iter()
+                .filter(|event| event.dma)
+                .count(),
+            panel_stub_input_records().len()
+        );
+        assert!(bus
+            .uart8_trace_events
+            .iter()
+            .all(|event| event.instruction_count > 0));
+
+        bus.write8(UART8_TCD34_CINT, UART8_TCD34_REQUEST_VALUE)
+            .unwrap();
+        assert_eq!(bus.pending_interrupt(), None);
+    }
+
+    #[test]
+    fn panel_stub_dma_delivers_all_section2_discovery_channels() {
+        let ring = 0x4FE3_A000;
+        let mut bus = ProbeBus::new(FlatRam::new(ring, 0x400));
+        bus.enable_synthetic_mcf_mmio();
+        bus.attach_uart8_tx();
+        bus.enable_panel_stub();
+        bus.begin_instruction(0x4000_2000);
+        bus.write32(UART8_TCD34_DADDR, ring).unwrap();
+
+        bus.begin_instruction(0x4000_2010);
+        bus.write8(UART8_TCD34_REQUEST, UART8_TCD34_REQUEST_VALUE)
+            .unwrap();
+
+        assert_eq!(
+            bus.dump_ram(ring, panel_stub_discovery_records().len())
+                .unwrap(),
+            panel_stub_discovery_records()
+        );
+        assert_eq!(
+            bus.pending_interrupt(),
+            Some(InterruptRequest {
+                source: 26,
+                level: 3,
+                vector: 154,
+            })
+        );
+        assert!(!bus.panel_stub_handshake_queued);
+    }
+
+    #[test]
+    fn panel_stub_answers_section2_discovery_query_in_polled_ring() {
+        let ring = 0x8000_8424;
+        let mut bus = ProbeBus::new(FlatRam::new(0x8000_0000, 0x1_0000));
+        bus.attach_uart8_tx();
+        bus.enable_panel_stub();
+
+        for byte in PANEL_STUB_DISCOVERY_QUERY {
+            bus.write8(UART8_URB, byte).unwrap();
+        }
+
+        assert_eq!(
+            bus.dump_ram(ring, panel_stub_discovery_records().len())
+                .unwrap(),
+            panel_stub_discovery_records()
+        );
+        assert_eq!(bus.read32(0x8000_8410).unwrap(), 14);
+        assert!(bus.panel_stub_discovery_queued);
+        assert!(!bus.panel_stub_handshake_queued);
+    }
+
+    #[test]
     fn cpu_retirement_ticks_pit_and_exits_pif_poll() {
         let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
         bus.attach_pit_bootstrap();
@@ -3471,7 +5034,7 @@ mod tests {
         let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
         bus.attach_pit_bootstrap();
         bus.attach_intc2();
-        bus.write16(0xFC08_0000, 0x0019).unwrap();
+        bus.write16(0xFC08_0000, 0x001B).unwrap();
         bus.write16(0xFC08_0002, 0).unwrap();
         bus.write8(0xFC05_004D, 1).unwrap();
         bus.write8(0xFC05_001D, 13).unwrap();
@@ -3505,6 +5068,35 @@ mod tests {
     }
 
     #[test]
+    fn dtim1_reference_match_delivers_intc0_vector_97_when_unmasked() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
+        bus.attach_dtim1_bootstrap(1);
+        bus.write8(dt2_core::intc0::INTC0_BASE + 0x61, 2).unwrap();
+        bus.write8(dt2_core::intc0::INTC0_BASE + 0x1D, 33).unwrap();
+        bus.write32(dt2_core::dtim1::DTIM1_BASE + 0x04, 2).unwrap();
+        bus.write16(dt2_core::dtim1::DTIM1_BASE, 0x841B).unwrap();
+
+        for _ in 0..(2 * 133 - 1) {
+            bus.advance_instruction();
+        }
+        assert_eq!(bus.pending_interrupt(), None);
+
+        bus.advance_instruction();
+        assert_eq!(
+            bus.pending_interrupt(),
+            Some(InterruptRequest {
+                source: 33,
+                level: 2,
+                vector: 97,
+            })
+        );
+
+        bus.write8(dt2_core::dtim1::DTIM1_BASE + 0x03, 0x02)
+            .unwrap();
+        assert_eq!(bus.pending_interrupt(), None);
+    }
+
+    #[test]
     fn restored_periodic_pit0_configuration_delivers_vector_205() {
         let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
         bus.attach_pit_bootstrap_with_ticks(1024);
@@ -3521,6 +5113,27 @@ mod tests {
                 source: 13,
                 level: 1,
                 vector: 205,
+            })
+        );
+    }
+
+    #[test]
+    fn restored_periodic_pit2_configuration_delivers_vector_207() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
+        bus.attach_pit_bootstrap_with_ticks(1024);
+        bus.attach_intc2();
+        bus.configure_pit2_periodic().unwrap();
+
+        for _ in 0..2200 {
+            bus.advance_instruction();
+        }
+
+        assert_eq!(
+            bus.pending_interrupt(),
+            Some(InterruptRequest {
+                source: 15,
+                level: 3,
+                vector: 207,
             })
         );
     }
@@ -3556,9 +5169,16 @@ mod tests {
         let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
         bus.watch_write_range((0x1002, 0x1003));
         bus.capture_watch_initial().unwrap();
+        let mut data_registers = [0; 8];
+        let mut address_registers = [0; 8];
         bus.begin_instruction(0x2000);
+        data_registers[3] = 0x1234_5678;
+        address_registers[1] = 0x1000;
+        bus.report_instruction_state(0x2000, &data_registers, &address_registers, 0x2708);
         bus.write32(0x1000, 0xAABB_CCDD).unwrap();
         bus.begin_instruction(0x2004);
+        data_registers[3] = 0x8765_4321;
+        bus.report_instruction_state(0x2004, &data_registers, &address_registers, 0x2004);
         bus.write8(0x1002, 0x11).unwrap();
 
         assert_eq!(bus.watched_write_count, 2);
@@ -3569,9 +5189,13 @@ mod tests {
         assert_eq!(bus.watched_writes[0].width_bits, 32);
         assert_eq!(bus.watched_writes[0].old_bytes, [0]);
         assert_eq!(bus.watched_writes[0].new_bytes, [0xCC]);
+        assert_eq!(bus.watched_writes[0].d[3], 0x1234_5678);
+        assert_eq!(bus.watched_writes[0].a[1], 0x1000);
+        assert_eq!(bus.watched_writes[0].sr, 0x2708);
         assert_eq!(bus.watched_writes[1].old_bytes, [0xCC]);
         assert_eq!(bus.watched_writes[1].new_bytes, [0x11]);
         assert_eq!(bus.watched_writes[1].instruction_count, 2);
+        assert_eq!(bus.watched_writes[1].d[3], 0x8765_4321);
     }
 
     #[test]
@@ -3622,7 +5246,110 @@ mod tests {
 
         assert_eq!(bus.register_trace.len(), MAX_REGISTER_TRACE);
         assert_eq!(bus.register_trace.front().unwrap().d[0], 1);
-        assert_eq!(bus.register_trace.back().unwrap().d[0], 16);
+        assert_eq!(
+            bus.register_trace.back().unwrap().d[0],
+            MAX_REGISTER_TRACE as u32
+        );
+    }
+
+    #[test]
+    fn instruction_trace_tail_keeps_last_snapshots_in_order() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.trace_instruction_tail(3);
+        let mut data_registers = [0; 8];
+        let mut address_registers = [0; 8];
+
+        for value in 0..5 {
+            data_registers[0] = value;
+            address_registers[7] = 0x1000 + value;
+            bus.begin_instruction(0x2000 + value * 2);
+            bus.report_instruction_state(
+                0x2000 + value * 2,
+                &data_registers,
+                &address_registers,
+                0x2000 | value as u16,
+            );
+        }
+
+        assert_eq!(bus.instruction_trace_tail.len(), 3);
+        assert_eq!(
+            bus.instruction_trace_tail
+                .front()
+                .unwrap()
+                .instruction_count,
+            3
+        );
+        assert_eq!(bus.instruction_trace_tail.front().unwrap().d[0], 2);
+        assert_eq!(bus.instruction_trace_tail.back().unwrap().pc, 0x2008);
+        assert_eq!(bus.instruction_trace_tail.back().unwrap().a[7], 0x1004);
+    }
+
+    #[test]
+    fn scheduler_trace_captures_tcb_and_live_and_saved_stacks() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x47DB_0000, 0x10_000));
+        bus.enable_scheduler_trace();
+        bus.write32(0x47DB_3F64, 0x47DB_4000).unwrap();
+        bus.write32(0x47DB_4048, 0x47DB_5000).unwrap();
+        bus.write32(0x47DB_5000, 0x400D_1A12).unwrap();
+        bus.write32(0x47DB_5100, 0xDEAD_BEEF).unwrap();
+        bus.write32(0x47DB_6004, 0x47DB_4000).unwrap();
+        bus.write32(0x47DB_6008, 0x400D_1A12).unwrap();
+        bus.write32(0x47DB_600C, 7).unwrap();
+        bus.write32(0x47DB_6010, 0x47DB_3000).unwrap();
+        bus.write32(0x47DB_6014, 0x1000).unwrap();
+        let data_registers = [0x1234_5678; 8];
+        let mut address_registers = [0; 8];
+        address_registers[7] = 0x47DB_6000;
+        bus.begin_instruction(0x4000_12C8);
+        bus.report_instruction_state(0x4000_12C8, &data_registers, &address_registers, 0x2700);
+
+        address_registers[7] = 0x47DB_5100;
+        bus.begin_instruction(0x4000_13EC);
+        bus.report_instruction_state(0x4000_13EC, &data_registers, &address_registers, 0x2700);
+
+        let event = bus.scheduler_trace_events.front().unwrap();
+        assert_eq!(event.current_tcb, Some(0x47DB_4000));
+        assert_eq!(event.tcb_saved_sp, Some(0x47DB_5000));
+        assert_eq!(event.saved_sp_word0, Some(0x400D_1A12));
+        assert_eq!(event.task_entry, Some(0x400D_1A12));
+        assert_eq!(event.live_stack_words[0], 0xDEAD_BEEF);
+        assert_eq!(event.d[0], 0x1234_5678);
+        assert_eq!(bus.scheduler_task_creations[0].priority, 7);
+        assert_eq!(bus.scheduler_task_creations[0].stack_base, 0x47DB_3000);
+        assert_eq!(bus.scheduler_task_creations[0].stack_size, 0x1000);
+    }
+
+    #[test]
+    fn conversion_trace_records_index_compare_flags_and_branch_result() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x100));
+        bus.enable_conversion_trace();
+        bus.write32(0x64, 100).unwrap();
+        let mut data_registers = [0; 8];
+        let mut address_registers = [0; 8];
+        data_registers[1] = 100;
+        address_registers[3] = 0x4000_1000;
+        bus.begin_instruction(0x4018_1218);
+        bus.report_instruction_state(0x4018_1218, &data_registers, &address_registers, 0x2000);
+
+        data_registers[1] = 101;
+        address_registers[7] = 0x20;
+        bus.begin_instruction(0x4018_11D2);
+        bus.report_instruction_state(0x4018_11D2, &data_registers, &address_registers, 0x2009);
+        bus.report_branch(0x4018_11D2, 13, true, 0x4018_0FFC, 0x2009);
+
+        assert_eq!(bus.conversion_trace_events.len(), 2);
+        let index = &bus.conversion_trace_events[0];
+        assert_eq!(index.d1, 100);
+        assert_eq!(index.output_base, 0x4000_1000);
+        assert_eq!(index.branch_taken, None);
+        let branch = &bus.conversion_trace_events[1];
+        assert_eq!(branch.loop_index, Some(100));
+        assert_eq!(branch.d1, 101);
+        assert_eq!(branch.compare_left, 101);
+        assert_eq!(branch.compare_right, 100);
+        assert_eq!(branch.sr & 0x1F, 0x09);
+        assert_eq!(branch.branch_taken, Some(true));
+        assert_eq!(branch.branch_target, Some(0x4018_0FFC));
     }
 
     #[test]
@@ -4000,6 +5727,20 @@ mod tests {
         assert_eq!(bus.dspi_pop_events[0].module, 1);
         assert_eq!(bus.dspi_pop_events[0].value, 0xFFFF);
         assert_eq!(bus.dspi_pop_events[0].pc, 0x400C_C858);
+    }
+
+    #[test]
+    fn dspi2_bootstrap_exposes_rxctr_and_no_slave_fill() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        bus.attach_dspi2_registers();
+        bus.write32(DSPI2_BASE, 0x8000_0000).unwrap();
+        bus.write32(DSPI2_BASE + 0x0C, 0x7800_0000).unwrap();
+        bus.write32(DSPI2_BASE + 0x34, 0x0002_0055).unwrap();
+
+        let status = bus.read32(DSPI2_BASE + 0x2C).unwrap();
+        assert_eq!(status >> 4 & 0xF, 1);
+        assert_eq!(bus.read32(DSPI2_BASE + 0x38).unwrap(), 0xFFFF);
+        assert_eq!(bus.read32(DSPI2_BASE + 0x2C).unwrap() >> 4 & 0xF, 0);
     }
 
     #[test]

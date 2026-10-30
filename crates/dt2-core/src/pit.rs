@@ -23,6 +23,9 @@ struct Pit {
     pmr: u16,
     counter: u16,
     prescaler: u32,
+    first_tick_delay: u64,
+    first_tick_delay_remaining: u64,
+    delay_next_enable: bool,
 }
 
 impl Pit {
@@ -32,7 +35,15 @@ impl Pit {
             pmr: u16::MAX,
             counter: u16::MAX,
             prescaler: 0,
+            first_tick_delay: 0,
+            first_tick_delay_remaining: 0,
+            delay_next_enable: false,
         }
+    }
+
+    fn set_first_tick_delay(&mut self, ticks: u64) {
+        self.first_tick_delay = ticks;
+        self.delay_next_enable = ticks > 0;
     }
 
     fn read(&self, register: u32) -> u16 {
@@ -48,9 +59,14 @@ impl Pit {
         match register {
             0 => {
                 let old_pre = self.pcsr & PCSR_PRE;
+                let old_enabled = self.pcsr & PCSR_EN != 0;
                 let old_pif = self.pcsr & PCSR_PIF;
                 let next_pcsr = value & PCSR_CONFIG;
                 self.pcsr = next_pcsr | if value & PCSR_PIF == 0 { old_pif } else { 0 };
+                if !old_enabled && next_pcsr & PCSR_EN != 0 && self.delay_next_enable {
+                    self.first_tick_delay_remaining = self.first_tick_delay;
+                    self.delay_next_enable = false;
+                }
                 if (next_pcsr & PCSR_PRE) != old_pre {
                     self.prescaler = 0;
                 }
@@ -70,6 +86,12 @@ impl Pit {
 
     fn advance_ticks(&mut self, ticks: u64) {
         if self.pcsr & PCSR_EN == 0 || ticks == 0 {
+            return;
+        }
+        let delayed_ticks = ticks.min(self.first_tick_delay_remaining);
+        self.first_tick_delay_remaining -= delayed_ticks;
+        let ticks = ticks - delayed_ticks;
+        if ticks == 0 {
             return;
         }
         let prescaler_bits = u32::from((self.pcsr & PCSR_PRE) >> 8);
@@ -118,6 +140,10 @@ impl PitController {
         }
     }
 
+    pub fn set_first_tick_delay(&mut self, ticks: u64) {
+        self.timers[0].set_first_tick_delay(ticks);
+    }
+
     pub fn contains(address: u32) -> bool {
         (BASE..APERTURE_END).contains(&address)
     }
@@ -135,7 +161,10 @@ impl PitController {
         }
         let prescaler_bits = u32::from((timer.pcsr & PCSR_PRE) >> 8);
         let divisor = 1u64 << prescaler_bits;
-        Some((u64::from(timer.counter) + 1) * divisor - u64::from(timer.prescaler))
+        Some(
+            timer.first_tick_delay_remaining + (u64::from(timer.counter) + 1) * divisor
+                - u64::from(timer.prescaler),
+        )
     }
 
     pub fn fast_forward_ticks(&mut self, ticks: u64) {
@@ -257,6 +286,36 @@ impl Bus for PitController {
     }
 }
 
+
+impl PitController {
+    pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        w.u32(self.ticks_per_instruction);
+        for t in &self.timers {
+            w.u16(t.pcsr);
+            w.u16(t.pmr);
+            w.u16(t.counter);
+            w.u32(t.prescaler);
+            w.u64(t.first_tick_delay);
+            w.u64(t.first_tick_delay_remaining);
+            w.bool(t.delay_next_enable);
+        }
+    }
+
+    pub fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.ticks_per_instruction = r.u32()?;
+        for t in &mut self.timers {
+            t.pcsr = r.u16()?;
+            t.pmr = r.u16()?;
+            t.counter = r.u16()?;
+            t.prescaler = r.u32()?;
+            t.first_tick_delay = r.u64()?;
+            t.first_tick_delay_remaining = r.u64()?;
+            t.delay_next_enable = r.bool()?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +348,27 @@ mod tests {
         pits.write16(0xFC08_0002, 4).unwrap();
         assert_eq!(pits.read16(0xFC08_0000).unwrap() & PCSR_PIF, 0);
         assert_eq!(pits.read16(0xFC08_0004).unwrap(), 4);
+    }
+
+    #[test]
+    fn first_tick_delay_starts_when_pit0_is_enabled_and_applies_once() {
+        let mut pits = PitController::new();
+        pits.set_first_tick_delay(3);
+        pits.write16(0xFC08_0000, PCSR_EN | PCSR_PIE | PCSR_RLD | 0x0010)
+            .unwrap();
+        pits.write16(0xFC08_0002, 2).unwrap();
+
+        for _ in 0..3 {
+            pits.advance_instruction();
+        }
+        assert!(!pits.interrupt_pending(0));
+        assert_eq!(pits.read16(0xFC08_0004).unwrap(), 2);
+        assert_eq!(pits.ticks_until_pif(0), Some(3));
+
+        for _ in 0..3 {
+            pits.advance_instruction();
+        }
+        assert!(pits.interrupt_pending(0));
     }
 
     #[test]
