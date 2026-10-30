@@ -13,6 +13,10 @@ pub trait SpiDevice {
     fn unsupported_command(&self) -> Option<u8> {
         None
     }
+    fn save_state(&self, _w: &mut crate::snapshot::Writer) {}
+    fn load_state(&mut self, _r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 const FIFO_DEPTH: usize = 16;
@@ -337,6 +341,64 @@ impl Bus for Dspi {
             addr: address,
             write: true,
         })
+    }
+}
+
+
+impl Dspi {
+    pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        w.u32(self.mcr);
+        w.u32(self.tcr);
+        for v in self.ctar {
+            w.u32(v);
+        }
+        w.u32(self.rser);
+        w.u32(self.flags);
+        w.bool(self.tfff_enabled);
+        w.u64(self.tx.len() as u64);
+        for v in &self.tx {
+            w.u32(*v);
+        }
+        w.u64(self.rx.len() as u64);
+        for v in &self.rx {
+            w.u16(*v);
+        }
+        w.u32(self.tx_next);
+        w.u32(self.pop_next);
+        w.u8(self.asserted);
+        for device in &self.devices {
+            w.bool(device.is_some());
+            if let Some(device) = device {
+                device.save_state(w);
+            }
+        }
+    }
+
+    pub fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        self.mcr = r.u32()?;
+        self.tcr = r.u32()?;
+        for v in &mut self.ctar {
+            *v = r.u32()?;
+        }
+        self.rser = r.u32()?;
+        self.flags = r.u32()?;
+        self.tfff_enabled = r.bool()?;
+        let n = r.u64()?;
+        self.tx = (0..n).map(|_| r.u32()).collect::<Result<_, _>>()?;
+        let n = r.u64()?;
+        self.rx = (0..n).map(|_| r.u16()).collect::<Result<_, _>>()?;
+        self.tx_next = r.u32()?;
+        self.pop_next = r.u32()?;
+        self.asserted = r.u8()?;
+        for device in &mut self.devices {
+            let present = r.bool()?;
+            match (present, device.as_mut()) {
+                (true, Some(device)) => device.load_state(r)?,
+                (false, None) => {}
+                _ => return Err("DSPI attached-device mismatch".into()),
+            }
+        }
+        Ok(())
     }
 }
 
