@@ -1137,12 +1137,12 @@ impl Cpu {
                 }
                 _ => return Err(ill),
             },
-            9 if op & 0xF1F8 == 0x9180 => {
+            9 if op & 0xF1F8 == 0x9180 && op & 0x00C0 == 0x0080 => {
                 let dst = ((op >> 9) & 7) as usize;
                 let src = (op & 7) as usize;
                 self.d[dst] = self.subx(self.d[dst], self.d[src]);
             }
-            0xD if op & 0xF1F8 == 0xD180 => {
+            0xD if op & 0xF1F8 == 0xD180 && op & 0x00C0 == 0x0080 => {
                 let dst = ((op >> 9) & 7) as usize;
                 let src = (op & 7) as usize;
                 self.d[dst] = self.addx(self.d[dst], self.d[src]);
@@ -1829,6 +1829,26 @@ mod tests {
     }
 
     #[test]
+    fn addx_subx_overflow_uses_extend_input() {
+        for (op, extend, destination, source, expected, flags) in [
+            (0xD181u16, 0, 0x7FFF_FFFF, 0, 0x7FFF_FFFF, 0),
+            (0xD181, CCR_X, 0x7FFF_FFFF, 0, 0x8000_0000, CCR_N | CCR_V),
+            (0x9181, 0, 0x8000_0000, 0, 0x8000_0000, CCR_N),
+            (0x9181, CCR_X, 0x8000_0000, 0, 0x7FFF_FFFF, CCR_V),
+        ] {
+            let (mut cpu, mut ram) = machine(&[op]);
+            cpu.d[0] = destination;
+            cpu.d[1] = source;
+            cpu.sr = extend;
+
+            run(&mut cpu, &mut ram, 1);
+
+            assert_eq!(cpu.d[0], expected, "op={op:#06x} X={extend:#04x}");
+            assert_eq!(cpu.sr, flags, "op={op:#06x} X={extend:#04x}");
+        }
+    }
+
+    #[test]
     fn negx_clear_extend_negates_and_set_extend_borrows() {
         let (mut cpu, mut ram) = machine(&[0x4080]);
         cpu.d[0] = 1;
@@ -1842,13 +1862,15 @@ mod tests {
         cpu.sr = CCR_X;
         run(&mut cpu, &mut ram, 1);
         assert_eq!(cpu.d[0], u32::MAX - 1);
+        assert_eq!(cpu.sr, CCR_N | CCR_C | CCR_X);
     }
 
     #[test]
-    fn x_form_look_alikes_and_rotates_are_illegal() {
-        // ADDX/SUBX -(Ay),-(Ax), ADD/SUB/AND/OR Dn,Dm (opmode 6), ROXL/ROXR/ROL/ROR.L Dn.
+    fn unsupported_extend_sizes_memory_forms_and_rotates_are_illegal() {
+        // Only ADDX/SUBX.L Dn,Dm and NEGX.L Dn are supported by this core.
         for op in [
-            0xD188u16, 0x9188, 0xC180, 0x8180, 0xE190, 0xE090, 0xE198, 0xE098, 0xE198 | 0x20, 0x4090,
+            0xD102u16, 0xD142, 0x9102, 0x9142, 0xD188, 0x9188, 0x4000, 0x4040, 0x4090, 0xC180,
+            0x8180, 0xE190, 0xE090, 0xE198, 0xE098, 0xE1B0, 0xE0B0,
         ] {
             for x in [0, CCR_X] {
                 let (mut cpu, mut ram) = machine(&[op]);
