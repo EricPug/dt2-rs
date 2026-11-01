@@ -1,6 +1,7 @@
 //! MCF5441x DMA Timer 1 subset (MCF54418RM chapter 39).
 //!
 //! The instruction-clock scale is diagnostic; it is not a bus-cycle model.
+//! Ticks are applied lazily (see `pit.rs`); `set_eager(true)` applies them per instruction.
 
 use crate::bus::{Bus, BusError};
 
@@ -30,6 +31,9 @@ pub struct DmaTimer1 {
     counter: u32,
     prescaler: u64,
     ticks_per_instruction: u32,
+    eager: bool,
+    lag: u64,
+    deadline: u64,
 }
 
 impl DmaTimer1 {
@@ -44,7 +48,15 @@ impl DmaTimer1 {
             counter: 0,
             prescaler: 0,
             ticks_per_instruction,
+            eager: false,
+            lag: 0,
+            deadline: u64::MAX,
         }
+    }
+
+    pub fn set_eager(&mut self, eager: bool) {
+        self.sync();
+        self.eager = eager;
     }
 
     pub fn contains(address: u32) -> bool {
@@ -58,7 +70,53 @@ impl DmaTimer1 {
     }
 
     pub fn advance_instruction(&mut self) {
-        self.advance_ticks(u64::from(self.ticks_per_instruction));
+        if self.eager {
+            self.advance_ticks(u64::from(self.ticks_per_instruction));
+            return;
+        }
+        self.lag += 1;
+        if self.lag >= self.deadline {
+            self.sync();
+        }
+    }
+
+    /// Apply all pending ticks so timer state is current.
+    pub fn sync(&mut self) {
+        if self.lag > 0 {
+            let ticks = self.lag * u64::from(self.ticks_per_instruction);
+            self.lag = 0;
+            self.advance_ticks(ticks);
+        }
+        self.recompute_deadline();
+    }
+
+    fn clock_divisor(&self) -> Option<u64> {
+        let clock_divisor = match self.mode & DTMR_CLOCK_MASK {
+            0x0002 => 1,
+            0x0004 => 16,
+            _ => return None,
+        };
+        Some((u64::from((self.mode >> 8) & 0xFF) + 1) * clock_divisor)
+    }
+
+    /// Instructions until the reference event can next be set; u64::MAX if it cannot.
+    fn recompute_deadline(&mut self) {
+        self.deadline = u64::MAX;
+        if self.mode & DTMR_ENABLE == 0
+            || self.extended_mode & DTXMR_EN1588 != 0
+            || self.event & DTER_REF != 0
+            || self.counter >= self.reference
+        {
+            return;
+        }
+        let Some(divisor) = self.clock_divisor() else {
+            return;
+        };
+        // The prescaler can exceed the divisor after a prescale-only mode change; the event then fires on the next tick.
+        let ticks = (u64::from(self.reference - self.counter) * divisor)
+            .saturating_sub(self.prescaler)
+            .max(1);
+        self.deadline = ticks.div_ceil(u64::from(self.ticks_per_instruction));
     }
 
     fn advance_ticks(&mut self, ticks: u64) {
@@ -66,13 +124,9 @@ impl DmaTimer1 {
             return;
         }
 
-        let clock_divisor = match self.mode & DTMR_CLOCK_MASK {
-            0x0002 => 1,
-            0x0004 => 16,
-            _ => return,
+        let Some(divisor) = self.clock_divisor() else {
+            return;
         };
-        let prescale_divisor = u64::from((self.mode >> 8) & 0xFF) + 1;
-        let divisor = prescale_divisor * clock_divisor;
         let elapsed = self.prescaler + ticks;
         let timer_ticks = elapsed / divisor;
         self.prescaler = elapsed % divisor;
@@ -146,6 +200,7 @@ impl DmaTimer1 {
 
 impl Bus for DmaTimer1 {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
+        self.sync();
         if !Self::contains(address) {
             return Err(Self::error(address, false));
         }
@@ -161,14 +216,49 @@ impl Bus for DmaTimer1 {
     }
 
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
+        self.sync();
         self.read_word(address)
     }
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
+        self.sync();
         self.read_long(address)
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
+        self.sync();
+        let result = self.write8_synced(address, value);
+        self.recompute_deadline();
+        result
+    }
+
+    fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
+        self.sync();
+        if address != DTIM1_BASE {
+            return Err(Self::error(address, true));
+        }
+        self.write_mode(value);
+        self.recompute_deadline();
+        Ok(())
+    }
+
+    fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
+        self.sync();
+        if address != DTIM1_BASE + DTRR {
+            return Err(Self::error(address, true));
+        }
+        self.reference = value;
+        self.recompute_deadline();
+        Ok(())
+    }
+
+    fn advance_instruction(&mut self) {
+        DmaTimer1::advance_instruction(self);
+    }
+}
+
+impl DmaTimer1 {
+    fn write8_synced(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         if !Self::contains(address) {
             return Err(Self::error(address, true));
         }
@@ -189,30 +279,8 @@ impl Bus for DmaTimer1 {
         Ok(())
     }
 
-    fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
-        if address != DTIM1_BASE {
-            return Err(Self::error(address, true));
-        }
-        self.write_mode(value);
-        Ok(())
-    }
-
-    fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
-        if address != DTIM1_BASE + DTRR {
-            return Err(Self::error(address, true));
-        }
-        self.reference = value;
-        Ok(())
-    }
-
-    fn advance_instruction(&mut self) {
-        DmaTimer1::advance_instruction(self);
-    }
-}
-
-
-impl DmaTimer1 {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        debug_assert_eq!(self.lag, 0);
         w.u16(self.mode);
         w.u8(self.extended_mode);
         w.u8(self.event);
@@ -232,6 +300,8 @@ impl DmaTimer1 {
         self.counter = r.u32()?;
         self.prescaler = r.u64()?;
         self.ticks_per_instruction = r.u32()?;
+        self.lag = 0;
+        self.recompute_deadline();
         Ok(())
     }
 }
@@ -269,5 +339,60 @@ mod tests {
         timer.write16(DTIM1_BASE, 0x841B).unwrap();
         timer.write8(DTIM1_BASE + DTXMR, DTXMR_DMAEN).unwrap();
         assert!(!timer.interrupt_pending());
+    }
+
+    #[test]
+    fn lazy_and_eager_timers_stay_identical_under_random_traffic() {
+        let mut seed = 0x9E37_79B9_u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for ticks in [1, 5] {
+            let mut eager = DmaTimer1::new(ticks);
+            let mut lazy = DmaTimer1::new(ticks);
+            eager.set_eager(true);
+            for step in 0..20_000 {
+                match next() % 40 {
+                    0 => {
+                        let value = [1, 2, 7, 300, 5000][(next() % 5) as usize];
+                        for timer in [&mut eager, &mut lazy] {
+                            timer.write32(DTIM1_BASE + DTRR, value).unwrap();
+                        }
+                    }
+                    1 => {
+                        let value = [0x841B, 0x840B, 0x8419, 0x8400, 0x0013, 0x0A1D][(next() % 6) as usize];
+                        for timer in [&mut eager, &mut lazy] {
+                            timer.write16(DTIM1_BASE, value).unwrap();
+                        }
+                    }
+                    2 => {
+                        for timer in [&mut eager, &mut lazy] {
+                            timer.write8(DTIM1_BASE + DTER, DTER_REF).unwrap();
+                        }
+                    }
+                    3 => assert_eq!(
+                        eager.read32(DTIM1_BASE + DTCN).unwrap(),
+                        lazy.read32(DTIM1_BASE + DTCN).unwrap(),
+                        "counter diverged at step {step}"
+                    ),
+                    _ => {
+                        eager.advance_instruction();
+                        lazy.advance_instruction();
+                    }
+                }
+                assert_eq!(
+                    eager.interrupt_pending(),
+                    lazy.interrupt_pending(),
+                    "interrupt diverged at step {step}: eager mode={:#x} xm={:#x} ev={} ref={} cnt={} pre={} | lazy cnt={} pre={} lag={} deadline={} ticks={ticks}",
+                    eager.mode, eager.extended_mode, eager.event, eager.reference, eager.counter, eager.prescaler,
+                    lazy.counter, lazy.prescaler, lazy.lag, lazy.deadline
+                );
+            }
+            eager.sync();
+            lazy.sync();
+            assert_eq!(eager.read32(DTIM1_BASE + DTCN).unwrap(), lazy.read32(DTIM1_BASE + DTCN).unwrap());
+            assert_eq!(eager.read8(DTIM1_BASE + DTER).unwrap(), lazy.read8(DTIM1_BASE + DTER).unwrap());
+        }
     }
 }
