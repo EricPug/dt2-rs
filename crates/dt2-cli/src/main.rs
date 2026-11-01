@@ -1198,6 +1198,10 @@ fn run_binary(args: &[String]) {
         None => "fast path: on".to_string(),
         Some(reason) => format!("fast path: off ({reason})"),
     };
+    let fast_path_status = format!(
+        "{fast_path_status}; instruction hooks: {}",
+        bus.configure_instruction_hooks()
+    );
     println!("{fast_path_status}");
     let report = if let Some(scale) = live_window {
         run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale)
@@ -1795,6 +1799,10 @@ struct ProbeBus {
     uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
     display: Option<display::Display>,
     fast_ram: Option<(u32, u32)>,
+    /// False when no diagnostic needs the per-instruction state report.
+    instruction_hooks: bool,
+    /// False when no diagnostic reads the per-instruction register copies.
+    capture_registers: bool,
     irq_log: Option<std::io::BufWriter<std::fs::File>>,
     dump_calls: Vec<CallDump>,
     dump_call_count: usize,
@@ -2204,6 +2212,8 @@ impl ProbeBus {
             uart8_tx_file: None,
             display: None,
             fast_ram: None,
+            instruction_hooks: true,
+            capture_registers: true,
             irq_log: None,
             dump_calls: Vec::new(),
             dump_call_count: 0,
@@ -2553,6 +2563,25 @@ impl ProbeBus {
             self.fast_ram = Some((base, (end - 1) as u32));
         }
         reason
+    }
+
+    /// Turns off per-instruction diagnostics that nothing requested; returns a status label.
+    fn configure_instruction_hooks(&mut self) -> &'static str {
+        self.capture_registers = self.watch_write_range.is_some()
+            || self.rgpio_trace_limit > 0
+            || self.conversion_trace_enabled;
+        self.instruction_hooks = !self.dump_calls.is_empty()
+            || self.instruction_trace_tail_limit > 0
+            || self.scheduler_trace_enabled
+            || self.conversion_trace_enabled
+            || self.trace_a0_range.is_some()
+            || !self.trace_a1_checkpoints.is_empty()
+            || self.trace_register_pc.is_some();
+        if self.instruction_hooks {
+            "full"
+        } else {
+            "minimal"
+        }
     }
 
     fn write_irq_log(&mut self, line: &str) {
@@ -4695,8 +4724,13 @@ impl Bus for ProbeBus {
             self.dump_call_at(pc, a[7]);
         }
         self.current_sr = sr;
-        self.current_d = *d;
-        self.current_a = *a;
+        if self.capture_registers {
+            self.current_d = *d;
+            self.current_a = *a;
+        }
+        if !self.instruction_hooks {
+            return;
+        }
         let instruction_count = self.current_instruction_count;
         if self.instruction_trace_tail_limit > 0 {
             if self.instruction_trace_tail.len() == self.instruction_trace_tail_limit {
