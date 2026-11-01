@@ -8,3 +8,4 @@
 - `render-uart-frames.py`: replays one or more sequential UART8 TX byte dumps (`UART8_TX_FILE`) into a shared 64x128 framebuffer; prints per-input changed-pixel counts and saves each input's final frame, sampled frames, and a montage. Example: `python3 tools/render-uart-frames.py out/repeat-a-uart.bin out/continuation-1b-plus-200m-uart.bin out/replay-1p2b`.
 - `dt2-cli` flags `LIVE_WINDOW[=scale]` (feature `window`) and `LIVE_PNG=path`: live or headless upright display of the UART8 tile stream; see the handoff doc.
 - `check-1b-baseline.sh <binary> <label>`: 1B-instruction boot with the in-memory synthetic eMMC; prints the saved snapshot SHA-256 (acceptance check for performance changes).
+- `scan-panel-input.sh <binary> <snapshot> "<first bytes>" "<values>"`: injects each two-byte panel message from a display snapshot and reports TX traffic and whether the frame changed (finds messages the UI responds to).

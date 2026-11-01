@@ -1610,6 +1610,9 @@ fn run_live(
             injection = None;
         }
         done += report.instructions + report.fast_forwarded_instructions;
+        for message in window.input_messages() {
+            let _ = bus.deliver_uart8_rx_now(&message);
+        }
         if let Some(display) = &bus.display {
             let (width, height, pixels) = display.render_upright(scale);
             window.present(width, height, &pixels);
@@ -1641,6 +1644,47 @@ mod live_window {
         pub fn is_open(&self) -> bool {
             self.0.is_open()
         }
+
+        /// Synthetic key map inferred from firmware responses (see scan-panel-input.sh), not hardware:
+        /// 1-8 are `3x` button channels (01 pressed, 00 released); Q W E R T Y U I send `2x` deltas
+        /// (FF, or 01 with Shift) that make the UI respond.
+        pub fn input_messages(&mut self) -> Vec<[u8; 2]> {
+            use minifb::Key;
+            let button = |key: Key| match key {
+                Key::Key1 => Some(0),
+                Key::Key2 => Some(1),
+                Key::Key3 => Some(2),
+                Key::Key4 => Some(3),
+                Key::Key5 => Some(4),
+                Key::Key6 => Some(5),
+                Key::Key7 => Some(6),
+                Key::Key8 => Some(7),
+                _ => None,
+            };
+            let encoder = |key: Key| match key {
+                Key::Q => Some(0),
+                Key::W => Some(1),
+                Key::E => Some(2),
+                Key::R => Some(3),
+                Key::T => Some(4),
+                Key::Y => Some(5),
+                Key::U => Some(6),
+                Key::I => Some(7),
+                _ => None,
+            };
+            let shifted = self.0.is_key_down(Key::LeftShift) || self.0.is_key_down(Key::RightShift);
+            let mut messages = Vec::new();
+            for key in self.0.get_keys_pressed(minifb::KeyRepeat::Yes) {
+                messages.extend(encoder(key).map(|channel| [0x20 + channel, if shifted { 0x01 } else { 0xFF }]));
+            }
+            for key in self.0.get_keys_pressed(minifb::KeyRepeat::No) {
+                messages.extend(button(key).map(|channel| [0x30 + channel, 0x01]));
+            }
+            for key in self.0.get_keys_released() {
+                messages.extend(button(key).map(|channel| [0x30 + channel, 0x00]));
+            }
+            messages
+        }
     }
 }
 
@@ -1657,6 +1701,9 @@ mod live_window {
         pub fn present(&mut self, _width: usize, _height: usize, _pixels: &[u32]) {}
         pub fn is_open(&self) -> bool {
             false
+        }
+        pub fn input_messages(&mut self) -> Vec<[u8; 2]> {
+            Vec::new()
         }
     }
 }
