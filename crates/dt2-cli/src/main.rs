@@ -1176,6 +1176,7 @@ fn run_binary(args: &[String]) {
         println!("UART8_RX_LATE: delivered {} byte(s) through the RX DMA ring", bytes.len());
     }
     let run_started = Instant::now();
+    bus.enable_fast_ram(ram_base, ram_size as u32);
     let report = if let Some(scale) = live_window {
         run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale)
     } else {
@@ -1764,6 +1765,7 @@ struct ProbeBus {
     uart8_rx_periodic: Option<(usize, Vec<Vec<u8>>, usize, usize)>,
     uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
     display: Option<display::Display>,
+    fast_ram: Option<(u32, u32)>,
     dump_calls: Vec<CallDump>,
     dump_call_count: usize,
     edma_tcd: BTreeMap<u32, u8>,
@@ -2171,6 +2173,7 @@ impl ProbeBus {
             uart8_rx_periodic: None,
             uart8_tx_file: None,
             display: None,
+            fast_ram: None,
             dump_calls: Vec::new(),
             dump_call_count: 0,
             edma_tcd: BTreeMap::new(),
@@ -2489,6 +2492,30 @@ impl ProbeBus {
                 .iter()
                 .any(|&(start, end)| (start..end).contains(&address))
             && !(DDR_REGISTER_APERTURE.0..DDR_REGISTER_APERTURE.1).contains(&address)
+    }
+
+    /// Routes plain RAM accesses straight to memory when no diagnostic needs to observe them.
+    fn enable_fast_ram(&mut self, base: u32, size: u32) {
+        let end = u64::from(base) + u64::from(size);
+        let overlaps = |start: u32, stop: u32| u64::from(base) < u64::from(stop) && u64::from(start) < end;
+        let peripheral = MCF_PERIPHERAL_WINDOWS.iter().any(|&(s, e)| overlaps(s, e))
+            || overlaps(MCF_SRAM_ALIAS_WINDOW.0, MCF_SRAM_ALIAS_WINDOW.1)
+            || overlaps(dt2_core::rgpio::RGPIO_BASE, dt2_core::rgpio::RGPIO_BASE + 0x10)
+            || overlaps(0, 0x1_0000);
+        let observed = self.ram_remap.is_some()
+            || self.ram_snapshot.is_some()
+            || self.watch_write_range.is_some()
+            || self.loop_detection
+            || self.mmio.keys().any(|&a| overlaps(a, a.saturating_add(1)));
+        if !peripheral && !observed && end <= 1 << 32 {
+            self.fast_ram = Some((base, (end - 1) as u32));
+        }
+    }
+
+    fn in_fast_ram(&self, address: u32, width: u32) -> bool {
+        self.fast_ram.is_some_and(|(start, last)| {
+            address >= start && address.checked_add(width - 1).is_some_and(|a| a <= last)
+        })
     }
 
     fn source_for_byte(&self, address: u32) -> AccessSource {
@@ -4900,6 +4927,9 @@ impl Bus for ProbeBus {
     }
 
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
+        if self.in_fast_ram(address, 1) {
+            return self.ram.read8(address);
+        }
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
@@ -4922,6 +4952,9 @@ impl Bus for ProbeBus {
     }
 
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
+        if self.in_fast_ram(address, 2) {
+            return self.ram.read16(address);
+        }
         let source = self.source_for_access(address, 2);
         match self.read16_inner(address) {
             Ok(value) => {
@@ -4941,6 +4974,9 @@ impl Bus for ProbeBus {
     }
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
+        if self.in_fast_ram(address, 4) {
+            return self.ram.read32(address);
+        }
         let source = self.source_for_access(address, 4);
         match self.read32_inner(address) {
             Ok(value) => {
@@ -4960,6 +4996,9 @@ impl Bus for ProbeBus {
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
+        if self.in_fast_ram(address, 1) {
+            return self.ram.write8(address, value);
+        }
         let source = self.source_for_access(address, 1);
         let old = self.watched_old_bytes(address, 1)?;
         self.write8_inner(address, value)?;
@@ -4980,6 +5019,9 @@ impl Bus for ProbeBus {
     }
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
+        if self.in_fast_ram(address, 2) {
+            return self.ram.write16(address, value);
+        }
         let source = self.source_for_access(address, 2);
         let old = self.watched_old_bytes(address, 2)?;
         self.write16_inner(address, value)?;
@@ -4997,6 +5039,9 @@ impl Bus for ProbeBus {
     }
 
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
+        if self.in_fast_ram(address, 4) {
+            return self.ram.write32(address, value);
+        }
         let source = self.source_for_access(address, 4);
         let old = self.watched_old_bytes(address, 4)?;
         self.write32_inner(address, value)?;
