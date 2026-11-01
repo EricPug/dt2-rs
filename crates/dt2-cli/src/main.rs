@@ -836,6 +836,9 @@ fn run_binary(args: &[String]) {
                 .set_first_tick_delay(pit_first_tick_delay);
         }
     }
+    if args[6..].iter().any(|a| a == "INTC1_BOOTSTRAP") {
+        bus.intc1 = Some(Intc0::at(0xFC04_C000, 128));
+    }
     if intc2_bootstrap {
         bus.attach_intc2();
     }
@@ -943,6 +946,7 @@ fn run_binary(args: &[String]) {
             || assignment == "SYNTHETIC_MCF_MMIO"
             || assignment == "PIT_BOOTSTRAP"
             || assignment == "INTC2_BOOTSTRAP"
+            || assignment == "INTC1_BOOTSTRAP"
             || assignment == "DTIM1_BOOTSTRAP"
             || assignment == "DSPI1_BOOTSTRAP"
             || assignment == "DSPI2_BOOTSTRAP"
@@ -1936,6 +1940,7 @@ struct ProbeBus {
     pit: Option<PitController>,
     dtim1: Option<DmaTimer1>,
     intc0: Option<Intc0>,
+    intc1: Option<Intc0>,
     intc2: Option<Intc2>,
     rgpio: Option<Rgpio>,
     rgpiobar: u32,
@@ -2349,6 +2354,7 @@ impl ProbeBus {
             pit: None,
             dtim1: None,
             intc0: None,
+            intc1: None,
             intc2: None,
             rgpio: None,
             rgpiobar: dt2_core::coldfire::RGPIOBAR_RESET,
@@ -3602,6 +3608,9 @@ impl ProbeBus {
         if let Some(intc0) = self.intc0_for(address) {
             return intc0.read8(address);
         }
+        if let Some(intc1) = self.intc1_for(address) {
+            return intc1.read8(address);
+        }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.read8(address);
         }
@@ -3660,6 +3669,9 @@ impl ProbeBus {
         if let Some(intc0) = self.intc0_for(address) {
             return intc0.read16(address);
         }
+        if let Some(intc1) = self.intc1_for(address) {
+            return intc1.read16(address);
+        }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.read16(address);
         }
@@ -3710,6 +3722,9 @@ impl ProbeBus {
         }
         if let Some(intc0) = self.intc0_for(address) {
             return intc0.read32(address);
+        }
+        if let Some(intc1) = self.intc1_for(address) {
+            return intc1.read32(address);
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.read32(address);
@@ -3807,6 +3822,9 @@ impl ProbeBus {
         if let Some(intc0) = self.intc0_for(address) {
             return intc0.write8(address, value);
         }
+        if let Some(intc1) = self.intc1_for(address) {
+            return intc1.write8(address, value);
+        }
         if let Some(mapped) = self.mmio.get_mut(&address) {
             *mapped = value;
             return Ok(());
@@ -3859,6 +3877,9 @@ impl ProbeBus {
         if let Some(intc0) = self.intc0_for(address) {
             return intc0.write16(address, value);
         }
+        if let Some(intc1) = self.intc1_for(address) {
+            return intc1.write16(address, value);
+        }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.write16(address, value);
         }
@@ -3903,6 +3924,9 @@ impl ProbeBus {
         }
         if let Some(intc0) = self.intc0_for(address) {
             return intc0.write32(address, value);
+        }
+        if let Some(intc1) = self.intc1_for(address) {
+            return intc1.write32(address, value);
         }
         if let Some(intc2) = self.intc2_for(address) {
             return intc2.write32(address, value);
@@ -4422,6 +4446,10 @@ impl ProbeBus {
         self.intc0.as_mut().filter(|_| Intc0::contains(address))
     }
 
+    fn intc1_for(&mut self, address: u32) -> Option<&mut Intc0> {
+        self.intc1.as_mut().filter(|intc| intc.covers(address))
+    }
+
     fn esdhc_for(&mut self, address: u32) -> Option<&mut Esdhc> {
         self.esdhc.as_mut().filter(|_| Esdhc::contains(address))
     }
@@ -4558,10 +4586,16 @@ impl ProbeBus {
         for channel in &self.edma_deferred {
             w.u8(*channel);
         }
-        // Written only with a display attached so snapshots without one keep their hash.
-        if let Some(display) = &self.display {
-            w.bool(true);
-            display.save_state(&mut w);
+        // Optional tail written only when a display or INTC1 exists, so older configurations keep their hash.
+        if self.display.is_some() || self.intc1.is_some() {
+            w.bool(self.display.is_some());
+            if let Some(display) = &self.display {
+                display.save_state(&mut w);
+            }
+            if let Some(intc1) = &self.intc1 {
+                w.bool(true);
+                intc1.save_state(&mut w);
+            }
         }
         Ok(w.into_inner())
     }
@@ -4692,10 +4726,17 @@ impl ProbeBus {
             self.edma_deferred = (0..r.u32()?).map(|_| r.u8()).collect::<Result<_, _>>()?;
         }
         // Optional tail: the panel framebuffer, present only when saved with a display attached.
-        if r.remaining() > 0 && r.bool()? {
-            self.display
-                .get_or_insert_with(display::Display::new)
-                .load_state(&mut r)?;
+        if r.remaining() > 0 {
+            if r.bool()? {
+                self.display
+                    .get_or_insert_with(display::Display::new)
+                    .load_state(&mut r)?;
+            }
+            if r.remaining() > 0 && r.bool()? {
+                self.intc1
+                    .get_or_insert_with(|| Intc0::at(0xFC04_C000, 128))
+                    .load_state(&mut r)?;
+            }
         }
         Ok(())
     }
@@ -5397,21 +5438,22 @@ impl Bus for ProbeBus {
         let intc0_request = self
             .intc0
             .as_ref()
-            .and_then(|intc0| intc0.pending_dtim1(timer1_pending));
+            .and_then(|intc0| intc0.pending_interrupt(timer1_pending));
         let intc2_request = self
             .intc2
             .as_ref()
             .and_then(|intc2| intc2.pending_interrupt(pending_sources));
-        let request = match (intc0_request, intc2_request) {
-            (Some(intc0), Some(intc2)) => {
-                if intc0.level >= intc2.level {
-                    intc0
-                } else {
-                    intc2
-                }
-            }
-            (Some(request), None) | (None, Some(request)) => request,
-            (None, None) => return None,
+        let intc1_request = self
+            .intc1
+            .as_ref()
+            .and_then(|intc1| intc1.pending_interrupt(false));
+        // Highest level wins; ties go to INTC0, then INTC1, then INTC2 (an approximation).
+        let request = [intc0_request, intc1_request, intc2_request]
+            .into_iter()
+            .flatten()
+            .reduce(|best, next| if next.level > best.level { next } else { best });
+        let Some(request) = request else {
+            return None;
         };
         if request.source == 13 && self.pit0_oneshot {
             if self.pit0_request_seen {
