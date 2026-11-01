@@ -179,3 +179,7 @@ PIT and DMA timer 1 now batch retired instructions and apply their ticks only wh
 ### Opt-in instruction hooks and cached PIT pending mask
 
 `report_instruction_state` now only copies registers and runs its trace checks when a diagnostic needs them (`DUMP_CALL`, `TRACE_TAIL`, `SCHED_TRACE`, `CONVERT_TRACE`, `TRACE_A0_RANGE`, `TRACE_A1`, `TRACE_REGS`; register copies also for `WATCH_WRITE`, `RGPIO_TRACE`, `CONVERT_TRACE`). The run prints `instruction hooks: minimal` or `full`. The PIT keeps its pending-source mask cached instead of recomputing it every instruction. The 1B baseline again reproduces snapshot `a81cd278…17d0` and the same interrupt/RTE log; throughput is 18.1M instructions/s (55 s).
+
+### Panel display in snapshots
+
+The UART8 tile decoder now lives in `dt2-core` (`display.rs`) and its framebuffer, including a half-received record, is saved in snapshots written with a display attached (`LIVE_WINDOW` or `LIVE_PNG`); snapshots without one are byte-identical to before, so the 1B baseline hash `a81cd278…17d0` is unchanged. To skip the boot in the viewer: `tools/run-section3.sh target/release/dt2-cli 1200000000 RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC LIVE_PNG=out/viewer.png SNAPSHOT_SAVE=out/viewer-1p2b.snap` once (about 70 s), then `... ESDHC_EMMC LIVE_WINDOW SNAPSHOT_LOAD=out/viewer-1p2b.snap` shows the saved screen immediately. Restoring that snapshot reproduces the saved frame pixel for pixel. Snapshots are git-ignored (`/out/`).
