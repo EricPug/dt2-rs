@@ -27,6 +27,7 @@ impl Display {
         if self.needed == 0 {
             self.needed = match byte {
                 0xB5 => 5,
+                0xB9 => 3,
                 0xB7 | 0xBA | 0xBC | 0x60 | 0x70 | 0x73 => 2,
                 0xB8 => 1,
                 0x10..=0x17 => 10,
@@ -180,6 +181,11 @@ mod tests {
             display.feed(byte);
         }
         assert_eq!((display.updates, display.unknown_bytes), (1, 0));
+        // An LED record `b9 idx value` must not be read as a tile tag.
+        for byte in [0xB9, 0x10, 0x71] {
+            display.feed(byte);
+        }
+        assert_eq!(display.unknown_bytes, 0);
         display.feed(0xFF);
         assert_eq!(display.unknown_bytes, 1);
     }

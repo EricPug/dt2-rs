@@ -1625,16 +1625,83 @@ fn run_live(
     }
 }
 
+/// Wire position (button channel, bit) of a panel key code, from public hardware observations.
+fn panel_wire_for_code(code: u8) -> Option<(u8, u8)> {
+    match code {
+        1..=48 => Some(((code - 1) / 8, (code - 1) % 8)),
+        49 => Some((6, 1)),
+        50 => Some((6, 0)),
+        _ => None,
+    }
+}
+
+/// Builds UART8 panel packets: `0x20 | channel` carries a channel's whole button mask, `0x30 | encoder`
+/// a signed delta (an unverified lead from public notes on the Digitakt II, not confirmed on OS 1.17).
+#[derive(Default)]
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+struct PanelInput {
+    masks: [u8; 7],
+    pressed_this_slice: Vec<u8>,
+    deferred_releases: Vec<u8>,
+    out: Vec<[u8; 2]>,
+}
+
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+impl PanelInput {
+    /// Releases that arrived in the same slice as their press are sent one slice later, so a quick tap lasts.
+    fn begin_slice(&mut self) {
+        self.pressed_this_slice.clear();
+        for code in std::mem::take(&mut self.deferred_releases) {
+            self.set(code, false);
+        }
+    }
+
+    fn set(&mut self, code: u8, down: bool) {
+        let Some((channel, bit)) = panel_wire_for_code(code) else {
+            return;
+        };
+        let old = self.masks[usize::from(channel)];
+        let new = if down { old | 1 << bit } else { old & !(1 << bit) };
+        if new != old {
+            self.masks[usize::from(channel)] = new;
+            self.out.push([0x20 | channel, new]);
+        }
+    }
+
+    fn press(&mut self, code: u8) {
+        self.pressed_this_slice.push(code);
+        self.set(code, true);
+    }
+
+    fn release(&mut self, code: u8) {
+        if self.pressed_this_slice.contains(&code) {
+            self.deferred_releases.push(code);
+        } else {
+            self.set(code, false);
+        }
+    }
+
+    fn turn(&mut self, encoder: u8, delta: i8) {
+        if encoder < 9 {
+            self.out.push([0x30 | encoder, delta as u8]);
+        }
+    }
+
+    fn take(&mut self) -> Vec<[u8; 2]> {
+        std::mem::take(&mut self.out)
+    }
+}
+
 #[cfg(feature = "window")]
 mod live_window {
-    pub struct Window(minifb::Window);
+    pub struct Window(minifb::Window, super::PanelInput);
 
     pub fn open(scale: usize) -> Window {
         let (width, height) = (super::display::FB_HEIGHT * scale, super::display::FB_WIDTH * scale);
         Window(minifb::Window::new("dt2-rs panel display (synthetic boot)", width, height, minifb::WindowOptions::default()).unwrap_or_else(|error| {
             eprintln!("cannot open LIVE_WINDOW: {error}");
             std::process::exit(2)
-        }))
+        }), super::PanelInput::default())
     }
 
     impl Window {
@@ -1645,45 +1712,99 @@ mod live_window {
             self.0.is_open()
         }
 
-        /// Synthetic key map inferred from firmware responses (see scan-panel-input.sh), not hardware:
-        /// 1-8 are `3x` button channels (01 pressed, 00 released); Q W E R T Y U I send `2x` deltas
-        /// (FF, or 01 with Shift) that make the UI respond.
+        /// Keyboard layout (my own choice, not the hardware's): F1-F6 page keys, F7-F9 PRESET SETTINGS
+        /// TEMPO, Enter/Backspace YES/NO, arrows, Tab TRK, Ctrl FUNC, F10-F12 KEYBOARD RECORD STOP, Space
+        /// PLAY, PageUp/Home/End PAGE PTN SONG, 1-8 and Q-I TRIG 1-16, Z-, encoder pushes A-H, / LEVEL
+        /// push, Insert SAMPLING; A-K turn encoders A-H and L turns LEVEL (Shift reverses).
         pub fn input_messages(&mut self) -> Vec<[u8; 2]> {
-            use minifb::Key;
-            let button = |key: Key| match key {
-                Key::Key1 => Some(0),
-                Key::Key2 => Some(1),
-                Key::Key3 => Some(2),
-                Key::Key4 => Some(3),
-                Key::Key5 => Some(4),
-                Key::Key6 => Some(5),
-                Key::Key7 => Some(6),
-                Key::Key8 => Some(7),
-                _ => None,
+            use minifb::{Key, KeyRepeat};
+            let code = |key: Key| -> Option<u8> {
+                Some(match key {
+                    Key::F1 => 1,
+                    Key::F2 => 2,
+                    Key::F3 => 3,
+                    Key::F4 => 4,
+                    Key::F5 => 5,
+                    Key::F6 => 6,
+                    Key::F7 => 7,
+                    Key::F8 => 8,
+                    Key::F9 => 9,
+                    Key::Enter => 10,
+                    Key::Up => 11,
+                    Key::Backspace => 12,
+                    Key::Left => 13,
+                    Key::Down => 14,
+                    Key::Right => 15,
+                    Key::Tab => 16,
+                    Key::LeftCtrl => 17,
+                    Key::F10 => 18,
+                    Key::F11 => 19,
+                    Key::Space => 20,
+                    Key::F12 => 21,
+                    Key::PageUp => 22,
+                    Key::Home => 23,
+                    Key::End => 24,
+                    Key::Key1 => 25,
+                    Key::Key2 => 26,
+                    Key::Key3 => 27,
+                    Key::Key4 => 28,
+                    Key::Key5 => 29,
+                    Key::Key6 => 30,
+                    Key::Key7 => 31,
+                    Key::Key8 => 32,
+                    Key::Q => 33,
+                    Key::W => 34,
+                    Key::E => 35,
+                    Key::R => 36,
+                    Key::T => 37,
+                    Key::Y => 38,
+                    Key::U => 39,
+                    Key::I => 40,
+                    Key::Z => 41,
+                    Key::X => 42,
+                    Key::C => 43,
+                    Key::V => 44,
+                    Key::B => 45,
+                    Key::N => 46,
+                    Key::M => 47,
+                    Key::Comma => 48,
+                    Key::Slash => 49,
+                    Key::Insert => 50,
+                    _ => return None,
+                })
             };
-            let encoder = |key: Key| match key {
-                Key::Q => Some(0),
-                Key::W => Some(1),
-                Key::E => Some(2),
-                Key::R => Some(3),
-                Key::T => Some(4),
-                Key::Y => Some(5),
-                Key::U => Some(6),
-                Key::I => Some(7),
-                _ => None,
+            let encoder = |key: Key| -> Option<u8> {
+                Some(match key {
+                    Key::A => 0,
+                    Key::S => 1,
+                    Key::D => 2,
+                    Key::F => 3,
+                    Key::G => 4,
+                    Key::H => 5,
+                    Key::J => 6,
+                    Key::K => 7,
+                    Key::L => 8,
+                    _ => return None,
+                })
             };
-            let shifted = self.0.is_key_down(Key::LeftShift) || self.0.is_key_down(Key::RightShift);
-            let mut messages = Vec::new();
-            for key in self.0.get_keys_pressed(minifb::KeyRepeat::Yes) {
-                messages.extend(encoder(key).map(|channel| [0x20 + channel, if shifted { 0x01 } else { 0xFF }]));
+            let delta = if self.0.is_key_down(Key::LeftShift) || self.0.is_key_down(Key::RightShift) { -1 } else { 1 };
+            self.1.begin_slice();
+            for key in self.0.get_keys_pressed(KeyRepeat::Yes) {
+                if let Some(index) = encoder(key) {
+                    self.1.turn(index, delta);
+                }
             }
-            for key in self.0.get_keys_pressed(minifb::KeyRepeat::No) {
-                messages.extend(button(key).map(|channel| [0x30 + channel, 0x01]));
+            for key in self.0.get_keys_pressed(KeyRepeat::No) {
+                if let Some(code) = code(key) {
+                    self.1.press(code);
+                }
             }
             for key in self.0.get_keys_released() {
-                messages.extend(button(key).map(|channel| [0x30 + channel, 0x00]));
+                if let Some(code) = code(key) {
+                    self.1.release(code);
+                }
             }
-            messages
+            self.1.take()
         }
     }
 }
@@ -5361,6 +5482,35 @@ fn branch_condition_name(condition: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn panel_codes_map_to_channel_and_bit() {
+        assert_eq!(super::panel_wire_for_code(1), Some((0, 0)));
+        assert_eq!(super::panel_wire_for_code(25), Some((3, 0)));
+        assert_eq!(super::panel_wire_for_code(48), Some((5, 7)));
+        assert_eq!(super::panel_wire_for_code(49), Some((6, 1)));
+        assert_eq!(super::panel_wire_for_code(50), Some((6, 0)));
+        assert_eq!(super::panel_wire_for_code(0), None);
+        assert_eq!(super::panel_wire_for_code(51), None);
+    }
+
+    #[test]
+    fn panel_input_sends_whole_masks_and_defers_a_same_slice_release() {
+        let mut input = super::PanelInput::default();
+        input.begin_slice();
+        input.press(25);
+        input.press(26);
+        input.release(25);
+        assert_eq!(input.take(), vec![[0x23, 0x01], [0x23, 0x03]]);
+        input.begin_slice();
+        assert_eq!(input.take(), vec![[0x23, 0x02]]);
+        input.begin_slice();
+        input.release(26);
+        assert_eq!(input.take(), vec![[0x23, 0x00]]);
+        input.turn(3, -1);
+        input.turn(9, 1);
+        assert_eq!(input.take(), vec![[0x33, 0xFF]]);
+    }
+
     use super::*;
     use dt2_core::uart::UART8_BASE;
 
