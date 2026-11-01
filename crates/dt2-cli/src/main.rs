@@ -1176,7 +1176,11 @@ fn run_binary(args: &[String]) {
         println!("UART8_RX_LATE: delivered {} byte(s) through the RX DMA ring", bytes.len());
     }
     let run_started = Instant::now();
-    bus.enable_fast_ram(ram_base, ram_size as u32);
+    let fast_path_status = match bus.enable_fast_ram(ram_base, ram_size as u32) {
+        None => "fast path: on".to_string(),
+        Some(reason) => format!("fast path: off ({reason})"),
+    };
+    println!("{fast_path_status}");
     let report = if let Some(scale) = live_window {
         run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale)
     } else {
@@ -1321,7 +1325,7 @@ fn run_binary(args: &[String]) {
     bus.print_conversion_trace();
     println!("executed {} instructions", report.instructions);
     println!(
-        "runner throughput: {elapsed_seconds:.3}s, {instructions_per_second:.0} instructions/s"
+        "runner throughput: {elapsed_seconds:.3}s, {instructions_per_second:.0} instructions/s; {fast_path_status}"
     );
     if report.fast_forwarded_instructions > 0 {
         println!(
@@ -2495,21 +2499,33 @@ impl ProbeBus {
     }
 
     /// Routes plain RAM accesses straight to memory when no diagnostic needs to observe them.
-    fn enable_fast_ram(&mut self, base: u32, size: u32) {
+    /// Returns why the fast path stayed off, or None when it is on.
+    fn enable_fast_ram(&mut self, base: u32, size: u32) -> Option<&'static str> {
         let end = u64::from(base) + u64::from(size);
         let overlaps = |start: u32, stop: u32| u64::from(base) < u64::from(stop) && u64::from(start) < end;
         let peripheral = MCF_PERIPHERAL_WINDOWS.iter().any(|&(s, e)| overlaps(s, e))
             || overlaps(MCF_SRAM_ALIAS_WINDOW.0, MCF_SRAM_ALIAS_WINDOW.1)
             || overlaps(dt2_core::rgpio::RGPIO_BASE, dt2_core::rgpio::RGPIO_BASE + 0x10)
             || overlaps(0, 0x1_0000);
-        let observed = self.ram_remap.is_some()
-            || self.ram_snapshot.is_some()
-            || self.watch_write_range.is_some()
-            || self.loop_detection
-            || self.mmio.keys().any(|&a| overlaps(a, a.saturating_add(1)));
-        if !peripheral && !observed && end <= 1 << 32 {
+        let reason = if peripheral || end > 1 << 32 {
+            Some("RAM window overlaps a peripheral or SRAM window")
+        } else if self.ram_remap.is_some() {
+            Some("RAM_REMAP active")
+        } else if self.ram_snapshot.is_some() {
+            Some("RAM_SNAPSHOT active")
+        } else if self.watch_write_range.is_some() {
+            Some("WATCH_WRITE active")
+        } else if self.loop_detection {
+            Some("LOOP_DETECT active")
+        } else if self.mmio.keys().any(|&a| overlaps(a, a.saturating_add(1))) {
+            Some("seeded MMIO inside the RAM window")
+        } else {
+            None
+        };
+        if reason.is_none() {
             self.fast_ram = Some((base, (end - 1) as u32));
         }
+        reason
     }
 
     fn in_fast_ram(&self, address: u32, width: u32) -> bool {

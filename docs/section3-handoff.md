@@ -167,3 +167,7 @@ Open diagnostics, all synthetic or unconfirmed: the RGPIO ready line, `REM.L` wr
 ## Live Panel Display
 
 `LIVE_WINDOW[=scale]` (build with `--features window`, uses `minifb`) runs the CPU in 400,000-instruction slices and shows the UART8 tile stream decoded by `crates/dt2-cli/src/display.rs`, rotated 90 degrees counter-clockwise (upright) and scaled (default 4); closing the window stops the run. `LIVE_PNG=path` writes the final upright frame at 4x as a grayscale PNG with no windowing dependency. Palette (`b5`) and command bytes are consumed by length but not rendered, so the display is 1-bit. The stream grammar is inferred from captures. The device state behind it (RGPIO ready model, GPIO loopback, eMMC content) is synthetic. Keep rendered images and firmware dumps out of Git (`/out/` is ignored).
+
+## Performance Baseline (1B Boot)
+
+`tools/check-1b-baseline.sh <binary> <label>` runs the 1B-instruction section-3 boot with `RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC` and prints the saved snapshot's SHA-256. The direct-RAM fast path (`6e2281d`) and the pre-fast-path build (`e9fe6db`) both end at PC `0x400e5cfe` with snapshot SHA-256 `a81cd2785e62c6bbb622cea0a7406aba3787d47a7be938dcc8dec53a76c017d0`, at 8.4M and 3.0M instructions/s respectively. Performance changes must reproduce this hash; an intentional timing change needs its own labeled baseline. The run prints `fast path: on` or `fast path: off (reason)`.
