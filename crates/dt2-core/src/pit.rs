@@ -3,6 +3,10 @@
 //! Time advances a configurable number of ticks per retired CPU instruction
 //! when the owning bus calls `advance_instruction`. This diagnostic clock is
 //! deterministic but is not equivalent to MCF bus-clock timing.
+//! Ticks are applied lazily: retired instructions accumulate in `lag` and are
+//! applied in one batch when a PIF event is due or a register is accessed, which
+//! yields exactly the same state as applying them one instruction at a time
+//! (`set_eager(true)` restores the per-instruction path for comparison).
 //! Interrupt-controller delivery is intentionally outside this model.
 
 use crate::bus::{Bus, BusError};
@@ -119,12 +123,30 @@ impl Pit {
         let period = u64::from(reload) + 1;
         self.counter = reload - (ticks_after_pif % period) as u16;
     }
+
+    /// Ticks until PIF is next set, or None if the timer is stopped or PIF is already set.
+    fn ticks_until_pif(&self) -> Option<u64> {
+        if self.pcsr & PCSR_EN == 0 || self.pcsr & PCSR_PIF != 0 {
+            return None;
+        }
+        let divisor = 1u64 << ((self.pcsr & PCSR_PRE) >> 8);
+        Some(
+            (self.first_tick_delay_remaining + (u64::from(self.counter) + 1) * divisor)
+                .saturating_sub(u64::from(self.prescaler))
+                .max(1),
+        )
+    }
 }
 
 /// Four MCF5441x 16-bit programmable interrupt timers.
 pub struct PitController {
     timers: [Pit; MODULE_COUNT],
     ticks_per_instruction: u32,
+    eager: bool,
+    /// Retired instructions whose ticks have not been applied yet.
+    lag: u64,
+    /// Instruction count in `lag` at which the next PIF event is due.
+    deadline: u64,
 }
 
 impl PitController {
@@ -137,11 +159,22 @@ impl PitController {
         Self {
             timers: std::array::from_fn(|_| Pit::new()),
             ticks_per_instruction,
+            eager: false,
+            lag: 0,
+            deadline: u64::MAX,
         }
     }
 
+    /// Apply ticks one instruction at a time instead of lazily (reference behavior).
+    pub fn set_eager(&mut self, eager: bool) {
+        self.sync();
+        self.eager = eager;
+    }
+
     pub fn set_first_tick_delay(&mut self, ticks: u64) {
+        self.sync();
         self.timers[0].set_first_tick_delay(ticks);
+        self.recompute_deadline();
     }
 
     pub fn contains(address: u32) -> bool {
@@ -149,28 +182,53 @@ impl PitController {
     }
 
     pub fn advance_instruction(&mut self) {
-        for timer in &mut self.timers {
-            timer.advance_ticks(u64::from(self.ticks_per_instruction));
+        if self.eager {
+            for timer in &mut self.timers {
+                timer.advance_ticks(u64::from(self.ticks_per_instruction));
+            }
+            return;
+        }
+        self.lag += 1;
+        if self.lag >= self.deadline {
+            self.sync();
         }
     }
 
-    pub fn ticks_until_pif(&self, module: usize) -> Option<u64> {
-        let timer = self.timers.get(module)?;
-        if timer.pcsr & PCSR_EN == 0 || timer.pcsr & PCSR_PIF != 0 {
-            return None;
+    /// Apply all pending ticks so timer state is current.
+    pub fn sync(&mut self) {
+        if self.lag > 0 {
+            let ticks = self.lag * u64::from(self.ticks_per_instruction);
+            self.lag = 0;
+            for timer in &mut self.timers {
+                timer.advance_ticks(ticks);
+            }
         }
-        let prescaler_bits = u32::from((timer.pcsr & PCSR_PRE) >> 8);
-        let divisor = 1u64 << prescaler_bits;
-        Some(
-            timer.first_tick_delay_remaining + (u64::from(timer.counter) + 1) * divisor
-                - u64::from(timer.prescaler),
-        )
+        self.recompute_deadline();
+    }
+
+    fn recompute_deadline(&mut self) {
+        let per_instruction = u64::from(self.ticks_per_instruction);
+        self.deadline = self
+            .timers
+            .iter()
+            .filter_map(Pit::ticks_until_pif)
+            .map(|ticks| ticks.div_ceil(per_instruction))
+            .min()
+            .unwrap_or(u64::MAX);
+    }
+
+    /// Requires synced state (call `sync` first).
+    pub fn ticks_until_pif(&self, module: usize) -> Option<u64> {
+        debug_assert_eq!(self.lag, 0);
+        self.timers.get(module)?.ticks_until_pif()
     }
 
     pub fn fast_forward_ticks(&mut self, ticks: u64) {
+        self.sync();
         for timer in &mut self.timers {
             timer.advance_ticks(ticks);
         }
+        self.recompute_deadline();
     }
 
     pub fn ticks_per_instruction(&self) -> u32 {
@@ -183,7 +241,20 @@ impl PitController {
         })
     }
 
+    /// Pending PIT interrupt sources as INTC2 source bits (PIT0 is source 13).
+    pub fn pending_source_bits(&self) -> u64 {
+        let mut sources = 0;
+        for (module, timer) in self.timers.iter().enumerate() {
+            if timer.pcsr & (PCSR_EN | PCSR_PIE | PCSR_PIF) == (PCSR_EN | PCSR_PIE | PCSR_PIF) {
+                sources |= 1u64 << (13 + module);
+            }
+        }
+        sources
+    }
+
+    /// Requires synced state (call `sync` first).
     pub fn timer_state(&self, module: usize) -> Option<(u16, u16, u16)> {
+        debug_assert_eq!(self.lag, 0);
         self.timers
             .get(module)
             .map(|timer| (timer.pcsr, timer.pmr, timer.counter))
@@ -226,7 +297,9 @@ impl PitController {
             });
         }
         let (module, register) = self.decode(address, true)?;
+        self.sync();
         self.timers[module].write(register, value);
+        self.recompute_deadline();
         Ok(())
     }
 }
@@ -239,6 +312,7 @@ impl Default for PitController {
 
 impl Bus for PitController {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
+        self.sync();
         let register_address = address & !1;
         let value = self.read_register(register_address, false)?;
         Ok(if address & 1 == 0 {
@@ -249,6 +323,7 @@ impl Bus for PitController {
     }
 
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
+        self.sync();
         self.read_register(address, false)
     }
 
@@ -260,6 +335,7 @@ impl Bus for PitController {
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
+        self.sync();
         let register_address = address & !1;
         let old = self.read_register(register_address, true)?;
         let next = if address & 1 == 0 {
@@ -289,6 +365,7 @@ impl Bus for PitController {
 
 impl PitController {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        debug_assert_eq!(self.lag, 0);
         w.u32(self.ticks_per_instruction);
         for t in &self.timers {
             w.u16(t.pcsr);
@@ -312,6 +389,8 @@ impl PitController {
             t.first_tick_delay_remaining = r.u64()?;
             t.delay_next_enable = r.bool()?;
         }
+        self.lag = 0;
+        self.recompute_deadline();
         Ok(())
     }
 }
@@ -411,8 +490,64 @@ mod tests {
                     }
                     batched.advance_instruction();
 
+                    individual.sync();
+                    batched.sync();
                     assert_eq!(batched.timer_state(0), individual.timer_state(0));
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn lazy_and_eager_timers_stay_identical_under_random_traffic() {
+        let mut seed = 0x1234_5678_u64;
+        let mut next = move || {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            (seed >> 33) as u32
+        };
+        for ticks in [1, 3] {
+            let mut eager = PitController::with_ticks_per_instruction(ticks);
+            let mut lazy = PitController::with_ticks_per_instruction(ticks);
+            eager.set_eager(true);
+            for step in 0..20_000 {
+                match next() % 40 {
+                    0 => {
+                        let module = u32::from(next() as u8 % 4) * MODULE_STRIDE;
+                        let value = [0, 3, 40, 300, 0xFFFF][(next() % 5) as usize];
+                        for pits in [&mut eager, &mut lazy] {
+                            pits.write16(BASE + module + 2, value).unwrap();
+                        }
+                    }
+                    1 => {
+                        let module = u32::from(next() as u8 % 4) * MODULE_STRIDE;
+                        let value = [0x0033, 0x003B, 0x0013, 0x0143, 0x0031, 0x0000, 0x0004][(next() % 7) as usize];
+                        for pits in [&mut eager, &mut lazy] {
+                            pits.write16(BASE + module, value).unwrap();
+                        }
+                    }
+                    2 => {
+                        let module = u32::from(next() as u8 % 4) * MODULE_STRIDE;
+                        assert_eq!(
+                            eager.read16(BASE + module + 4).unwrap(),
+                            lazy.read16(BASE + module + 4).unwrap(),
+                            "counter diverged at step {step}"
+                        );
+                    }
+                    _ => {
+                        eager.advance_instruction();
+                        lazy.advance_instruction();
+                    }
+                }
+                assert_eq!(
+                    eager.pending_source_bits(),
+                    lazy.pending_source_bits(),
+                    "pending sources diverged at step {step}"
+                );
+            }
+            eager.sync();
+            lazy.sync();
+            for module in 0..4 {
+                assert_eq!(eager.timer_state(module), lazy.timer_state(module));
             }
         }
     }

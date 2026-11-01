@@ -1230,6 +1230,7 @@ impl Cpu {
                 if budget_used >= event.instruction_count && event.level > interrupt_mask {
                     match self.take_interrupt(bus, event.level, event.vector) {
                         Ok(()) => {
+                            bus.interrupt_taken(event.level, event.vector);
                             injection = None;
                             injected_interrupt = Some(event);
                             continue;
@@ -1244,6 +1245,7 @@ impl Cpu {
                     if let Err(error) = self.take_interrupt(bus, request.level, request.vector) {
                         break RunStop::Error(error);
                     }
+                    bus.interrupt_taken(request.level, request.vector);
                     if natural_interrupt.is_none() {
                         natural_interrupt = Some(InterruptDelivery {
                             instruction_count: budget_used,

@@ -45,6 +45,9 @@ impl Intc2 {
     pub fn pending_interrupt(&self, pending_sources: u64) -> Option<InterruptRequest> {
         let forced = (u64::from(self.intfrch) << 32) | u64::from(self.intfrcl);
         let pending = pending_sources | forced;
+        if pending == 0 {
+            return None;
+        }
         (0..SOURCE_COUNT)
             .filter(|source| pending & (1u64 << source) != 0)
             .filter_map(|source| {

@@ -955,6 +955,8 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("RGPIO_TRACE=")
             || assignment == "RGPIO_READY_MODEL"
             || assignment == "GPIO_LOOPBACK"
+            || assignment == "PIT_EAGER"
+            || assignment.starts_with("IRQ_LOG=")
             || assignment == "ESDHC_EMMC"
             || assignment.starts_with("ESDHC_FILE=")
             || assignment == "ESDHC_TRACE"
@@ -1176,6 +1178,22 @@ fn run_binary(args: &[String]) {
         println!("UART8_RX_LATE: delivered {} byte(s) through the RX DMA ring", bytes.len());
     }
     let run_started = Instant::now();
+    if args[6..].iter().any(|a| a == "PIT_EAGER") {
+        if let Some(pit) = bus.pit.as_mut() {
+            pit.set_eager(true);
+        }
+        if let Some(dtim1) = bus.dtim1.as_mut() {
+            dtim1.set_eager(true);
+        }
+        println!("timers: eager per-instruction path (PIT_EAGER)");
+    }
+    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("IRQ_LOG=")) {
+        let file = std::fs::File::create(path).unwrap_or_else(|error| {
+            eprintln!("cannot create IRQ_LOG {path}: {error}");
+            std::process::exit(2)
+        });
+        bus.irq_log = Some(std::io::BufWriter::new(file));
+    }
     let fast_path_status = match bus.enable_fast_ram(ram_base, ram_size as u32) {
         None => "fast path: on".to_string(),
         Some(reason) => format!("fast path: off ({reason})"),
@@ -1201,6 +1219,10 @@ fn run_binary(args: &[String]) {
         0.0
     };
 
+    if let Some(log) = &mut bus.irq_log {
+        use std::io::Write;
+        let _ = log.flush();
+    }
     if let Some((bytes, times)) = &mut bus.uart8_tx_file {
         use std::io::Write;
         let _ = bytes.flush();
@@ -1360,6 +1382,9 @@ fn run_binary(args: &[String]) {
                 " "
             }
         );
+    }
+    if let Some(pit) = bus.pit.as_mut() {
+        pit.sync();
     }
     if let Some(pit) = &bus.pit {
         for module in 0..4 {
@@ -1770,6 +1795,7 @@ struct ProbeBus {
     uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
     display: Option<display::Display>,
     fast_ram: Option<(u32, u32)>,
+    irq_log: Option<std::io::BufWriter<std::fs::File>>,
     dump_calls: Vec<CallDump>,
     dump_call_count: usize,
     edma_tcd: BTreeMap<u32, u8>,
@@ -2178,6 +2204,7 @@ impl ProbeBus {
             uart8_tx_file: None,
             display: None,
             fast_ram: None,
+            irq_log: None,
             dump_calls: Vec::new(),
             dump_call_count: 0,
             edma_tcd: BTreeMap::new(),
@@ -2526,6 +2553,13 @@ impl ProbeBus {
             self.fast_ram = Some((base, (end - 1) as u32));
         }
         reason
+    }
+
+    fn write_irq_log(&mut self, line: &str) {
+        use std::io::Write;
+        if let Some(log) = &mut self.irq_log {
+            let _ = log.write_all(line.as_bytes());
+        }
     }
 
     fn in_fast_ram(&self, address: u32, width: u32) -> bool {
@@ -4221,6 +4255,12 @@ impl ProbeBus {
     }
 
     fn save_snapshot(&mut self, cpu: &Cpu, ram_base: u32, ram_size: u32) -> Result<Vec<u8>, String> {
+        if let Some(pit) = self.pit.as_mut() {
+            pit.sync();
+        }
+        if let Some(dtim1) = self.dtim1.as_mut() {
+            dtim1.sync();
+        }
         use dt2_core::snapshot::Writer;
         const PAGE: u32 = 4096;
         let mut w = Writer::new();
@@ -4791,6 +4831,13 @@ impl Bus for ProbeBus {
         restored_sr: u16,
         restored_pc: u32,
     ) {
+        if self.irq_log.is_some() {
+            let line = format!(
+                "RTE n={} pc={pc:#010x} restored_pc={restored_pc:#010x} sr={restored_sr:#06x}\n",
+                self.current_instruction_count
+            );
+            self.write_irq_log(&line);
+        }
         if self.rte_history.len() == MAX_RTE_HISTORY {
             self.rte_history.pop_front();
         }
@@ -4802,6 +4849,26 @@ impl Bus for ProbeBus {
             restored_sr,
             restored_pc,
         });
+    }
+
+    fn interrupt_taken(&mut self, level: u8, vector: u8) {
+        if self.irq_log.is_none() {
+            return;
+        }
+        let mut timers = String::new();
+        if let Some(pit) = self.pit.as_mut() {
+            pit.sync();
+            for module in 0..4 {
+                if let Some((pcsr, _, counter)) = pit.timer_state(module) {
+                    timers.push_str(&format!(" pit{module}={pcsr:#06x}:{counter:#06x}"));
+                }
+            }
+        }
+        let line = format!(
+            "IRQ n={} level={level} vector={vector}{timers}\n",
+            self.current_instruction_count
+        );
+        self.write_irq_log(&line);
     }
 
     fn fast_forward_loop(&mut self, context: LoopContext<'_>) -> usize {
@@ -4920,6 +4987,7 @@ impl Bus for ProbeBus {
         let Some(pit) = self.pit.as_mut() else {
             return 0;
         };
+        pit.sync();
         let Some(ticks_until_pif) = pit.ticks_until_pif(1) else {
             return 0;
         };
@@ -5104,15 +5172,7 @@ impl Bus for ProbeBus {
                 vector: 192,
             });
         }
-        let pending_sources = self.pit.as_ref().map_or(0, |pit| {
-            (0..4).fold(0u64, |sources, module| {
-                if pit.interrupt_pending(module) {
-                    sources | (1u64 << (13 + module))
-                } else {
-                    sources
-                }
-            })
-        });
+        let pending_sources = self.pit.as_ref().map_or(0, PitController::pending_source_bits);
         let timer1_pending = self
             .dtim1
             .as_ref()

@@ -76,6 +76,9 @@ pub trait Bus {
     /// Advance deterministic peripherals once for each retired CPU instruction.
     /// This is not a substitute for instruction-cycle or bus-clock timing.
     fn advance_instruction(&mut self) {}
+
+    /// Called after the CPU enters an interrupt handler, for diagnostics.
+    fn interrupt_taken(&mut self, _level: u8, _vector: u8) {}
 }
 
 /// One flat RAM block, for tests and tools.
