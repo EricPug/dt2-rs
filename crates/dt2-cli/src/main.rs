@@ -14,7 +14,7 @@ use dt2_core::{
 };
 use dt2_fw::{aplib, container, syx};
 
-mod display;
+use dt2_core::display;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
@@ -894,7 +894,7 @@ fn run_binary(args: &[String]) {
     });
     let live_png = args[6..].iter().find_map(|a| a.strip_prefix("LIVE_PNG="));
     if live_window.is_some() || live_png.is_some() {
-        bus.display = Some(display::Display::new());
+        bus.display.get_or_insert_with(display::Display::new);
     }
     if uart8_tx || uart8_tx_ready || uart8_rx.is_some() || panel_stub || bus.display.is_some() {
         bus.attach_uart8_tx();
@@ -1594,6 +1594,10 @@ fn run_live(
     scale: usize,
 ) -> dt2_core::coldfire::RunReport {
     let mut window = live_window::open(scale);
+    if let Some(display) = &bus.display {
+        let (width, height, pixels) = display.render_upright(scale);
+        window.present(width, height, &pixels);
+    }
     let mut done = 0usize;
     loop {
         let chunk = LIVE_CHUNK_INSTRUCTIONS.min(instruction_limit - done);
@@ -4386,6 +4390,11 @@ impl ProbeBus {
         for channel in &self.edma_deferred {
             w.u8(*channel);
         }
+        // Written only with a display attached so snapshots without one keep their hash.
+        if let Some(display) = &self.display {
+            w.bool(true);
+            display.save_state(&mut w);
+        }
         Ok(w.into_inner())
     }
 
@@ -4513,6 +4522,12 @@ impl ProbeBus {
             }
             self.esdhc_dma_irq_pending = r.bool()?;
             self.edma_deferred = (0..r.u32()?).map(|_| r.u8()).collect::<Result<_, _>>()?;
+        }
+        // Optional tail: the panel framebuffer, present only when saved with a display attached.
+        if r.remaining() > 0 && r.bool()? {
+            self.display
+                .get_or_insert_with(display::Display::new)
+                .load_state(&mut r)?;
         }
         Ok(())
     }

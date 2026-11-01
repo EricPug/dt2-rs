@@ -64,6 +64,28 @@ impl Display {
         self.pixels[y * FB_WIDTH + x]
     }
 
+    pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
+        let packed: Vec<u8> = self.pixels.iter().map(|&on| u8::from(on)).collect();
+        w.bytes(&packed);
+        w.bytes(&self.pending);
+        w.u32(self.needed as u32);
+        w.u64(self.updates);
+        w.u64(self.unknown_bytes);
+    }
+
+    pub fn load_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        let packed = r.bytes()?;
+        if packed.len() != FB_WIDTH * FB_HEIGHT {
+            return Err("snapshot display size mismatch".into());
+        }
+        self.pixels = packed.iter().map(|&byte| byte != 0).collect();
+        self.pending = r.bytes()?.to_vec();
+        self.needed = r.u32()? as usize;
+        self.updates = r.u64()?;
+        self.unknown_bytes = r.u64()?;
+        Ok(())
+    }
+
     /// Rotates the framebuffer 90 degrees counter-clockwise (upright reading) and scales by `scale`.
     /// Returns (width, height, 0x00RRGGBB pixels).
     pub fn render_upright(&self, scale: usize) -> (usize, usize, Vec<u32>) {
@@ -173,6 +195,28 @@ mod tests {
         assert_eq!((w, h), (128, 64));
         assert_eq!(out[63 * 128], 0x00FF_FFFF);
         assert_eq!(out.iter().filter(|&&p| p != 0).count(), 1);
+    }
+
+    #[test]
+    fn snapshot_round_trip_keeps_pixels_and_a_partial_record() {
+        let mut display = Display::new();
+        for byte in tile(0x12, 16, [0xF0, 0, 0, 0, 0, 0, 0, 1]) {
+            display.feed(byte);
+        }
+        display.feed(0x13);
+        display.feed(8);
+        let mut writer = crate::snapshot::Writer::new();
+        display.save_state(&mut writer);
+        let data = writer.into_inner();
+
+        let mut restored = Display::new();
+        restored.load_state(&mut crate::snapshot::Reader::new(&data)).unwrap();
+        assert!(restored.pixel(16, 16) && restored.pixel(19, 16) && !restored.pixel(20, 16));
+        // The half-received record at the snapshot point completes after restore.
+        for byte in [0x80, 0, 0, 0, 0, 0, 0, 0] {
+            restored.feed(byte);
+        }
+        assert!(restored.pixel(24, 8));
     }
 
     #[test]
