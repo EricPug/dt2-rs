@@ -1118,6 +1118,18 @@ impl Cpu {
                 self.d[dst] = result;
                 self.flags_move(result, Size::L);
             }
+            0xC if op & 0xF1C0 == 0xC0C0 => {
+                let dst = ((op >> 9) & 7) as usize;
+                let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);
+                if mode == 1 {
+                    return Err(ill);
+                }
+                let source = self.ea(bus, mode, reg, Size::W, pc0, op)?;
+                let source_value = self.read(bus, source, Size::W)? & 0xFFFF;
+                let result = (self.d[dst] & 0xFFFF).wrapping_mul(source_value);
+                self.d[dst] = result;
+                self.flags_move(result, Size::L);
+            }
             0xC => match (op >> 6) & 7 {
                 2 if mode != 1 => {
                     let dst = ((op >> 9) & 7) as usize;
@@ -1996,6 +2008,19 @@ mod tests {
 
         assert_eq!(cpu.d[1], 0xFFFF_7FFF);
         assert_eq!(cpu.sr, CCR_X | CCR_N);
+        assert_eq!(cpu.pc, 0x1004);
+    }
+
+    #[test]
+    fn mulu_word_immediate_zero_extends_both_operands() {
+        let (mut cpu, mut ram) = machine(&[0xC2FC, 0x1556]);
+        cpu.d[1] = 0x1234_FFFD;
+        cpu.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut cpu, &mut ram, 1);
+
+        assert_eq!(cpu.d[1], 0xFFFD * 0x1556);
+        assert_eq!(cpu.sr, CCR_X);
         assert_eq!(cpu.pc, 0x1004);
     }
 
