@@ -147,6 +147,8 @@ pub struct PitController {
     lag: u64,
     /// Instruction count in `lag` at which the next PIF event is due.
     deadline: u64,
+    /// Cached `pending_source_bits`, refreshed whenever timer state changes.
+    pending_bits: u64,
 }
 
 impl PitController {
@@ -162,6 +164,7 @@ impl PitController {
             eager: false,
             lag: 0,
             deadline: u64::MAX,
+            pending_bits: 0,
         }
     }
 
@@ -186,6 +189,7 @@ impl PitController {
             for timer in &mut self.timers {
                 timer.advance_ticks(u64::from(self.ticks_per_instruction));
             }
+            self.refresh_pending();
             return;
         }
         self.lag += 1;
@@ -207,6 +211,7 @@ impl PitController {
     }
 
     fn recompute_deadline(&mut self) {
+        self.refresh_pending();
         let per_instruction = u64::from(self.ticks_per_instruction);
         self.deadline = self
             .timers
@@ -243,13 +248,17 @@ impl PitController {
 
     /// Pending PIT interrupt sources as INTC2 source bits (PIT0 is source 13).
     pub fn pending_source_bits(&self) -> u64 {
+        self.pending_bits
+    }
+
+    fn refresh_pending(&mut self) {
         let mut sources = 0;
         for (module, timer) in self.timers.iter().enumerate() {
             if timer.pcsr & (PCSR_EN | PCSR_PIE | PCSR_PIF) == (PCSR_EN | PCSR_PIE | PCSR_PIF) {
                 sources |= 1u64 << (13 + module);
             }
         }
-        sources
+        self.pending_bits = sources;
     }
 
     /// Requires synced state (call `sync` first).
