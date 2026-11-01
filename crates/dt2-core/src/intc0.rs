@@ -1,4 +1,4 @@
-//! MCF5441x INTC0 source-33 subset used by DMA Timer 1 (MCF54418RM chapter 17).
+//! MCF5441x INTC0 subset: DMA Timer 1 (source 33) and forced (INTFRC) sources (MCF54418RM chapter 17).
 
 use crate::bus::{Bus, BusError, InterruptRequest};
 
@@ -21,6 +21,8 @@ const VECTOR_BASE: u8 = 64;
 const CIMR_CALL: u8 = 1 << 6;
 
 pub struct Intc0 {
+    base: u32,
+    vector_base: u8,
     imrh: u32,
     imrl: u32,
     intfrch: u32,
@@ -36,7 +38,14 @@ impl Default for Intc0 {
 
 impl Intc0 {
     pub fn new() -> Self {
+        Self::at(BASE, VECTOR_BASE)
+    }
+
+    /// Another controller with the same register layout (INTC1 is at 0xFC04C000, vectors from 128).
+    pub fn at(base: u32, vector_base: u8) -> Self {
         Self {
+            base,
+            vector_base,
             imrh: u32::MAX,
             imrl: u32::MAX,
             intfrch: 0,
@@ -49,19 +58,31 @@ impl Intc0 {
         (BASE..END).contains(&address)
     }
 
-    pub fn pending_dtim1(&self, timer_pending: bool) -> Option<InterruptRequest> {
-        if !timer_pending {
+    pub fn covers(&self, address: u32) -> bool {
+        (self.base..self.base + 0x100).contains(&address)
+    }
+
+    /// Highest unmasked pending source: DMA timer 1 when `timer_pending`, plus forced (INTFRC) sources.
+    pub fn pending_interrupt(&self, timer_pending: bool) -> Option<InterruptRequest> {
+        let mut pending = (u64::from(self.intfrch) << 32) | u64::from(self.intfrcl);
+        if timer_pending {
+            pending |= 1u64 << SOURCE_DTIM1;
+        }
+        if pending == 0 {
             return None;
         }
-        let source = u32::from(SOURCE_DTIM1);
-        let mask = if source < 32 { self.imrl } else { self.imrh };
-        let bit = 1 << (source % 32);
-        let level = self.icr[source as usize] & 7;
-        (mask & bit == 0 && level != 0).then_some(InterruptRequest {
-            source: SOURCE_DTIM1,
-            level,
-            vector: VECTOR_BASE + SOURCE_DTIM1,
-        })
+        (0..SOURCE_COUNT)
+            .filter(|source| pending & (1u64 << source) != 0)
+            .filter_map(|source| {
+                let mask = if source < 32 { self.imrl } else { self.imrh };
+                let level = self.icr[source] & 7;
+                (mask & (1 << (source % 32)) == 0 && level != 0).then_some(InterruptRequest {
+                    source: source as u8,
+                    level,
+                    vector: self.vector_base + source as u8,
+                })
+            })
+            .max_by_key(|request| (request.level, request.source))
     }
 
     fn error(address: u32, write: bool) -> BusError {
@@ -80,7 +101,7 @@ impl Intc0 {
             REG_INTFRCH => self.intfrch,
             REG_INTFRCL => self.intfrcl,
             _ => {
-                return Err(Self::error(BASE + offset, false));
+                return Err(Self::error(self.base + offset, false));
             }
         })
     }
@@ -91,7 +112,7 @@ impl Intc0 {
             REG_IMRL => self.imrl = value,
             REG_INTFRCH => self.intfrch = value,
             REG_INTFRCL => self.intfrcl = value,
-            _ => return Err(Self::error(BASE + offset, true)),
+            _ => return Err(Self::error(self.base + offset, true)),
         }
         Ok(())
     }
@@ -124,10 +145,10 @@ impl Intc0 {
 
 impl Bus for Intc0 {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
-        if !Self::contains(address) {
+        if !self.covers(address) {
             return Err(Self::error(address, false));
         }
-        let offset = address - BASE;
+        let offset = address - self.base;
         if (REG_ICR_START..REG_ICR_END).contains(&offset) {
             return Ok(self.icr[(offset - REG_ICR_START) as usize]);
         }
@@ -146,17 +167,17 @@ impl Bus for Intc0 {
     }
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
-        if address & 3 != 0 || !Self::contains(address) {
+        if address & 3 != 0 || !self.covers(address) {
             return Err(Self::error(address, false));
         }
-        self.read_word(address - BASE)
+        self.read_word(address - self.base)
     }
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
-        if !Self::contains(address) {
+        if !self.covers(address) {
             return Err(Self::error(address, true));
         }
-        let offset = address - BASE;
+        let offset = address - self.base;
         match offset {
             REG_SIMR => self.write_mask_command(value, true),
             REG_CIMR => self.write_mask_command(value, false),
@@ -183,10 +204,10 @@ impl Bus for Intc0 {
     }
 
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
-        if address & 3 != 0 || !Self::contains(address) {
+        if address & 3 != 0 || !self.covers(address) {
             return Err(Self::error(address, true));
         }
-        self.write_word(address - BASE, value)
+        self.write_word(address - self.base, value)
     }
 }
 
@@ -220,20 +241,41 @@ mod tests {
     #[test]
     fn dtim1_source_33_requires_unmask_and_nonzero_priority() {
         let mut intc0 = Intc0::new();
-        assert_eq!(intc0.pending_dtim1(true), None);
+        assert_eq!(intc0.pending_interrupt(true), None);
 
         intc0.write8(BASE + 0x61, 2).unwrap();
-        assert_eq!(intc0.pending_dtim1(true), None);
+        assert_eq!(intc0.pending_interrupt(true), None);
 
         intc0.write8(BASE + REG_CIMR, 33).unwrap();
         assert_eq!(
-            intc0.pending_dtim1(true),
+            intc0.pending_interrupt(true),
             Some(InterruptRequest {
                 source: 33,
                 level: 2,
                 vector: 97,
             })
         );
-        assert_eq!(intc0.pending_dtim1(false), None);
+        assert_eq!(intc0.pending_interrupt(false), None);
+    }
+
+    #[test]
+    fn forced_source_is_delivered_until_its_force_bit_is_cleared() {
+        let mut intc0 = Intc0::new();
+        // Source 57 is bit 25 of INTFRCH and ICR57 lives at +0x40+57.
+        intc0.write8(BASE + 0x40 + 57, 4).unwrap();
+        intc0.write32(BASE + REG_INTFRCH, 1 << 25).unwrap();
+        assert_eq!(intc0.pending_interrupt(false), None, "masked after reset");
+
+        intc0.write8(BASE + REG_CIMR, 57).unwrap();
+        let expected = InterruptRequest { source: 57, level: 4, vector: 121 };
+        assert_eq!(intc0.pending_interrupt(false), Some(expected));
+
+        // A higher level wins over an earlier source; clearing the force bit ends the request.
+        intc0.write8(BASE + 0x40 + 44, 6).unwrap();
+        intc0.write8(BASE + REG_CIMR, 44).unwrap();
+        intc0.write32(BASE + REG_INTFRCH, (1 << 25) | (1 << 12)).unwrap();
+        assert_eq!(intc0.pending_interrupt(false).map(|r| r.source), Some(44));
+        intc0.write32(BASE + REG_INTFRCH, 0).unwrap();
+        assert_eq!(intc0.pending_interrupt(false), None);
     }
 }
