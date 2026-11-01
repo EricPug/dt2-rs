@@ -57,6 +57,9 @@ impl<'a> Reader<'a> {
         self.pos = end;
         Ok(slice)
     }
+    pub fn remaining(&self) -> usize {
+        self.data.len() - self.pos
+    }
     pub fn u8(&mut self) -> Result<u8, String> {
         Ok(self.take(1)?[0])
     }

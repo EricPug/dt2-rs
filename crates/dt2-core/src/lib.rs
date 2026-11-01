@@ -3,6 +3,7 @@ pub mod coldfire;
 pub mod ddr;
 pub mod dspi;
 pub mod dtim1;
+pub mod emmc;
 pub mod intc0;
 pub mod intc2;
 pub mod pit;

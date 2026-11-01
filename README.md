@@ -74,6 +74,11 @@ aliasing to test source/output overlap and is not a hardware memory model.
 at startup without injecting a panel response; `UART8_RX=hex` queues explicit
 receive bytes for a diagnostic handshake. These options do not model serial
 timing or eDMA.
+`ESDHC_EMMC` attaches a synthetic blank eMMC. `ESDHC_FILE=path` instead uses a
+sparse 4 GiB raw backing image that persists card blocks across separate runs;
+`ESDHC_TRACE` logs command arguments, block ranges, completed writes, and eDMA
+channel-59 activity. The host image and command responses are synthetic, not
+hardware evidence. A restored snapshot must use the same `ESDHC_FILE` path.
 `PANEL_STUB` answers section 2's `60 01` panel-discovery request through its
 polled SRAM ring, then answers the section-3 UART8 handshake and DMA-delivers a
 group-0 button press, encoder-0 delta, and button release after TCD34 is enabled.

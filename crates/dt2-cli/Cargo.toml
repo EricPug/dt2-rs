@@ -8,3 +8,7 @@ rust-version.workspace = true
 [dependencies]
 dt2-core = { path = "../dt2-core" }
 dt2-fw = { path = "../dt2-fw" }
+minifb = { version = "0.29", optional = true }
+
+[features]
+window = ["dep:minifb"]

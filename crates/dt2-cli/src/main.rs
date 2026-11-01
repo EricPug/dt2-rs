@@ -4,6 +4,7 @@ use dt2_core::{
     ddr::DdrController,
     dspi::Dspi,
     dtim1::DmaTimer1,
+    emmc::{Esdhc, ESDHC_BASE, ESDHC_DATPORT},
     intc0::Intc0,
     intc2::Intc2,
     pit::PitController,
@@ -12,6 +13,9 @@ use dt2_core::{
     uart::Uart8,
 };
 use dt2_fw::{aplib, container, syx};
+
+mod display;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
@@ -40,7 +44,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -391,7 +395,7 @@ fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value TRACE_TAIL=n ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value TRACE_TAIL=n ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -469,6 +473,17 @@ fn run_binary(args: &[String]) {
     let dspi2_bootstrap = args[6..]
         .iter()
         .any(|assignment| assignment == "DSPI2_BOOTSTRAP");
+    let esdhc_file = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("ESDHC_FILE="))
+        .map(str::to_owned);
+    let esdhc_emmc = esdhc_file.is_some()
+        || args[6..]
+            .iter()
+            .any(|assignment| assignment == "ESDHC_EMMC");
+    let esdhc_trace = args[6..]
+        .iter()
+        .any(|assignment| assignment == "ESDHC_TRACE");
     let pit0_oneshot = args[6..]
         .iter()
         .any(|assignment| assignment == "PIT0_ONESHOT");
@@ -743,6 +758,10 @@ fn run_binary(args: &[String]) {
         eprintln!("PIT2_PERIODIC requires PIT_BOOTSTRAP and INTC2_BOOTSTRAP");
         std::process::exit(2);
     }
+    if esdhc_trace && !esdhc_emmc {
+        eprintln!("ESDHC_TRACE requires ESDHC_EMMC");
+        std::process::exit(2);
+    }
     let uart8_tx = args[6..].iter().any(|assignment| assignment == "UART8_TX");
     let uart8_tx_ready = args[6..]
         .iter()
@@ -866,7 +885,18 @@ fn run_binary(args: &[String]) {
     if loop_detect {
         bus.enable_loop_detection();
     }
-    if uart8_tx || uart8_tx_ready || uart8_rx.is_some() || panel_stub {
+    let live_window = args[6..].iter().find_map(|a| {
+        if a == "LIVE_WINDOW" {
+            Some(4)
+        } else {
+            a.strip_prefix("LIVE_WINDOW=").and_then(|s| s.parse::<usize>().ok())
+        }
+    });
+    let live_png = args[6..].iter().find_map(|a| a.strip_prefix("LIVE_PNG="));
+    if live_window.is_some() || live_png.is_some() {
+        bus.display = Some(display::Display::new());
+    }
+    if uart8_tx || uart8_tx_ready || uart8_rx.is_some() || panel_stub || bus.display.is_some() {
         bus.attach_uart8_tx();
     }
     if uart8_tx_ready {
@@ -877,6 +907,19 @@ fn run_binary(args: &[String]) {
     }
     if let Some(bytes) = &uart8_rx {
         bus.queue_uart8_rx(bytes);
+    }
+    if esdhc_emmc {
+        bus.esdhc = Some(if let Some(path) = &esdhc_file {
+            Esdhc::with_backing_file(path).unwrap_or_else(|error| {
+                eprintln!("cannot open eSDHC backing image {path}: {error}");
+                std::process::exit(2)
+            })
+        } else {
+            Esdhc::new()
+        });
+    }
+    if esdhc_trace {
+        bus.enable_esdhc_trace();
     }
     bus.load_ram(image_address, &bytes).unwrap_or_else(|error| {
         eprintln!("{error}");
@@ -911,7 +954,14 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("RGPIO_INPUT_HIGH=")
             || assignment.starts_with("RGPIO_TRACE=")
             || assignment == "RGPIO_READY_MODEL"
+            || assignment == "GPIO_LOOPBACK"
+            || assignment == "ESDHC_EMMC"
+            || assignment.starts_with("ESDHC_FILE=")
+            || assignment == "ESDHC_TRACE"
             || assignment.starts_with("UART8_TX_FILE=")
+            || assignment == "LIVE_WINDOW"
+            || assignment.starts_with("LIVE_WINDOW=")
+            || assignment.starts_with("LIVE_PNG=")
             || assignment.starts_with("UART8_RX_PERIODIC=")
             || assignment.starts_with("DUMP_CALL=")
             || assignment.starts_with("STOP_PC=")
@@ -1049,6 +1099,7 @@ fn run_binary(args: &[String]) {
                 eprintln!("cannot restore snapshot: {error}");
                 std::process::exit(2)
             });
+        bus.sync_esdhc_trace_baseline();
         println!("restored snapshot {path}: PC={:#010x}", cpu.pc);
     }
     if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_TX_FILE=")) {
@@ -1080,6 +1131,7 @@ fn run_binary(args: &[String]) {
             .collect();
         bus.uart8_rx_periodic = Some((period, messages, 0, 0));
     }
+    bus.gpio_loopback = args[6..].iter().any(|a| a == "GPIO_LOOPBACK");
     if args[6..].iter().any(|a| a == "RGPIO_READY_MODEL") {
         bus.rgpio_ready_model = true;
     }
@@ -1124,7 +1176,19 @@ fn run_binary(args: &[String]) {
         println!("UART8_RX_LATE: delivered {} byte(s) through the RX DMA ring", bytes.len());
     }
     let run_started = Instant::now();
-    let report = cpu.run_with_interrupt(&mut bus, instruction_limit, interrupt_injection);
+    let report = if let Some(scale) = live_window {
+        run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale)
+    } else {
+        cpu.run_with_interrupt(&mut bus, instruction_limit, interrupt_injection)
+    };
+    if let (Some(path), Some(display)) = (live_png, &bus.display) {
+        let (width, height, pixels) = display.render_upright(4);
+        std::fs::write(path, display::encode_gray_png(width, height, &pixels)).unwrap_or_else(|error| {
+            eprintln!("cannot write LIVE_PNG {path}: {error}");
+            std::process::exit(2)
+        });
+        println!("LIVE_PNG: wrote {path} after {} display update(s)", display.updates);
+    }
     let elapsed_seconds = run_started.elapsed().as_secs_f64();
     let instructions_per_second = if elapsed_seconds > 0.0 {
         report.instructions as f64 / elapsed_seconds
@@ -1240,6 +1304,15 @@ fn run_binary(args: &[String]) {
     if dspi2_bootstrap {
         println!("DSPI2 model: registers/FIFO only, no attached slave; received data is 0xffff");
     }
+    if let Some(esdhc) = &bus.esdhc {
+        println!(
+            "eSDHC/eMMC synthetic model: {} command(s) executed; EXT_CSD and card content are not hardware evidence",
+            esdhc.commands_executed()
+        );
+    }
+    if let Some(path) = &esdhc_file {
+        println!("eSDHC backing image: {path} (raw 4 GiB, sparse; synthetic card semantics)");
+    }
     bus.print_watched_writes();
     bus.print_register_trace();
     bus.print_instruction_trace_tail();
@@ -1345,6 +1418,7 @@ fn run_binary(args: &[String]) {
         }
     }
     bus.print_access_trace();
+    bus.print_esdhc_trace();
     bus.print_uart8_trace();
     bus.print_loop_reports();
     bus.print_last_control_flow();
@@ -1475,6 +1549,80 @@ fn parse_ram_file_dump_spec(spec: &str) -> Result<(u32, usize, String), String> 
     Ok((address, length, path.to_string()))
 }
 
+const LIVE_CHUNK_INSTRUCTIONS: usize = 400_000;
+
+/// Runs the CPU in slices and presents the decoded panel display between slices.
+fn run_live(
+    cpu: &mut Cpu,
+    bus: &mut ProbeBus,
+    instruction_limit: usize,
+    mut injection: Option<InterruptInjection>,
+    scale: usize,
+) -> dt2_core::coldfire::RunReport {
+    let mut window = live_window::open(scale);
+    let mut done = 0usize;
+    loop {
+        let chunk = LIVE_CHUNK_INSTRUCTIONS.min(instruction_limit - done);
+        let shifted = injection.map(|mut event| {
+            event.instruction_count = event.instruction_count.saturating_sub(done);
+            event
+        });
+        let mut report = cpu.run_with_interrupt(bus, chunk, shifted);
+        if report.injected_interrupt.is_some() {
+            injection = None;
+        }
+        done += report.instructions + report.fast_forwarded_instructions;
+        if let Some(display) = &bus.display {
+            let (width, height, pixels) = display.render_upright(scale);
+            window.present(width, height, &pixels);
+        }
+        let finished = report.stop != RunStop::InstructionLimit || done >= instruction_limit || !window.is_open();
+        if finished {
+            report.instructions = done;
+            return report;
+        }
+    }
+}
+
+#[cfg(feature = "window")]
+mod live_window {
+    pub struct Window(minifb::Window);
+
+    pub fn open(scale: usize) -> Window {
+        let (width, height) = (super::display::FB_HEIGHT * scale, super::display::FB_WIDTH * scale);
+        Window(minifb::Window::new("dt2-rs panel display (synthetic boot)", width, height, minifb::WindowOptions::default()).unwrap_or_else(|error| {
+            eprintln!("cannot open LIVE_WINDOW: {error}");
+            std::process::exit(2)
+        }))
+    }
+
+    impl Window {
+        pub fn present(&mut self, width: usize, height: usize, pixels: &[u32]) {
+            let _ = self.0.update_with_buffer(pixels, width, height);
+        }
+        pub fn is_open(&self) -> bool {
+            self.0.is_open()
+        }
+    }
+}
+
+#[cfg(not(feature = "window"))]
+mod live_window {
+    pub struct Window;
+
+    pub fn open(_scale: usize) -> Window {
+        eprintln!("LIVE_WINDOW needs the window feature: cargo build --release -p dt2-cli --features window");
+        std::process::exit(2)
+    }
+
+    impl Window {
+        pub fn present(&mut self, _width: usize, _height: usize, _pixels: &[u32]) {}
+        pub fn is_open(&self) -> bool {
+            false
+        }
+    }
+}
+
 fn parse_interrupt_injection(spec: &str) -> Result<InterruptInjection, String> {
     let mut fields = spec.split(':');
     let instruction_count = fields
@@ -1600,8 +1748,22 @@ struct ProbeBus {
     uart8_tx_irq_pending: bool,
     rgpio_input_high: u16,
     rgpio_ready_model: bool,
+    gpio_loopback: bool,
+    gpio_loopback_level: bool,
+    esdhc: Option<Esdhc>,
+    esdhc_dma_irq_pending: bool,
+    esdhc_trace_enabled: bool,
+    esdhc_commands_seen: u64,
+    esdhc_write_blocks_seen: u64,
+    esdhc_command_events: Vec<EsdhcCommandTrace>,
+    esdhc_write_events: Vec<EsdhcWriteTrace>,
+    esdhc_access_summaries: BTreeMap<u32, EsdhcRegisterSummary>,
+    esdhc_last_access: Option<EsdhcAccessTrace>,
+    esdhc_dma_events: Vec<EsdhcDmaTrace>,
+    edma_deferred: std::collections::BTreeSet<u8>,
     uart8_rx_periodic: Option<(usize, Vec<Vec<u8>>, usize, usize)>,
     uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
+    display: Option<display::Display>,
     dump_calls: Vec<CallDump>,
     dump_call_count: usize,
     edma_tcd: BTreeMap<u32, u8>,
@@ -1697,8 +1859,13 @@ const UART8_TCD34_REQUEST: u32 = 0xFC04_4018;
 const UART8_TCD34_CINT: u32 = 0xFC04_401C;
 const UART8_TCD34_REQUEST_VALUE: u8 = 0x22;
 const EDMA_SERQ: u32 = 0xFC04_4018;
+// Pin driven through 0xEC09401B (set) / 0xEC094027 (clear mask) as seen by bit 3 of 0xEC09401A.
+const GPIO_LOOPBACK_SET: u32 = 0xEC09_401B;
+const GPIO_LOOPBACK_CLEAR: u32 = 0xEC09_4027;
+const GPIO_LOOPBACK_SENSE: u32 = 0xEC09_401A;
 const EDMA_TCD_WINDOW: std::ops::Range<u32> = 0xFC04_5000..0xFC04_6000;
 const UART8_TX_DMA_CHANNEL: u8 = 0x23;
+const ESDHC_DMA_CHANNEL: u8 = 0x3B;
 const UART8_DMA_RING_MASK: u32 = 0x3FF;
 const PANEL_STUB_QUERY: [u8; 4] = [0x60, 0x02, 0x70, 0x00];
 const MAX_DSPI_PUSH_EVENTS: usize = 262_144;
@@ -1786,6 +1953,54 @@ struct Uart8TraceEvent {
     write: bool,
     dma: bool,
     dma_destination: u32,
+}
+
+#[derive(Clone, Copy)]
+struct EsdhcCommandTrace {
+    instruction_count: usize,
+    pc: u32,
+    command: u8,
+    argument: u32,
+    block_attributes: u32,
+    completed_writes: u64,
+    write_active: bool,
+    write_buffer_bytes: usize,
+}
+
+#[derive(Clone, Copy)]
+struct EsdhcWriteTrace {
+    instruction_count: usize,
+    pc: u32,
+    first_block: u32,
+    block_count: u64,
+}
+
+#[derive(Clone, Copy)]
+struct EsdhcAccessTrace {
+    instruction_count: usize,
+    pc: u32,
+    address: u32,
+    width: u8,
+    write: bool,
+    value: u32,
+}
+
+#[derive(Clone, Copy)]
+struct EsdhcRegisterSummary {
+    reads: u64,
+    writes: u64,
+    last_value: u32,
+}
+
+#[derive(Clone, Copy)]
+struct EsdhcDmaTrace {
+    instruction_count: usize,
+    pc: u32,
+    channel: u8,
+    operation: &'static str,
+    address: u32,
+    value: u32,
+    detail: u32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1940,8 +2155,22 @@ impl ProbeBus {
             uart8_tx_irq_pending: false,
             rgpio_input_high: 0,
             rgpio_ready_model: false,
+            gpio_loopback: false,
+            gpio_loopback_level: false,
+            esdhc: None,
+            esdhc_dma_irq_pending: false,
+            esdhc_trace_enabled: false,
+            esdhc_commands_seen: 0,
+            esdhc_write_blocks_seen: 0,
+            esdhc_command_events: Vec::new(),
+            esdhc_write_events: Vec::new(),
+            esdhc_access_summaries: BTreeMap::new(),
+            esdhc_last_access: None,
+            esdhc_dma_events: Vec::new(),
+            edma_deferred: std::collections::BTreeSet::new(),
             uart8_rx_periodic: None,
             uart8_tx_file: None,
+            display: None,
             dump_calls: Vec::new(),
             dump_call_count: 0,
             edma_tcd: BTreeMap::new(),
@@ -2071,6 +2300,18 @@ impl ProbeBus {
     fn enable_conversion_trace(&mut self) {
         self.conversion_trace_enabled = true;
         self.conversion_trace_events.clear();
+    }
+
+    fn enable_esdhc_trace(&mut self) {
+        self.esdhc_trace_enabled = true;
+        self.sync_esdhc_trace_baseline();
+    }
+
+    fn sync_esdhc_trace_baseline(&mut self) {
+        if let Some(esdhc) = &self.esdhc {
+            self.esdhc_commands_seen = esdhc.commands_executed();
+            self.esdhc_write_blocks_seen = esdhc.write_trace_state().0;
+        }
     }
 
     fn record_conversion_trace(&mut self, mut event: ConversionTraceEvent) {
@@ -2389,6 +2630,93 @@ impl ProbeBus {
         }
         self.access_addresses.insert(event.address);
         self.access_events.push(event);
+    }
+
+    fn record_esdhc_access(&mut self, address: u32, width: u8, write: bool, value: u32) {
+        if !self.esdhc_trace_enabled {
+            return;
+        }
+        let register = (address - ESDHC_BASE) & !3;
+        let summary = self
+            .esdhc_access_summaries
+            .entry(register)
+            .or_insert(EsdhcRegisterSummary {
+                reads: 0,
+                writes: 0,
+                last_value: value,
+            });
+        if write {
+            summary.writes = summary.writes.saturating_add(1);
+        } else {
+            summary.reads = summary.reads.saturating_add(1);
+        }
+        summary.last_value = value;
+        self.esdhc_last_access = Some(EsdhcAccessTrace {
+            instruction_count: self.current_instruction_count,
+            pc: self.current_pc,
+            address,
+            width,
+            write,
+            value,
+        });
+
+        let Some(esdhc) = self.esdhc.as_ref() else {
+            return;
+        };
+        let commands = esdhc.commands_executed();
+        if commands > self.esdhc_commands_seen {
+            let (xfertyp, argument, block_attributes) = esdhc.trace_registers();
+            let (completed_writes, _, write_active, write_buffer_bytes) = esdhc.write_trace_state();
+            self.esdhc_command_events.push(EsdhcCommandTrace {
+                instruction_count: self.current_instruction_count,
+                pc: self.current_pc,
+                command: ((xfertyp >> 24) & 0x3f) as u8,
+                argument,
+                block_attributes,
+                completed_writes,
+                write_active,
+                write_buffer_bytes,
+            });
+            self.esdhc_commands_seen = commands;
+        }
+
+        let (completed_writes, last_written_block, _, _) = esdhc.write_trace_state();
+        if completed_writes > self.esdhc_write_blocks_seen {
+            if let Some(last_block) = last_written_block {
+                let block_count = completed_writes - self.esdhc_write_blocks_seen;
+                self.esdhc_write_events.push(EsdhcWriteTrace {
+                    instruction_count: self.current_instruction_count,
+                    pc: self.current_pc,
+                    first_block: last_block.wrapping_sub((block_count - 1) as u32),
+                    block_count,
+                });
+            }
+            self.esdhc_write_blocks_seen = completed_writes;
+        }
+    }
+
+    fn record_esdhc_dma_event(
+        &mut self,
+        channel: u8,
+        operation: &'static str,
+        address: u32,
+        value: u32,
+        detail: u32,
+    ) {
+        if self.esdhc_trace_enabled
+            && channel == ESDHC_DMA_CHANNEL
+            && self.esdhc_dma_events.len() < 256
+        {
+            self.esdhc_dma_events.push(EsdhcDmaTrace {
+                instruction_count: self.current_instruction_count,
+                pc: self.current_pc,
+                channel,
+                operation,
+                address,
+                value,
+                detail,
+            });
+        }
     }
 
     fn record_dspi_push(&mut self, address: u32, word: u32) {
@@ -2959,6 +3287,9 @@ impl ProbeBus {
     }
 
     fn read8_inner(&mut self, address: u32) -> Result<u8, BusError> {
+        if self.gpio_loopback && address == GPIO_LOOPBACK_SENSE {
+            return Ok(u8::from(self.gpio_loopback_level) << 3);
+        }
         if let Some(rgpio) = self.rgpio_for(address) {
             return rgpio.read8(address);
         }
@@ -2973,6 +3304,13 @@ impl ProbeBus {
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.read8(address);
+        }
+        if let Some(esdhc) = self.esdhc_for(address) {
+            let result = esdhc.read8(address);
+            if let Ok(value) = result {
+                self.record_esdhc_access(address, 8, false, u32::from(value));
+            }
+            return result;
         }
         if let Some(pit) = self.pit_for(address) {
             return pit.read8(address);
@@ -3025,6 +3363,13 @@ impl ProbeBus {
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.read16(address);
         }
+        if let Some(esdhc) = self.esdhc_for(address) {
+            let result = esdhc.read16(address);
+            if let Ok(value) = result {
+                self.record_esdhc_access(address, 16, false, u32::from(value));
+            }
+            return result;
+        }
         if let Some(pit) = self.pit_for(address) {
             return pit.read16(address);
         }
@@ -3069,6 +3414,13 @@ impl ProbeBus {
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.read32(address);
         }
+        if let Some(esdhc) = self.esdhc_for(address) {
+            let result = esdhc.read32(address);
+            if let Ok(value) = result {
+                self.record_esdhc_access(address, 32, false, value);
+            }
+            return result;
+        }
         if let Some(pit) = self.pit_for(address) {
             return pit.read32(address);
         }
@@ -3094,18 +3446,31 @@ impl ProbeBus {
     }
 
     fn write8_inner(&mut self, address: u32, value: u8) -> Result<(), BusError> {
+        if self.gpio_loopback {
+            if address == GPIO_LOOPBACK_SET && value & 0x10 != 0 {
+                self.gpio_loopback_level = true;
+            } else if address == GPIO_LOOPBACK_CLEAR && value & 0x10 == 0 {
+                self.gpio_loopback_level = false;
+            }
+        }
         if self.uart8.is_some() && EDMA_TCD_WINDOW.contains(&address) {
             self.edma_tcd.insert(address, value);
+            let channel = ((address - EDMA_TCD_WINDOW.start) / 0x20) as u8;
+            self.record_esdhc_dma_event(channel, "TCD_WRITE", address, u32::from(value), 0);
             return Ok(());
         }
         if address == EDMA_SERQ && self.uart8.is_some() {
             let channel = value & 0x3F;
+            self.record_esdhc_dma_event(channel, "SERQ_START", address, u32::from(channel), 0);
             if channel >= 32 && channel != UART8_TCD34_REQUEST_VALUE {
                 self.run_edma_memory_to_peripheral(channel)?;
             }
         }
         if address == UART8_TCD34_CINT && value & 0x3F == UART8_TX_DMA_CHANNEL {
             self.uart8_tx_irq_pending = false;
+        }
+        if address == UART8_TCD34_CINT && value & 0x3F == ESDHC_DMA_CHANNEL {
+            self.esdhc_dma_irq_pending = false;
         }
         if let Some(rgpio) = self.rgpio_for(address) {
             return rgpio.write8(address, value);
@@ -3115,6 +3480,14 @@ impl ProbeBus {
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.write8(address, value);
+        }
+        if self.esdhc_for(address).is_some() {
+            let result = self.esdhc.as_mut().unwrap().write8(address, value);
+            if result.is_ok() {
+                self.record_esdhc_access(address, 8, true, u32::from(value));
+            }
+            self.kick_deferred_edma()?;
+            return result;
         }
         if let Some(pit) = self.pit_for(address) {
             return pit.write8(address, value);
@@ -3129,6 +3502,9 @@ impl ProbeBus {
         {
             self.uart8.as_mut().unwrap().write8(address, value)?;
             if address == UART8_URB {
+                if let Some(display) = &mut self.display {
+                    display.feed(value);
+                }
                 if let Some((bytes, times)) = &mut self.uart8_tx_file {
                     use std::io::Write;
                     let _ = bytes.write_all(&[value]);
@@ -3185,6 +3561,14 @@ impl ProbeBus {
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.write16(address, value);
         }
+        if self.esdhc_for(address).is_some() {
+            let result = self.esdhc.as_mut().unwrap().write16(address, value);
+            if result.is_ok() {
+                self.record_esdhc_access(address, 16, true, u32::from(value));
+            }
+            self.kick_deferred_edma()?;
+            return result;
+        }
         if let Some(pit) = self.pit_for(address) {
             return pit.write16(address, value);
         }
@@ -3221,6 +3605,14 @@ impl ProbeBus {
         }
         if let Some(ddr) = self.ddr_for(address) {
             return ddr.write32(address, value);
+        }
+        if self.esdhc_for(address).is_some() {
+            let result = self.esdhc.as_mut().unwrap().write32(address, value);
+            if result.is_ok() {
+                self.record_esdhc_access(address, 32, true, value);
+            }
+            self.kick_deferred_edma()?;
+            return result;
         }
         if let Some(pit) = self.pit_for(address) {
             return pit.write32(address, value);
@@ -3409,30 +3801,69 @@ impl ProbeBus {
         Ok(())
     }
 
+    fn kick_deferred_edma(&mut self) -> Result<(), BusError> {
+        if self.edma_deferred.is_empty() || !self.esdhc.as_ref().is_some_and(Esdhc::data_ready) {
+            return Ok(());
+        }
+        let channels: Vec<u8> = self.edma_deferred.iter().copied().collect();
+        self.edma_deferred.clear();
+        for channel in channels {
+            self.run_edma_memory_to_peripheral(channel)?;
+        }
+        Ok(())
+    }
+
     fn tcd_value(&self, address: u32, width: u32) -> u32 {
         (0..width).fold(0, |value, offset| {
             value << 8 | u32::from(self.edma_tcd.get(&(address + offset)).copied().unwrap_or(0))
         })
     }
 
-    // Diagnostic eDMA model: a started memory-to-peripheral channel completes immediately.
+    // Diagnostic eDMA model: a started channel completes immediately, honoring SSIZE/DSIZE and SOFF/DOFF.
     fn run_edma_memory_to_peripheral(&mut self, channel: u8) -> Result<(), BusError> {
         let base = 0xFC04_5000 + 0x20 * u32::from(channel);
         let source = self.tcd_value(base, 4);
+        let attr = self.tcd_value(base + 0x04, 2);
         let source_offset = self.tcd_value(base + 0x06, 2) as u16 as i16 as i32;
         let minor_bytes = self.tcd_value(base + 0x08, 4).max(1);
         let destination = self.tcd_value(base + 0x10, 4);
         let iterations = self.tcd_value(base + 0x14, 2);
+        let destination_offset = self.tcd_value(base + 0x16, 2) as u16 as i16 as i32;
         let reload = self.tcd_value(base + 0x1C, 2);
         let csr = self.tcd_value(base + 0x1E, 2) as u16;
+        self.record_esdhc_dma_event(
+            channel,
+            "DMA_START",
+            source,
+            destination,
+            (iterations << 16) | (minor_bytes & 0xFFFF),
+        );
         if iterations == 0 {
             return Ok(());
         }
-        let mut address = source;
-        for _ in 0..iterations * minor_bytes {
-            let byte = self.read8_inner(address)?;
-            self.write8_inner(destination, byte)?;
-            address = address.wrapping_add(source_offset as u32);
+        if source == ESDHC_DATPORT && !self.esdhc.as_ref().is_some_and(Esdhc::data_ready) {
+            self.edma_deferred.insert(channel);
+            self.record_esdhc_dma_event(channel, "DMA_DEFERRED", source, destination, iterations);
+            return Ok(());
+        }
+        let transfer_size = |code: u32| match code & 7 {
+            0 => 1,
+            1 => 2,
+            2 => 4,
+            4 => 16,
+            5 => 32,
+            _ => 1,
+        };
+        let (source_size, destination_size) = (transfer_size(attr >> 8), transfer_size(attr));
+        for index in 0..iterations * minor_bytes {
+            let from = source
+                .wrapping_add(((index / source_size) as i32).wrapping_mul(source_offset) as u32)
+                .wrapping_add(index % source_size);
+            let to = destination
+                .wrapping_add(((index / destination_size) as i32).wrapping_mul(destination_offset) as u32)
+                .wrapping_add(index % destination_size);
+            let byte = self.read8_inner(from)?;
+            self.write8_inner(to, byte)?;
         }
         for (offset, byte) in (reload as u16).to_be_bytes().into_iter().enumerate() {
             self.edma_tcd.insert(base + 0x14 + offset as u32, byte);
@@ -3443,6 +3874,16 @@ impl ProbeBus {
         if channel == UART8_TX_DMA_CHANNEL && csr & 0x02 != 0 {
             self.uart8_tx_irq_pending = true;
         }
+        if channel == ESDHC_DMA_CHANNEL && csr & 0x02 != 0 {
+            self.esdhc_dma_irq_pending = true;
+        }
+        self.record_esdhc_dma_event(
+            channel,
+            "DMA_DONE",
+            source,
+            destination,
+            iterations.saturating_mul(minor_bytes),
+        );
         Ok(())
     }
 
@@ -3515,6 +3956,150 @@ impl ProbeBus {
         Ok(())
     }
 
+    fn print_esdhc_trace(&self) {
+        if !self.esdhc_trace_enabled {
+            return;
+        }
+        let Some(esdhc) = &self.esdhc else {
+            return;
+        };
+        let (completed_writes, last_written_block, write_active, write_buffer_bytes) =
+            esdhc.write_trace_state();
+        println!(
+            "eSDHC trace: {} command(s), {} completed storage block write(s), write_active={} buffered_bytes={}",
+            self.esdhc_command_events.len(),
+            completed_writes,
+            write_active,
+            write_buffer_bytes
+        );
+        let mut command_summary = BTreeMap::<u8, (usize, usize, usize, u64)>::new();
+        for event in &self.esdhc_command_events {
+            let summary = command_summary.entry(event.command).or_insert((
+                0,
+                event.instruction_count,
+                event.instruction_count,
+                0,
+            ));
+            summary.0 += 1;
+            summary.2 = event.instruction_count;
+            let requested_blocks = (event.block_attributes >> 16).max(1);
+            if matches!(event.command, 17 | 18 | 24 | 25) {
+                let blocks = if matches!(event.command, 17 | 24) {
+                    1
+                } else {
+                    requested_blocks
+                };
+                summary.3 = summary.3.saturating_add(u64::from(blocks));
+                println!(
+                    "  CMD={:#04x} instruction={}..{} PC={:#010x} argument_block={:#010x} block_range={:#010x}..{:#010x} blocks={} block_size={} completed_writes={} active={} buffered_bytes={}",
+                    event.command,
+                    event.instruction_count,
+                    event.instruction_count,
+                    event.pc,
+                    event.argument,
+                    event.argument,
+                    event.argument.wrapping_add(blocks),
+                    blocks,
+                    event.block_attributes & 0xFFFF,
+                    event.completed_writes,
+                    event.write_active,
+                    event.write_buffer_bytes
+                );
+            } else {
+                println!(
+                    "  CMD={:#04x} instruction={} PC={:#010x} argument={:#010x} block_attributes={:#010x} completed_writes={} active={} buffered_bytes={}",
+                    event.command,
+                    event.instruction_count,
+                    event.pc,
+                    event.argument,
+                    event.block_attributes,
+                    event.completed_writes,
+                    event.write_active,
+                    event.write_buffer_bytes
+                );
+            }
+        }
+        println!("eSDHC command summary by type:");
+        for (command, (count, first, last, blocks)) in command_summary {
+            println!(
+                "  CMD={command:#04x} count={count} instruction_range={first}..{last} addressed_blocks={blocks}"
+            );
+        }
+        for event in &self.esdhc_write_events {
+            println!(
+                "  WRITE_BLOCK instruction={} PC={:#010x} blocks={:#010x}..{:#010x} count={}",
+                event.instruction_count,
+                event.pc,
+                event.first_block,
+                event.first_block.wrapping_add(event.block_count as u32),
+                event.block_count
+            );
+        }
+        println!("eSDHC register access summary:");
+        for (offset, summary) in &self.esdhc_access_summaries {
+            let name = match *offset {
+                0x04 => "BLKATTR",
+                0x08 => "CMDARG",
+                0x0C => "XFERTYP",
+                0x10 => "CMDRSP0",
+                0x20 => "DATPORT",
+                0x24 => "PRSSTAT",
+                0x2C => "SYSCTL",
+                0x30 => "IRQSTAT",
+                0x38 => "IRQSIGEN",
+                _ => "other",
+            };
+            println!(
+                "  {name} address={:#010x} reads={} writes={} last_value={:#010x}",
+                ESDHC_BASE + offset,
+                summary.reads,
+                summary.writes,
+                summary.last_value
+            );
+        }
+        let tcd = 0xFC04_5000 + 0x20 * u32::from(ESDHC_DMA_CHANNEL);
+        println!(
+            "eSDHC eDMA TCD channel={ESDHC_DMA_CHANNEL} SADDR={:#010x} ATTR={:#06x} SOFF={:#06x} NBYTES={:#010x} DADDR={:#010x} DOFF={:#06x} CITER={:#06x} BITER={:#06x} CSR={:#06x}",
+            self.tcd_value(tcd, 4),
+            self.tcd_value(tcd + 0x04, 2),
+            self.tcd_value(tcd + 0x06, 2),
+            self.tcd_value(tcd + 0x08, 4),
+            self.tcd_value(tcd + 0x10, 4),
+            self.tcd_value(tcd + 0x16, 2),
+            self.tcd_value(tcd + 0x14, 2),
+            self.tcd_value(tcd + 0x1C, 2),
+            self.tcd_value(tcd + 0x1E, 2)
+        );
+        println!(
+            "eSDHC eDMA channel events: {}",
+            self.esdhc_dma_events.len()
+        );
+        for event in &self.esdhc_dma_events {
+            println!(
+                "  channel={} {} instruction={} PC={:#010x} address={:#010x} value={:#010x} detail={:#010x}",
+                event.channel,
+                event.operation,
+                event.instruction_count,
+                event.pc,
+                event.address,
+                event.value,
+                event.detail
+            );
+        }
+        if let Some(event) = self.esdhc_last_access {
+            println!(
+                "eSDHC last access: instruction={} PC={:#010x} {}{} address={:#010x} value={:#010x} last_written_block={:?}",
+                event.instruction_count,
+                event.pc,
+                if event.write { "write" } else { "read" },
+                event.width,
+                event.address,
+                event.value,
+                last_written_block
+            );
+        }
+    }
+
     fn print_uart8_trace(&self) {
         println!(
             "UART8 byte events: {} total, showing {}{}",
@@ -3557,6 +4142,10 @@ impl ProbeBus {
 
     fn intc0_for(&mut self, address: u32) -> Option<&mut Intc0> {
         self.intc0.as_mut().filter(|_| Intc0::contains(address))
+    }
+
+    fn esdhc_for(&mut self, address: u32) -> Option<&mut Esdhc> {
+        self.esdhc.as_mut().filter(|_| Esdhc::contains(address))
     }
 
     fn pit_for(&mut self, address: u32) -> Option<&mut PitController> {
@@ -3676,6 +4265,15 @@ impl ProbeBus {
             }
             w.bytes(&data);
         }
+        w.bool(self.esdhc.is_some());
+        if let Some(esdhc) = &self.esdhc {
+            esdhc.save_state(&mut w);
+        }
+        w.bool(self.esdhc_dma_irq_pending);
+        w.u32(self.edma_deferred.len() as u32);
+        for channel in &self.edma_deferred {
+            w.u8(*channel);
+        }
         Ok(w.into_inner())
     }
 
@@ -3792,6 +4390,17 @@ impl ProbeBus {
                 };
                 self.load_ram(address, source)?;
             }
+        }
+        // Optional tail: absent in snapshots written before the eSDHC model existed.
+        if r.remaining() > 0 {
+            let present = r.bool()?;
+            match (present, self.esdhc.as_mut()) {
+                (true, Some(esdhc)) => esdhc.load_state(&mut r)?,
+                (false, None) => {}
+                _ => return Err("snapshot/config mismatch for esdhc: re-run with the same device flags".into()),
+            }
+            self.esdhc_dma_irq_pending = r.bool()?;
+            self.edma_deferred = (0..r.u32()?).map(|_| r.u8()).collect::<Result<_, _>>()?;
         }
         Ok(())
     }
@@ -4418,6 +5027,20 @@ impl Bus for ProbeBus {
                 source: 27,
                 level: 3,
                 vector: 155,
+            });
+        }
+        if self.esdhc.as_ref().is_some_and(Esdhc::irq_pending) {
+            return Some(InterruptRequest {
+                source: 31,
+                level: 3,
+                vector: 223,
+            });
+        }
+        if self.esdhc_dma_irq_pending {
+            return Some(InterruptRequest {
+                source: 0,
+                level: 3,
+                vector: 192,
             });
         }
         let pending_sources = self.pit.as_ref().map_or(0, |pit| {
@@ -5727,6 +6350,31 @@ mod tests {
         assert_eq!(bus.dspi_pop_events[0].module, 1);
         assert_eq!(bus.dspi_pop_events[0].value, 0xFFFF);
         assert_eq!(bus.dspi_pop_events[0].pc, 0x400C_C858);
+    }
+
+    #[test]
+    fn esdhc_trace_records_command_and_completed_storage_write() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x1_0000));
+        bus.esdhc = Some(Esdhc::new());
+        bus.enable_esdhc_trace();
+        bus.current_pc = 0x1234;
+        bus.current_instruction_count = 10;
+
+        bus.write32(ESDHC_BASE + 0x08, 7).unwrap();
+        bus.write32(ESDHC_BASE + 0x04, (1 << 16) | 512).unwrap();
+        bus.write32(ESDHC_BASE + 0x0C, 24 << 24).unwrap();
+        for _ in 0..128 {
+            bus.write32(ESDHC_DATPORT, 0x0102_0304).unwrap();
+        }
+
+        assert_eq!(bus.esdhc_command_events.len(), 1);
+        let command = bus.esdhc_command_events[0];
+        assert_eq!((command.command, command.argument), (24, 7));
+        assert_eq!(command.block_attributes, (1 << 16) | 512);
+        assert_eq!(bus.esdhc_write_events.len(), 1);
+        assert_eq!(bus.esdhc_write_events[0].first_block, 7);
+        assert_eq!(bus.esdhc_write_events[0].block_count, 1);
+        assert_eq!(bus.esdhc_last_access.unwrap().address, ESDHC_DATPORT);
     }
 
     #[test]
