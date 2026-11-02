@@ -2,6 +2,7 @@ pub mod bus;
 pub mod coldfire;
 pub mod ddr;
 pub mod display;
+pub mod emac;
 pub mod dspi;
 pub mod dtim1;
 pub mod emmc;

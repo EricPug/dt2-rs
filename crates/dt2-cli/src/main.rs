@@ -4586,15 +4586,22 @@ impl ProbeBus {
         for channel in &self.edma_deferred {
             w.u8(*channel);
         }
-        // Optional tail written only when a display or INTC1 exists, so older configurations keep their hash.
-        if self.display.is_some() || self.intc1.is_some() {
+        // Optional tail written only when a display, INTC1 or EMAC state exists, so older configurations keep their hash.
+        let emac_state = !cpu.emac.is_default();
+        if self.display.is_some() || self.intc1.is_some() || emac_state {
             w.bool(self.display.is_some());
             if let Some(display) = &self.display {
                 display.save_state(&mut w);
             }
-            if let Some(intc1) = &self.intc1 {
-                w.bool(true);
-                intc1.save_state(&mut w);
+            if self.intc1.is_some() || emac_state {
+                w.bool(self.intc1.is_some());
+                if let Some(intc1) = &self.intc1 {
+                    intc1.save_state(&mut w);
+                }
+                if emac_state {
+                    w.bool(true);
+                    cpu.emac.save_state(&mut w);
+                }
             }
         }
         Ok(w.into_inner())
@@ -4732,10 +4739,15 @@ impl ProbeBus {
                     .get_or_insert_with(display::Display::new)
                     .load_state(&mut r)?;
             }
-            if r.remaining() > 0 && r.bool()? {
-                self.intc1
-                    .get_or_insert_with(|| Intc0::at(0xFC04_C000, 128))
-                    .load_state(&mut r)?;
+            if r.remaining() > 0 {
+                if r.bool()? {
+                    self.intc1
+                        .get_or_insert_with(|| Intc0::at(0xFC04_C000, 128))
+                        .load_state(&mut r)?;
+                }
+                if r.remaining() > 0 && r.bool()? {
+                    cpu.emac.load_state(&mut r)?;
+                }
             }
         }
         Ok(())

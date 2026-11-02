@@ -4,6 +4,7 @@
 //! [`CpuError::Illegal`], which at this stage means "not implemented" as much as "illegal".
 
 use crate::bus::{Bus, BusError, LoopContext};
+use crate::emac::Emac;
 
 pub const CCR_C: u16 = 0x01;
 pub const CCR_V: u16 = 0x02;
@@ -128,6 +129,7 @@ pub struct Cpu {
     pub cacr: u32,
     pub rgpiobar: u32,
     pub debug_csr: u32,
+    pub emac: Emac,
     fast_forwarded_in_step: usize,
 }
 
@@ -145,6 +147,7 @@ impl Default for Cpu {
             cacr: 0,
             rgpiobar: RGPIOBAR_RESET,
             debug_csr: 0,
+            emac: Emac::default(),
             fast_forwarded_in_step: 0,
         }
     }
@@ -569,12 +572,12 @@ impl Cpu {
                 } else if op & 0xFFF8 == 0x0C80 {
                     let immediate = self.fetch32(bus)?;
                     self.sub(self.d[reg], immediate, Size::L, false);
-                } else if op & 0xFFF8 == 0x0280 || op & 0xFFF8 == 0x0080 {
+                } else if matches!(op & 0xFFF8, 0x0280 | 0x0080 | 0x0A80) {
                     let immediate = self.fetch32(bus)?;
-                    let result = if op & 0xFFF8 == 0x0280 {
-                        self.d[reg] & immediate
-                    } else {
-                        self.d[reg] | immediate
+                    let result = match op & 0xFFF8 {
+                        0x0280 => self.d[reg] & immediate,
+                        0x0080 => self.d[reg] | immediate,
+                        _ => self.d[reg] ^ immediate,
                     };
                     self.d[reg] = result;
                     self.flags_move(result, Size::L);
@@ -683,7 +686,17 @@ impl Cpu {
                         remainder
                     };
                     self.flags_move(result, Size::L);
-                                } else if op & 0xFFC0 == 0x4C00 {
+                                } else if op & 0xFFF8 == 0x4C80 {
+                    // SATS.L: with CCR[V] set, saturate in the direction opposite to the wrapped sign.
+                    let value = self.d[reg];
+                    let result = if self.sr & CCR_V != 0 {
+                        if value & 0x8000_0000 != 0 { 0x7FFF_FFFF } else { 0x8000_0000 }
+                    } else {
+                        value
+                    };
+                    self.d[reg] = result;
+                    self.flags_move(result, Size::L);
+                } else if op & 0xFFC0 == 0x4C00 {
                     if !matches!(mode, 0 | 2 | 3 | 4 | 5) {
                         return Err(ill);
                     }
@@ -1105,6 +1118,99 @@ impl Cpu {
                 }
                 _ => return Err(ill),
             },
+            0xA => {
+                // EMAC register transfers; MAC and MSAC (and the move-with-load forms) are not modelled.
+                let acc = ((op >> 9) & 3) as usize;
+                let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);
+                let write_rx = |cpu: &mut Self, value: u32| {
+                    if op & 8 != 0 {
+                        cpu.a[reg] = value;
+                    } else {
+                        cpu.d[reg] = value;
+                    }
+                };
+                if op & 0xF9B0 == 0xA180 {
+                    let value = if op & 0x40 != 0 {
+                        self.emac.store_and_clear(acc)
+                    } else {
+                        self.emac.store(acc)
+                    };
+                    write_rx(self, value);
+                } else if op & 0xF9FC == 0xA110 {
+                    self.emac.copy((op & 3) as usize, acc);
+                } else if op & 0xF9C0 == 0xA100 {
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let value = self.read(bus, source, Size::L)?;
+                    self.emac.load(acc, value);
+                } else if op == 0xA9C0 {
+                    let bits = self.emac.macsr_to_ccr();
+                    self.set_ccr(CCR_N | CCR_Z | CCR_V | CCR_C, bits);
+                } else if op & 0xFFC0 == 0xA900 {
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let value = self.read(bus, source, Size::L)?;
+                    self.emac.write_macsr(value);
+                } else if op & 0xFFF0 == 0xA980 {
+                    write_rx(self, self.emac.macsr);
+                } else if op & 0xFFC0 == 0xAD00 {
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let value = self.read(bus, source, Size::L)?;
+                    self.emac.write_mask(value);
+                } else if op & 0xFFF0 == 0xAD80 {
+                    write_rx(self, self.emac.read_mask());
+                } else if op & 0xFBC0 == 0xAB00 {
+                    let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                    let value = self.read(bus, source, Size::L)?;
+                    self.emac.set_ext_pair(op & 0x400 != 0, value);
+                } else if op & 0xFBF0 == 0xAB80 {
+                    write_rx(self, self.emac.ext_pair(op & 0x400 != 0));
+                } else if op & 0xF100 == 0xA000 {
+                    // MAC/MSAC (extension bit 8 subtracts) with an optional load; the dual-accumulate forms
+                    // are absent from the MCF54418 manual.
+                    let ext = self.fetch16(bus)?;
+                    let load = op & 0x30 != 0;
+                    let register = |cpu: &Self, address_flag: bool, number: u16| {
+                        if address_flag {
+                            cpu.a[usize::from(number & 7)]
+                        } else {
+                            cpu.d[usize::from(number & 7)]
+                        }
+                    };
+                    let (x, y, accumulator) = if load {
+                        (
+                            register(self, ext & 0x8000 != 0, ext >> 12),
+                            register(self, ext & 8 != 0, ext),
+                            (((op >> 7) & 1) ^ 1) | ((ext >> 3) & 2),
+                        )
+                    } else {
+                        (
+                            register(self, op & 0x40 != 0, op >> 9),
+                            register(self, op & 8 != 0, op),
+                            ((op >> 7) & 1) | ((ext >> 3) & 2),
+                        )
+                    };
+                    let loaded = if load {
+                        let source = self.ea(bus, mode, reg, Size::L, pc0, op)?;
+                        let Operand::Mem(address) = source else {
+                            return Err(ill);
+                        };
+                        Some(bus.read32(address & self.emac.read_mask())?)
+                    } else {
+                        None
+                    };
+                    let word = (ext & 0x800 == 0).then_some((ext & 0x80 != 0, ext & 0x40 != 0));
+                    self.emac.mac(usize::from(accumulator), x, y, word, ((ext >> 9) & 3) as u8, ext & 0x100 != 0);
+                    if let Some(value) = loaded {
+                        let destination = ((op >> 9) & 7) as usize;
+                        if op & 0x40 != 0 {
+                            self.a[destination] = value;
+                        } else {
+                            self.d[destination] = value;
+                        }
+                    }
+                } else {
+                    return Err(ill);
+                }
+            }
             0xC if op & 0xF1C0 == 0xC1C0 => {
                 let dst = ((op >> 9) & 7) as usize;
                 let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);
@@ -2022,6 +2128,47 @@ mod tests {
         assert_eq!(cpu.d[1], 0xFFFD * 0x1556);
         assert_eq!(cpu.sr, CCR_X);
         assert_eq!(cpu.pc, 0x1004);
+    }
+
+    #[test]
+    fn emac_register_moves_save_restore_and_clear() {
+        // move.l d1,acc1; movclr.l acc1,d2; movclr.l acc1,d3; move.l macsr,a0; move.l #0x20,macsr; move.l macsr,d4
+        let (mut cpu, mut ram) = machine(&[0xA301, 0xA3C2, 0xA3C3, 0xA988, 0xA93C, 0x0000, 0x0020, 0xA984]);
+        cpu.d[1] = 0x8000_0001;
+        cpu.d[3] = 0xFFFF_FFFF;
+
+        run(&mut cpu, &mut ram, 6);
+
+        assert_eq!(cpu.d[2], 0x8000_0001);
+        assert_eq!(cpu.d[3], 0, "the accumulator was cleared by the first MOVCLR");
+        assert_eq!(cpu.a[0], 0x8, "N from the load, PAV and the other flags clear");
+        assert_eq!(cpu.d[4], 0x20);
+        assert_eq!(cpu.pc, 0x1010);
+    }
+
+    #[test]
+    fn sats_long_saturates_only_when_v_is_set() {
+        let (mut cpu, mut ram) = machine(&[0x4C84, 0x4C85]);
+        cpu.d[4] = 0x8000_0001;
+        cpu.d[5] = 0x7FFF_FFFF;
+        cpu.sr = CCR_V;
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.d[4], 0x7FFF_FFFF);
+        assert_eq!(cpu.sr, 0);
+        cpu.sr = 0;
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.d[5], 0x7FFF_FFFF, "unchanged without V");
+    }
+
+    #[test]
+    fn eori_long_immediate_toggles_bits_and_sets_nz() {
+        let (mut cpu, mut ram) = machine(&[0x0A81, 0xFFFF, 0xFFFF]);
+        cpu.d[1] = 0x8000_0000;
+        cpu.sr = CCR_V | CCR_C;
+        run(&mut cpu, &mut ram, 1);
+        assert_eq!(cpu.d[1], 0x7FFF_FFFF);
+        assert_eq!(cpu.sr, 0);
+        assert_eq!(cpu.pc, 0x1006);
     }
 
     #[test]
