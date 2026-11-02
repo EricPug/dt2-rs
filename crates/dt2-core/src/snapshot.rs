@@ -115,6 +115,7 @@ mod tests {
         for _ in 0..100 {
             pit.advance_instruction();
         }
+        pit.sync();
         let mut w = Writer::new();
         pit.save_state(&mut w);
         let data = w.into_inner();
