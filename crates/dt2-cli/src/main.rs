@@ -4801,6 +4801,8 @@ impl ProbeBus {
                 self.load_ram(address, source)?;
             }
         }
+        let intc1_expected = self.intc1.is_some();
+        let mut intc1_loaded = false;
         // Optional tail: absent in snapshots written before the eSDHC model existed.
         if r.remaining() > 0 {
             let present = r.bool()?;
@@ -4824,11 +4826,15 @@ impl ProbeBus {
                     self.intc1
                         .get_or_insert_with(|| Intc0::at(0xFC04_C000, 128))
                         .load_state(&mut r)?;
+                    intc1_loaded = true;
                 }
                 if r.remaining() > 0 && r.bool()? {
                     cpu.emac.load_state(&mut r)?;
                 }
             }
+        }
+        if intc1_expected && !intc1_loaded {
+            return Err("snapshot/config mismatch for intc1: the snapshot was saved without INTC1_BOOTSTRAP; its INTC1 interrupt levels are lost, so re-save it with the same flags".into());
         }
         Ok(())
     }
