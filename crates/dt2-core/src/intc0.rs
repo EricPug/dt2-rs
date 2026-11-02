@@ -65,11 +65,13 @@ impl Intc0 {
     /// Highest pending source: DMA timer 1 when `timer_pending` (subject to IMR), plus forced (INTFRC)
     /// sources, which the manual (17.2.3) says are not affected by the mask register.
     pub fn pending_interrupt(&self, timer_pending: bool) -> Option<InterruptRequest> {
+        self.pending_interrupt_with(if timer_pending { 1u64 << SOURCE_DTIM1 } else { 0 })
+    }
+
+    /// Like `pending_interrupt`, with `peripheral_pending` holding level-pending source bits (subject to IMR).
+    pub fn pending_interrupt_with(&self, peripheral_pending: u64) -> Option<InterruptRequest> {
         let forced = (u64::from(self.intfrch) << 32) | u64::from(self.intfrcl);
-        let mut pending = forced;
-        if timer_pending {
-            pending |= 1u64 << SOURCE_DTIM1;
-        }
+        let pending = forced | peripheral_pending;
         if pending == 0 {
             return None;
         }

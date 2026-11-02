@@ -836,6 +836,13 @@ fn run_binary(args: &[String]) {
                 .set_first_tick_delay(pit_first_tick_delay);
         }
     }
+    if let Some(period) = args[6..].iter().find_map(|a| a.strip_prefix("SSI_AUDIO_IRQ=")) {
+        let Ok(period) = period.parse() else {
+            eprintln!("invalid SSI_AUDIO_IRQ period: {period}");
+            std::process::exit(2);
+        };
+        bus.ssi_audio_period = Some(period);
+    }
     if args[6..].iter().any(|a| a == "INTC1_BOOTSTRAP") {
         bus.intc1 = Some(Intc0::at(0xFC04_C000, 128));
     }
@@ -947,6 +954,7 @@ fn run_binary(args: &[String]) {
             || assignment == "PIT_BOOTSTRAP"
             || assignment == "INTC2_BOOTSTRAP"
             || assignment == "INTC1_BOOTSTRAP"
+            || assignment.starts_with("SSI_AUDIO_IRQ=")
             || assignment == "DTIM1_BOOTSTRAP"
             || assignment == "DSPI1_BOOTSTRAP"
             || assignment == "DSPI2_BOOTSTRAP"
@@ -1985,6 +1993,9 @@ struct ProbeBus {
     gpio_loopback_level: bool,
     esdhc: Option<Esdhc>,
     esdhc_dma_irq_pending: bool,
+    ssi_audio_period: Option<usize>,
+    ssi_audio_rearm_at: Option<usize>,
+    ssi_audio_irq_pending: bool,
     esdhc_trace_enabled: bool,
     esdhc_commands_seen: u64,
     esdhc_write_blocks_seen: u64,
@@ -2105,6 +2116,9 @@ const GPIO_LOOPBACK_SENSE: u32 = 0xEC09_401A;
 const EDMA_TCD_WINDOW: std::ops::Range<u32> = 0xFC04_5000..0xFC04_6000;
 const UART8_TX_DMA_CHANNEL: u8 = 0x23;
 const ESDHC_DMA_CHANNEL: u8 = 0x3B;
+// Audio block DMA (SSI0 TX), vector 170 = INTC1 source 42.
+const SSI_AUDIO_DMA_CHANNEL: u8 = 0x32;
+const SSI_AUDIO_INTC1_SOURCE: u32 = 42;
 const UART8_DMA_RING_MASK: u32 = 0x3FF;
 const PANEL_STUB_QUERY: [u8; 4] = [0x60, 0x02, 0x70, 0x00];
 const MAX_DSPI_PUSH_EVENTS: usize = 262_144;
@@ -2399,6 +2413,9 @@ impl ProbeBus {
             gpio_loopback_level: false,
             esdhc: None,
             esdhc_dma_irq_pending: false,
+            ssi_audio_period: None,
+            ssi_audio_rearm_at: None,
+            ssi_audio_irq_pending: false,
             esdhc_trace_enabled: false,
             esdhc_commands_seen: 0,
             esdhc_write_blocks_seen: 0,
@@ -3784,6 +3801,13 @@ impl ProbeBus {
         if address == UART8_TCD34_CINT && value & 0x3F == UART8_TX_DMA_CHANNEL {
             self.uart8_tx_irq_pending = false;
         }
+        if address == UART8_TCD34_CINT && value & 0x3F == SSI_AUDIO_DMA_CHANNEL {
+            self.ssi_audio_irq_pending = false;
+            // The next audio block completes one period later.
+            self.ssi_audio_rearm_at = self
+                .ssi_audio_period
+                .map(|period| self.current_instruction_count.saturating_add(period));
+        }
         if address == UART8_TCD34_CINT && value & 0x3F == ESDHC_DMA_CHANNEL {
             self.esdhc_dma_irq_pending = false;
         }
@@ -4200,6 +4224,32 @@ impl ProbeBus {
         }
         if channel == ESDHC_DMA_CHANNEL && csr & 0x02 != 0 {
             self.esdhc_dma_irq_pending = true;
+        }
+        if self.ssi_audio_period.is_some() && channel == SSI_AUDIO_DMA_CHANNEL {
+            // Major-loop completion: SADDR/DADDR advance, then scatter/gather loads the next TCD.
+            let slast = self.tcd_value(base + 0x0C, 4);
+            let dlast = self.tcd_value(base + 0x18, 4);
+            let total = iterations * minor_bytes;
+            let advance = |start: u32, size: u32, offset: i32| {
+                start.wrapping_add(((total / size) as i32).wrapping_mul(offset) as u32)
+            };
+            let saddr = advance(source, source_size, source_offset).wrapping_add(slast);
+            let daddr = advance(destination, destination_size, destination_offset);
+            for (offset, byte) in saddr.to_be_bytes().into_iter().enumerate() {
+                self.edma_tcd.insert(base + offset as u32, byte);
+            }
+            for (offset, byte) in daddr.to_be_bytes().into_iter().enumerate() {
+                self.edma_tcd.insert(base + 0x10 + offset as u32, byte);
+            }
+            if csr & 0x10 != 0 {
+                for offset in 0..0x20u32 {
+                    let byte = self.read8_inner(dlast.wrapping_add(offset))?;
+                    self.edma_tcd.insert(base + offset, byte);
+                }
+            }
+            if csr & 0x02 != 0 {
+                self.ssi_audio_irq_pending = true;
+            }
         }
         self.record_esdhc_dma_event(
             channel,
@@ -5436,6 +5486,10 @@ impl Bus for ProbeBus {
     }
 
     fn pending_interrupt(&mut self) -> Option<InterruptRequest> {
+        if self.ssi_audio_rearm_at.is_some_and(|at| self.current_instruction_count >= at) {
+            self.ssi_audio_rearm_at = None;
+            let _ = self.run_edma_memory_to_peripheral(SSI_AUDIO_DMA_CHANNEL);
+        }
         if self.uart8_rx_irq_pending {
             return Some(InterruptRequest {
                 source: 26,
@@ -5480,7 +5534,13 @@ impl Bus for ProbeBus {
         let intc1_request = self
             .intc1
             .as_ref()
-            .and_then(|intc1| intc1.pending_interrupt(false));
+            .and_then(|intc1| {
+                intc1.pending_interrupt_with(if self.ssi_audio_irq_pending {
+                    1u64 << SSI_AUDIO_INTC1_SOURCE
+                } else {
+                    0
+                })
+            });
         // Highest level wins; ties go to INTC0, then INTC1, then INTC2 (an approximation).
         let request = [intc0_request, intc1_request, intc2_request]
             .into_iter()
