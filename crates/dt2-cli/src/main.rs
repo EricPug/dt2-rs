@@ -954,6 +954,7 @@ fn run_binary(args: &[String]) {
             || assignment == "PIT2_PERIODIC"
             || assignment.starts_with("SNAPSHOT_SAVE=")
             || assignment.starts_with("SNAPSHOT_LOAD=")
+            || assignment.starts_with("INTC0_UNMASK=")
             || assignment.starts_with("UART8_RX_LATE=")
             || assignment.starts_with("RGPIO_INPUT_HIGH=")
             || assignment.starts_with("RGPIO_TRACE=")
@@ -1107,6 +1108,20 @@ fn run_binary(args: &[String]) {
             });
         bus.sync_esdhc_trace_baseline();
         println!("restored snapshot {path}: PC={:#010x}", cpu.pc);
+    }
+    if let Some(list) = args[6..].iter().find_map(|a| a.strip_prefix("INTC0_UNMASK=")) {
+        let Some(intc0) = bus.intc0.as_mut() else {
+            eprintln!("INTC0_UNMASK needs an attached INTC0");
+            std::process::exit(2)
+        };
+        for source in list.split(',') {
+            let source: u8 = source.parse().unwrap_or_else(|_| {
+                eprintln!("invalid INTC0_UNMASK source {source}");
+                std::process::exit(2)
+            });
+            intc0.write8(0xFC04_801D, source).expect("INTC0 CIMR write");
+            println!("diagnostic: INTC0 source {source} unmasked");
+        }
     }
     if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_TX_FILE=")) {
         let open = |path: &str| {
@@ -1402,6 +1417,13 @@ fn run_binary(args: &[String]) {
                 );
             }
         }
+    }
+    if let Some(intc0) = &bus.intc0 {
+        let (imrh, imrl, frch, frcl, icr) = intc0.debug_state();
+        println!(
+            "INTC0 state: IMRH={imrh:#010x} IMRL={imrl:#010x} INTFRCH={frch:#010x} INTFRCL={frcl:#010x} ICR44={} ICR57={}",
+            icr[44], icr[57]
+        );
     }
     if pit_first_tick_delay > 0 {
         println!("PIT0 first-tick diagnostic delay: {pit_first_tick_delay} modeled bus ticks after the first enable; approximate timing");
