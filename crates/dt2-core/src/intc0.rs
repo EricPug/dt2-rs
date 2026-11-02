@@ -85,6 +85,11 @@ impl Intc0 {
             .max_by_key(|request| (request.level, request.source))
     }
 
+    /// (IMRH, IMRL, INTFRCH, INTFRCL, ICR bytes) for diagnostics.
+    pub fn debug_state(&self) -> (u32, u32, u32, u32, &[u8]) {
+        (self.imrh, self.imrl, self.intfrch, self.intfrcl, &self.icr)
+    }
+
     fn error(address: u32, write: bool) -> BusError {
         BusError {
             addr: address,
