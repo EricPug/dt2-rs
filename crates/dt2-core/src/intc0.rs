@@ -62,9 +62,11 @@ impl Intc0 {
         (self.base..self.base + 0x100).contains(&address)
     }
 
-    /// Highest unmasked pending source: DMA timer 1 when `timer_pending`, plus forced (INTFRC) sources.
+    /// Highest pending source: DMA timer 1 when `timer_pending` (subject to IMR), plus forced (INTFRC)
+    /// sources, which the manual (17.2.3) says are not affected by the mask register.
     pub fn pending_interrupt(&self, timer_pending: bool) -> Option<InterruptRequest> {
-        let mut pending = (u64::from(self.intfrch) << 32) | u64::from(self.intfrcl);
+        let forced = (u64::from(self.intfrch) << 32) | u64::from(self.intfrcl);
+        let mut pending = forced;
         if timer_pending {
             pending |= 1u64 << SOURCE_DTIM1;
         }
@@ -76,7 +78,8 @@ impl Intc0 {
             .filter_map(|source| {
                 let mask = if source < 32 { self.imrl } else { self.imrh };
                 let level = self.icr[source] & 7;
-                (mask & (1 << (source % 32)) == 0 && level != 0).then_some(InterruptRequest {
+                let unmasked = mask & (1 << (source % 32)) == 0 || forced & (1u64 << source) != 0;
+                (unmasked && level != 0).then_some(InterruptRequest {
                     source: source as u8,
                     level,
                     vector: self.vector_base + source as u8,
@@ -269,15 +272,11 @@ mod tests {
         // Source 57 is bit 25 of INTFRCH and ICR57 lives at +0x40+57.
         intc0.write8(BASE + 0x40 + 57, 4).unwrap();
         intc0.write32(BASE + REG_INTFRCH, 1 << 25).unwrap();
-        assert_eq!(intc0.pending_interrupt(false), None, "masked after reset");
-
-        intc0.write8(BASE + REG_CIMR, 57).unwrap();
         let expected = InterruptRequest { source: 57, level: 4, vector: 121 };
-        assert_eq!(intc0.pending_interrupt(false), Some(expected));
+        assert_eq!(intc0.pending_interrupt(false), Some(expected), "force ignores IMR");
 
         // A higher level wins over an earlier source; clearing the force bit ends the request.
         intc0.write8(BASE + 0x40 + 44, 6).unwrap();
-        intc0.write8(BASE + REG_CIMR, 44).unwrap();
         intc0.write32(BASE + REG_INTFRCH, (1 << 25) | (1 << 12)).unwrap();
         assert_eq!(intc0.pending_interrupt(false).map(|r| r.source), Some(44));
         intc0.write32(BASE + REG_INTFRCH, 0).unwrap();
