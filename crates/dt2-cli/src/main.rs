@@ -2119,6 +2119,7 @@ const ESDHC_DMA_CHANNEL: u8 = 0x3B;
 // Audio block DMA (SSI0 TX), vector 170 = INTC1 source 42.
 const SSI_AUDIO_DMA_CHANNEL: u8 = 0x32;
 const SSI_AUDIO_INTC1_SOURCE: u32 = 42;
+const SSI_AUDIO_RX_BUFFER: u32 = 0x4FE5_7100;
 const UART8_DMA_RING_MASK: u32 = 0x3FF;
 const PANEL_STUB_QUERY: [u8; 4] = [0x60, 0x02, 0x70, 0x00];
 const MAX_DSPI_PUSH_EVENTS: usize = 262_144;
@@ -4247,6 +4248,13 @@ impl ProbeBus {
                     self.edma_tcd.insert(base + offset, byte);
                 }
             }
+            // The vector-170 handler looks for a 0x007fffff frame marker at word 0 of the RX half-buffer
+            // (64-byte spacing); emulate the codec side that sends it.
+            for half in [SSI_AUDIO_RX_BUFFER, SSI_AUDIO_RX_BUFFER + 0x800] {
+                for slot in 0..32u32 {
+                    self.write32_inner(half + slot * 64, 0x007F_FFFF)?;
+                }
+            }
             if csr & 0x02 != 0 {
                 self.ssi_audio_irq_pending = true;
             }
@@ -5486,6 +5494,15 @@ impl Bus for ProbeBus {
     }
 
     fn pending_interrupt(&mut self) -> Option<InterruptRequest> {
+        if let Some(period) = self.ssi_audio_period {
+            // After a snapshot restore the channel was started earlier: arm on the first poll.
+            if self.ssi_audio_rearm_at.is_none()
+                && !self.ssi_audio_irq_pending
+                && self.tcd_value(0xFC04_5000 + 0x20 * u32::from(SSI_AUDIO_DMA_CHANNEL) + 0x14, 2) != 0
+            {
+                self.ssi_audio_rearm_at = Some(self.current_instruction_count.saturating_add(period));
+            }
+        }
         if self.ssi_audio_rearm_at.is_some_and(|at| self.current_instruction_count >= at) {
             self.ssi_audio_rearm_at = None;
             let _ = self.run_edma_memory_to_peripheral(SSI_AUDIO_DMA_CHANNEL);
