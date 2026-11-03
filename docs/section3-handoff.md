@@ -276,3 +276,22 @@ Input after the install (snapshot `out/blank-factory-1p5b.snap` saved at 1.5B wi
 - `0x400308e0(obj, idx, mode, val)` looks like the LED setter: it validates idx via `0x40133ef2`, stores `obj+0x28+4*idx` and `obj+0xf0`, then tail-jumps to `0x40134040`. It has 11 direct callers and about 100 more pointer references across the UI code (`0x40016c72`, `0x4005c2e0`, `0x4005d892`, ...).
 - In a full boot to 1.5B instructions (blank card, diagnostic `SSI_AUDIO_IRQ`), neither `0x400308e0` nor `0x40134040` is ever executed. So LED output depends on UI code that has not started yet; TRIG/PLAY input is not the gate.
 - Next: find which task or wait stops the main UI/app task from reaching its first screen (run `SCHED_TRACE`, list blocked TCBs and their wait objects after 1.5B), rather than looking at the receiver.
+
+### Update: all tasks idle at 1.5B (blank card, diagnostic `SSI_AUDIO_IRQ`)
+
+Saved-SP is at TCB+0x48; the return address 3 words into each saved stack identifies the wait call:
+
+| entry | prio | waits at (return) | wait object |
+|---|---|---|---|
+| `0x400d1a12` engine | 7 | `0x400d1ac4` | `0x43149548`-ish engine sem |
+| `0x4012c590` | 8 | `0x4012c4ce`..`0x4012c5ac` | not identified |
+| `0x4011f08e` | 7 | `0x4011f108` | `0x44e15bcc` |
+| `0x40153f34` | 5 | `0x40153fba` | `0x405a0f44` |
+| `0x400337ba` receiver | 6 | `0x40033d0c` | queue `0x40966f3c` (event loop, works) |
+| `0x400f0df2` / `0x400f0f0a` | 2/3 | `0x400f0aec` | `0x450575d4` / `0x450cdfd4` |
+| `0x40133922` | 6 | `0x401339f0` | `0x44e460d8` |
+| `0x401353dc`/`0x40135530`/`0x40135656` | 5/4/4 | `0x4013539a`/`0x401354a6`/`0x401355fa` | not identified |
+
+- Every task is blocked; nothing is spinning. The first UI-level candidates are `0x4011f08e` (`0x44e15bcc`) and `0x40153f34` (`0x405a0f44`). `WATCH_WRITE` on the first byte of each shows only the boot-time initialisation write (instruction 764,085 for `0x405a0f44`), so nothing posts to either afterwards (first-byte watch only; the count field may be elsewhere).
+- `SCHED_TRACE` keeps only the last 1,024 events, so it cannot show earlier waits on a long run. Use TCB dumps instead.
+- Sibling DT1 notes say its UI task never started until the ColdFire-side DSP-handshake sync primitives were satisfied (no SHARC modelling). DT2 likely needs the same: find the producer that should post to `0x44e15bcc` / `0x405a0f44`.
