@@ -269,3 +269,10 @@ Input after the install (snapshot `out/blank-factory-1p5b.snap` saved at 1.5B wi
 - The listener walk at `0x40030bf0..0x40030c0a` sees a one-entry list (`0x450cb250..0x450cb260`) whose callback is `0x40061940`, called once per dispatched event. It branches on the event type from `0x40114984(ev)` (`0xa`, `0xc`, ...) and, for a matching type and a true `0x401149f8(ev)`, tail-calls UI handlers (`0x4005af44`) with `obj+0x9c`. That is a widget-level UI event handler, not an LED writer.
 - A dump of `obj+0x94..0x98` at the first dispatch does not look like a flat 16-byte vector (it reads as linked-list nodes), so the list is rebuilt between events. Do not trust a static dump; use `TRACE_REGS=0x40030c02` (callback call site) instead.
 - Next: find which event types `0x40061940` accepts for TRIG/PLAY, and follow `0x4005af44` to see whether it reaches the LED refresh (`0x401340fe` / `0x40133xxx`).
+
+### Update: LED setter exists but is never reached
+
+- Dispatcher listener `0x40061940` accepts only event types `0xa`, `0xc`, `0x12` (type is `[ev+0xc]`; `0x401149f8` tests `[ev+0x10]` bit 0 is clear). The TRIG tap event type is `0x19`, so this listener ignores it. Only one listener per dispatch has `+8` non-zero (4 calls seen in 60M instructions, all `0x40061940`).
+- `0x400308e0(obj, idx, mode, val)` looks like the LED setter: it validates idx via `0x40133ef2`, stores `obj+0x28+4*idx` and `obj+0xf0`, then tail-jumps to `0x40134040`. It has 11 direct callers and about 100 more pointer references across the UI code (`0x40016c72`, `0x4005c2e0`, `0x4005d892`, ...).
+- In a full boot to 1.5B instructions (blank card, diagnostic `SSI_AUDIO_IRQ`), neither `0x400308e0` nor `0x40134040` is ever executed. So LED output depends on UI code that has not started yet; TRIG/PLAY input is not the gate.
+- Next: find which task or wait stops the main UI/app task from reaching its first screen (run `SCHED_TRACE`, list blocked TCBs and their wait objects after 1.5B), rather than looking at the receiver.
