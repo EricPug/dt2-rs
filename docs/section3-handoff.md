@@ -496,3 +496,34 @@ Findings:
   startup step. The next question is why `0x400f09d6` never fires. Either the jobs block
   (for example on the card) or the post-run path is skipped.
 - Option 2 (resume with `UART8_RX_PERIODIC` and trace the page code) is not yet done.
+
+## Why job completions never reach the receiver (`0x400f09d6` = 0 hits)
+
+Short answer: it is by design for these jobs, and the jobs are not blocked.
+
+- Worker loop `0x400f0abc`: pend on `+0x14` sem, `jsr (a0)` at `0x400f0b3c` runs the job fn, then `0x400f0b4e` runs the job's `+8` cleanup (called with 3), then
+  `0x400f0b6c: tst.l $18(a3)`. The completion post (`0x400f0b8c -> 0x400f09d6`) is only reached when the job record has a continuation at `+0x18`.
+  There is no semaphore or return-value gate. The job's return value only goes into `d4`, which is passed to the post.
+- Hit counts (`TRACE_REGS`, 1.5B) for `0x400f0b3e` (job fn returned), `0x400f0b4e`, `0x400f0b6c` and `0x400f0b9c` are all 4.
+  `0x400f0b9c` is hit 2 instructions after `0x400f0b6c`, so `+0x18` was 0 (the `beq` was taken) every time.
+
+| Job | Executor | Start (instr) | Returned (instr) |
+|---|---|---|---|
+| `KitActive::updateSingleMirror` (`0x4023b82e`) | 1 | 592.04M | 592.16M |
+| `saveProjectToMmc(tempProject)` (`0x4023bfcf`) | 1 | 592.16M | 625.6M |
+| "Factory reset" (`0x4023afff`, fn `0x400334bc`) | 1 | 822.3M | 1096.02M (the install itself; ends right after the 1.0916B PIT3 stop) |
+| "Load all samples" (`0x4023aaa6`, fn `0x40030ce8`) | 2 | 1095.97M | 1198.8M |
+
+All four finished, so nothing is stuck in the card layer. After their last job, both workers are back on `0x400f0aea`. None of the submitters passed a continuation, so the type-6 post is unused for this boot.
+
+Skipped submissions:
+- Receiver startup `0x400337ba` tests `0x4012ede4(..) == 1`. This boot takes the factory-reset branch (`d4 = d5 = 1`), submits only "Factory reset" and then jumps to `0x40033942`.
+  "Migrate presets" (`0x400338e2`) and "Update MMC Caches" (`0x40033934`) sit on the other, normal-boot branch (`0x4003388c`), so they are skipped by design. It is the normal-boot branch that is not taken.
+- "Project Init/Load" is not part of the receiver startup. Its job fn is `0x400a4af4`, built by the submitter `0x400a3c16`.
+  Its only caller is the wrapper `0x401bb78a` (`jsr` at `0x401bb804`). That wrapper has no direct callers; its only reference is a data word at `0x401bbd58`.
+  So it is a dispatch-table / command-object entry, invoked on a user or command action (load project). It is not auto-run at boot.
+
+Receiver main loop (after `0x40033cf2`): get from `0x40966f3c` (`0x40001928`), then jump-table dispatch on msg type (0..0x29) at `0x40033d22`.
+Handlers: 0 `0x40033d76`, 1 `0x40033da6`, 5 `0x40033df4`, 6 `0x40033e0c` (the job-completion type), 7 `0x40033e7a`, 8 `0x40033e82`, 9 `0x40033eee`, 10 `0x40033f58`, 12 `0x40033fda`, 13 `0x4003419c`, 14 `0x40034206`, 20-23 `0x40034216`, 24 `0x400342e6`, 25 `0x40034338`, 27 `0x40034354`, 29 `0x40034376`, 30 `0x400343ae`, 31 `0x400344a8`, 32 `0x4003450a`, 33 `0x400345ce`, 34 `0x400345e0`, 38 `0x400345ee`, 40 `0x400346bc`, 41 `0x40034662`. All other types loop back.
+
+Conclusion: the receiver is a pure message loop that now idles. Its only inputs come from the type-0 / type-1 and other posters (`0x401538fe`, panel/UART8 decoders, the SSI diagnostic). The next step is to find which message types those handlers expect for "start the UI" and have the UART8 / panel path post them. The candidates to look at first are the type 0 and 1 handlers `0x40033d76` and `0x40033da6`, then the type 13 and 14 handlers.
