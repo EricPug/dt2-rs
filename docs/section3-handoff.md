@@ -303,3 +303,20 @@ Saved-SP is at TCB+0x48; the return address 3 words into each saved stack identi
 - In `out/blank-factory-1p5b.snap` all four are 0, so the firmware itself has already opened the gate and the vector-0xbf frame handler is running. The gate is not what holds the UI back. No DSP-alive fake is needed for this experiment.
 - UI queue `0x40966f3c` (count at `+4`): in the 1.5B boot it gets puts at about 1.113B, 1.196B, 1.201B, 1.289B, 1.377B and 1.466B instructions (about 88M apart after 1.2B), each consumed by the receiver. Job queue `0x405a0f44` (task `0x40153f34`) gets no puts at all, and the dispatcher semaphore `0x44e15bcc` / its queues are never written after init.
 - Next: identify the producer of the periodic UI-queue puts (breakpoint at `0x40001896` / `0x400018e4` with the queue argument, read the return address) and see what message it carries; then find what should send the first "activate main view" message.
+
+## Receiver-queue poster trace (`TRACE_REGS=0x40001896`, stack(A7) = `[ret, queue, msg, ...]`)
+
+Queue-put `0x40001896(queue, msg)` over a full 1.5B boot (131 snapshots):
+
+| Caller (return PC) | Queue | Msg | Count / when |
+|---|---|---|---|
+| `0x4002e750` | `0x44e25220` (unrelated, 14-byte entries `0x40966508..0x40966774`) | pool nodes | 111, ~1.094B |
+| `0x400d8cfa` | `0x40966f3c` (receiver) | `0x4020e2ab` | ~every 88.2M from 1.113B |
+| `0x400d8cfa`/`0x400d76e4`/`0x400d779a`/`0x400d8fd8`/`0x4011e4a4` | `0x47db3f70` (other queue) | `0x44dc7e14..`, `0x4020e2a9/ab` | early boot + periodic |
+| `0x40153928` | `0x40966f3c` (receiver) | `0x405a0f9c` | once, ~1.196B |
+
+- `0x400d8cfa` is inside the vector-0x79 (SSI) handler (`pea $4020e2ab; move.l $402a1c0c,-(a7); jsr $40001896`, `rte` at `0x400d8dda`). The periodic put is driven by the `SSI_AUDIO_IRQ` diagnostic, not by a real UI source. Payload at `0x4020e2ab` is constant data (`0a 07 00 00 00 05 26 5c ...`), delivered as event type `0x19`; the listener `0x40061940` ignores it.
+- `0x40153928` is the tail of a post helper at `0x401538fe`: it writes an 8-byte record (type byte at `+0`, value at `+4`) into a ring of 0x800 entries at `0x405a0f9c` (index `0x405a4f9c`), then puts the record address into the queue held in `0x402b6b68` (= receiver queue). So the job-queue task `0x40153f34` does run and posts one record to the receiver; nothing after it.
+- Posters to job queue `0x405a0f44` exist statically: `0x401540ea` (msg = a2) and `0x40154324` (msg `0x405a0f74`). Neither executes in the 1.5B boot. The queue is created at `0x40153c32..0x40153c38` (`0x40001834`), the task `0x40153f34` at `0x40153c4c`. Callers of those posters are the producers still missing (likely a timer/timeout path: `0x40154316` tests `d5 > 0` before posting, else `0x401588c0`).
+- Dispatcher objects: `0x44e15bcc` (sem), `0x44e15bd4`, `0x44e15bf4`, `0x44e15c14` are referenced only from `0x4011f0xx-0x4011f2xx` (the task `0x4011f08e` itself) and the init at `0x40120a08-0x40120a44`. There is no external poster anywhere in the image via direct references, so posts must go through a pointer (object address passed at runtime or stored in a table). No put/post with those objects as arguments occurs in 1.5B.
+- Conclusion: no ISR or task posts a UI/panel event to the receiver; the only real post is the one-off from the job-queue task. The dispatcher semaphore is not posted because its producer (reached via pointer) is never invoked; next step is to trace callers of `0x40154324`/`0x401540ea` statically and find who calls those routines.
