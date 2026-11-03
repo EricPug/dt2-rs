@@ -262,3 +262,10 @@ Input after the install (snapshot `out/blank-factory-1p5b.snap` saved at 1.5B wi
 - `0x40030bd0(obj, ev)` (called from the receiver loop at `0x40033d94`, right after `0x40114904(ev, +4, +8, +c, 0x7f)`) does three things: (1) calls `0x40030b50(obj)`, which sends `bc 01` and clears `obj+0xe4`; (2) walks 16-byte entries in `[obj+0x94, obj+0x98)` and calls `entry+0xc(entry, ev)` for each entry whose `+8` is non-zero; (3) tail-calls `0x4011c79c(obj+0x40, ev)`, a tree lookup keyed on the event.
 - So `bc 01` is sent per dispatched input event, before the per-listener callbacks. It looks like a panel activity/wake notification, not an LED update. LED output must come from a listener callback or from a separate refresh path that these taps do not trigger. The 22 (TRIG) vs 11 (PLAY) difference is probably the number of events each tap packet produces after filtering in `0x40114904`; this is unverified.
 - Next: dump the listener list at `obj+0x94` after install (`obj = [receiver frame -0x80(a6)]`) and trace the callbacks.
+
+### Update: dispatcher listeners
+
+- The dispatcher object is `0x44f5fe40` (receiver stack slot `-0x80(a6)`); the event is a stack struct at `0x4098f728` (word `+0x14` = `0x19` for a TRIG tap, `+0x18` = 1, `+0x1c` = `0x7f`).
+- The listener walk at `0x40030bf0..0x40030c0a` sees a one-entry list (`0x450cb250..0x450cb260`) whose callback is `0x40061940`, called once per dispatched event. It branches on the event type from `0x40114984(ev)` (`0xa`, `0xc`, ...) and, for a matching type and a true `0x401149f8(ev)`, tail-calls UI handlers (`0x4005af44`) with `obj+0x9c`. That is a widget-level UI event handler, not an LED writer.
+- A dump of `obj+0x94..0x98` at the first dispatch does not look like a flat 16-byte vector (it reads as linked-list nodes), so the list is rebuilt between events. Do not trust a static dump; use `TRACE_REGS=0x40030c02` (callback call site) instead.
+- Next: find which event types `0x40061940` accepts for TRIG/PLAY, and follow `0x4005af44` to see whether it reaches the LED refresh (`0x401340fe` / `0x40133xxx`).
