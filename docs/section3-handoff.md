@@ -625,3 +625,36 @@ In the snapshot the list holds one listener at `0x450cb250`, whose callback is `
 - No poster of receiver type 1 (or 0x0e) has been found yet.
 
 **Open.** Who posts receiver type 1 and type 0x0e, and which code iterates views and invokes slot `+0x44`.
+
+## Posters of receiver types 1 / 0x0e, and the view dispatcher (trace)
+
+**Correction to the previous section.** Key frames (type 0) do reach the event bus. The type-0 handler `0x40033d76` calls `0x40030bd0`, which walks the flat listener list and then **tail-jumps to `0x4011c79c(bus 0x44f5fe80, msg)`**, a keyed publish. The earlier "0 hits" were only for `0x40030b64` / `0x4011c674`, the type-1 publisher. With `UART8_RX_PERIODIC` key traffic, `0x4011c79c` hits 9 times in 30M instructions.
+
+**Type 1 = encoder delta.**
+- **Poster:** one site, `0x4011e0d2` (`move.b #1,(a0)`), then `jsr (a3)` = `0x40001896` to `[0x402b45a0]` (the receiver queue). It is inside the periodic tick `0x4011df48`, in the flush block `0x4011e064..0x4011e0f6`.
+- **What it does:** every `[0x402b4590]` ticks it walks the 10 accumulators at `0x47ddeb80` (8 bytes each), clamps each to ±30 (`0xe2`/`0x1e`), skips zeros, and posts `{type 1, +4 = encoder index 0..9, +8 = clamped delta, +c = timestamp [a2+4]}`.
+- **Accumulators:** they are filled by the encoder decoder `0x4011e598` from UART8 `0x3n dd` frames.
+- **Tick owner:** `0x4011df48` has no static callers. The call return address is `0x40002a90`, so the kernel timer dispatcher calls it through a registered pointer.
+- **Hits:** the tick and flush run every ~1.1M instructions (91 times in 100M from the snapshot, no input), and `0x4011e0d2` posts **0 times** without encoder frames. The same tick also posts the type-0 key-repeat records (`0x4011dfcc`, `clr.b (a0)`).
+- **With encoder frames** (`UART8_RX_PERIODIC=3000000:3005,3000`): `0x4011e0d2`, handler `0x40033da6`, `0x40030b64` and the iterator `0x4011c41a` all hit once per frame. The type-1 handler uses `msg+4` as the encoder index and `0x4011e150(0x28 + index)` as a push-held test.
+
+**Type 0x0e: no poster.** I scanned every receiver-queue put site (`0x400c0b5c`, `0x400d4982`, `0x400d8cf4`, `0x400f0aa6`, `0x40153922`, `0x4011e01a`, `0x4011e0ea`, `0x4011e4a2`, `0x4015a6ec`, `0x401538fe`) for a constant `0x0e` type store and found none. The other types come from the subsystem helpers (`0x1d`, `0x1e`, `0x1f`/`0x20`, `0x26`), none of which is 0x0e. I found no static poster and nothing in the boot or snapshot produces it, so `0x40031ec2` stays at 0 hits.
+
+**The view dispatcher is the signal iterator `0x4011c41a`.**
+- **Bus:** `0x44f5fe80` (`ctx+0x40`). The listener list is a circular list with its sentinel at `+0x14`, nodes `{next, prev, listener, ...}`, iterated newest to oldest. The iterator calls `invoker(listener)` for each node and stops when `0x4011b216` (node `+0x30` byte, "consumed") reports true.
+- **Listeners at the snapshot, in call order:** `HelpBubbleView 0x450b6750`, `KeyboardView 0x450a9e50`, `PatternGridView 0x450af750`, `TempoLedView 0x450a9dd0`, `0x450a9d50` (not identified), **`ParameterPageView 0x450ac050`**, `0x450b0050` (not identified), **`MainScreenView 0x45057c40`**, which is last.
+- **Encoder events (type 1):** the invoker `0x4011b5da` calls the **sub-object `+4` vtable slot `+8`**. For `MainScreenView` this is the thunk `0x40066050` → `0x40065f08`. Each event makes 6 predicate calls. `ParameterPageView` (`0x400187bc` → `0x400184ea`) consumes it, so the iteration stops before `MainScreenView`. Hits on `0x40065f08` / `0x40066050` / `0x40066058`: **0**.
+- **Key events (type 0):** `0x4011c79c` first runs a keyed stage (invoker `0x4011b568`, primary vtable slot `+8`) that only reaches 2 listeners. It then runs a stage over all 8 listeners (invoker `0x4011b5fc`, sub-object `+8` vtable slot `+8`). That slot is **`0x4011691c` = `clr.b d0; rts`** for both `ParameterPageView` and `MainScreenView`, so nothing claims the key. `MainScreenView` is visited (it is the last of the 8) and `0x40065f08` is still not entered.
+
+**No wait condition.** The iterator is synchronous inside the receiver task (types 0 and 1 → publish). It takes no semaphore or flag. If nothing runs, it is because nothing is posted: the type-1 post needs encoder frames and the type-0 post needs key frames.
+
+**Answers.**
+1. **Type-1 poster:** `0x4011e0d2`, in the tick `0x4011df48`. It runs every ~1.1M instructions and posts only with encoder deltas, so in the boot it is idle but healthy.
+2. **Type-0x0e poster:** none found.
+3. **Iterator:** `0x4011c41a` (type 1 via `0x4011c674`, type 0 via `0x4011c79c`). There is no wait condition.
+4. **Type 0 vs type 1:** the key path does not produce a type-1 event. Buttons (type 0, key id + state) and encoders (type 1, index + delta) are independent records from the same panel module.
+5. **Why `MainScreenView` never updates:**
+   - It is the bottom of the listener stack. Encoder events are consumed by the `ParameterPageView` above it.
+   - Its key predicate is the default `return 0`.
+   - It is never invoked, but that is the intended fallback behaviour. The "UI start" is therefore not a missing dispatcher.
+6. **Open:** the screen content is produced by something else (the per-frame draw or update path of the views, or the page-mode code that sets the LED and screen). The next candidate is who triggers a view repaint or update after `0x400311d0`, since the 8 views already exist and subscribe, and the unidentified listeners `0x450a9d50` / `0x450b0050`.
