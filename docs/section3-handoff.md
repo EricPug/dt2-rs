@@ -527,3 +527,36 @@ Receiver main loop (after `0x40033cf2`): get from `0x40966f3c` (`0x40001928`), t
 Handlers: 0 `0x40033d76`, 1 `0x40033da6`, 5 `0x40033df4`, 6 `0x40033e0c` (the job-completion type), 7 `0x40033e7a`, 8 `0x40033e82`, 9 `0x40033eee`, 10 `0x40033f58`, 12 `0x40033fda`, 13 `0x4003419c`, 14 `0x40034206`, 20-23 `0x40034216`, 24 `0x400342e6`, 25 `0x40034338`, 27 `0x40034354`, 29 `0x40034376`, 30 `0x400343ae`, 31 `0x400344a8`, 32 `0x4003450a`, 33 `0x400345ce`, 34 `0x400345e0`, 38 `0x400345ee`, 40 `0x400346bc`, 41 `0x40034662`. All other types loop back.
 
 Conclusion: the receiver is a pure message loop that now idles. Its only inputs come from the type-0 / type-1 and other posters (`0x401538fe`, panel/UART8 decoders, the SSI diagnostic). The next step is to find which message types those handlers expect for "start the UI" and have the UART8 / panel path post them. The candidates to look at first are the type 0 and 1 handlers `0x40033d76` and `0x40033da6`, then the type 13 and 14 handlers.
+
+## Receiver message types: who posts them, and what the type-0 (input) path does
+
+The receiver loop `0x40033d00` reads `[0x40966f3c]` and dispatches on `mvz.b (msg),d0` (the type byte), with `cmp #0x29` and the jump table at `0x40033d22`.
+
+**Types seen in the 1.5B boot** (`TRACE_REGS=0x40033d14`, D0 = type, A2 = msg): type `0x0a` x5 (msg `0x4020e2ab`, the SSI diagnostic tick; handler `0x40033f58`) and type `0x20` x1 (msg `0x405a0f9c`, from the USB job-queue task at ~1.196B). Nothing else is posted.
+
+**Subsystem queue globals.** The receiver startup `0x40033992..0x400339f4` hands the receiver queue to eight subsystems, each of which stores it in a global and posts typed records to it:
+
+| Global | Registrar | Posters (type) | Owner | Runs in boot? |
+|---|---|---|---|---|
+| `0x402b45a0` | `0x4011e108` | `0x4011e4a4` (type 0, 16-byte ring `0x44dc7e14`) | UART8 byte decoder, front-panel input | yes, but only when UART8 RX bytes arrive |
+| `0x402a1c0c` | `0x400d605a` | `0x400d8cfa` (type `0x0a`) | SSI ISR (vector 0x79) | yes (diagnostic) |
+| `0x402b6b68` | `0x40153a76` | `0x401538fe` (types `0x1f`/`0x20`, callers `0x401544e8`, `0x40154674`, `0x40154a74`, `0x40154a9e`, `0x40154fb2`) | USB job-queue task | the `0x20` once |
+| `0x402b6804` | `0x40139084` | `0x4002e83e` (type `0x1d`, inside the audio-DMA ISR `0x4002dd0c`, ring `0x40966844`); `0x40139e7e` and others call the queue getter `0x40139092` | audio engine | 0 hits |
+| `0x402b4f60` | `0x4012bd92` | the getter `0x4012bda0` has one caller, `0x4012d108` (audio-engine task) | audio engine | 0 hits |
+| `0x402b4f3c` | `0x40120b46` | the 16 reads are in `0x4011ed12..0x40120994`, the MIDI dispatcher area | MIDI | 0 hits |
+| `0x402b6b7c` | `0x4015a6f2` | `0x4015a6aa` (type `0x1e`; callers `0x4015652a`, `0x40156aea`, `0x40156dea`, `0x401587e0`, `0x4015b2ca`) | job/storage area | 0 hits |
+| `0x4029ef78` | `0x400058f0` | `0x400055ce` (type `0x26`, callers `0x40005dfa`, `0x40006244`, `0x4000628e`, `0x40006efa`, `0x40006f26`), `0x40005fd0` (`0x26`), `0x40003af4` | USB driver (`0xFC0B0000` OTG) | 0 hits |
+
+So the only type that carries front-panel input is **type 0**. Every other poster is USB, MIDI, audio-engine or the SSI diagnostic, and the earlier `0x40001896` trace showed none of them running.
+
+**Type-0 path with real input.** Resuming `out/blank-factory-1p5b.snap` with `UART8_RX_PERIODIC=3000000:2301,2300` for 300M instructions (flags as in `run-section3.sh`): handler `0x40033d76` is hit 99 times. The type-0 records in the ring at `0x44dc7e14` are `{type 0, +4 = key id (0x01 or 0x19), +8 = state bits (0x01, 0x10, 0x05), +c = 0}`. The handler:
+1. builds an event object with `0x40114904(obj, +4, +8, +c, 0x7f)`: `+0xc` is the key id and `+0x10` the state bits;
+2. calls `0x40030bd0(ctx = 0x44f5fe40, obj)`, which walks a listener list (`ctx+0x94..+0x98`, 0x10-byte entries; the call is skipped when `+8` is 0) and calls each listener's `+0xc`;
+3. calls `0x4019f58a(obj)`.
+
+In the snapshot the list holds one listener at `0x450cb250`, whose callback is `0x40061940` (`+8 = 0x40061e2e`). The callback dispatches only on key ids `0x0a`, `0x0c` and `0x12` (and later ones I have not read), with a pressed-state test `(state & 1) ^ 1`, then jumps to `0x4005af44` or `0x4005af84`. Our synthetic TRIG key ids (`0x01`, `0x19`) fall through. The LED setter `0x400308e0` still has 0 hits in this 300M window.
+
+**Conclusion.**
+- The receiver, the UART8 decoder and the listener chain are all alive and receive input events. Nothing is missing upstream: the UI is not stuck on a missing message.
+- The remaining gate is the key code. The listeners react to specific key ids, so the next experiment is to send `UART8_RX_PERIODIC` bytes that decode to key id `0x0a`, `0x0c` or `0x12` (map byte to key id in the decoder `0x4011e318`) and trace `0x4005af44` / `0x4005af84` and the 11 callers of `0x400308e0`.
+- Note: the older "natural chain" update (see "SSI marker" above) reported `0x44f37bd0` populated in a from-reset run. The factory-install run keeps it zero. That difference (factory-install vs. normal-boot branch of `0x400337ba`) is not explained yet.
