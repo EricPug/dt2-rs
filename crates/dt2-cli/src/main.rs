@@ -2051,6 +2051,7 @@ struct ProbeBus {
     watched_completion_tail: Option<(usize, Vec<u8>)>,
     trace_register_pc: Option<u32>,
     register_trace: VecDeque<RegisterTrace>,
+    register_trace_stack: VecDeque<Vec<u32>>,
     instruction_trace_tail_limit: usize,
     instruction_trace_tail: VecDeque<RegisterTrace>,
     scheduler_trace_enabled: bool,
@@ -2471,6 +2472,7 @@ impl ProbeBus {
             watched_completion_tail: None,
             trace_register_pc: None,
             register_trace: VecDeque::new(),
+            register_trace_stack: VecDeque::new(),
             instruction_trace_tail_limit: 0,
             instruction_trace_tail: VecDeque::new(),
             scheduler_trace_enabled: false,
@@ -3234,7 +3236,7 @@ impl ProbeBus {
                 "register trace at PC={pc:#010x}: {} snapshots (showing most recent)",
                 self.register_trace.len()
             );
-            for trace in &self.register_trace {
+            for (trace, stack) in self.register_trace.iter().zip(&self.register_trace_stack) {
                 println!(
                     "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
                     trace.pc,
@@ -3252,6 +3254,7 @@ impl ProbeBus {
                     trace.a[6],
                     trace.a[7]
                 );
+                println!("    instruction={} stack(A7)={:08x?}", trace.instruction_count, stack);
             }
         }
         if let (Some((start, end)), Some(trace)) = (self.trace_a0_range, &self.first_a0_range_trace)
@@ -5178,7 +5181,10 @@ impl Bus for ProbeBus {
         }
         if self.register_trace.len() == MAX_REGISTER_TRACE {
             self.register_trace.pop_front();
+            self.register_trace_stack.pop_front();
         }
+        let stack = self.peek_ram_words(a[7], 4);
+        self.register_trace_stack.push_back(stack);
         self.register_trace.push_back(RegisterTrace {
             instruction_count,
             pc,

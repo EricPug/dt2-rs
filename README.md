@@ -53,7 +53,7 @@ setting.
 saved section-3 handoff. `PIT2_PERIODIC` is an opt-in approximate 60 Hz PIT2
 source-15 probe; it is not a measured OS1.17 timer rate. `WATCH_WRITE=address`
 or `WATCH_WRITE=start:end` reports overlapping writes with old/new bytes, guest
-PC, instruction count, and pre-instruction D/A/SR registers. `TRACE_REGS=pc`
+PC, instruction count, and pre-instruction D/A/SR registers. `TRACE_REGS=pc` (also prints the top four stack longs, `stack(A7)`)
 reports the most recent 192 register
 snapshots at one PC; `TRACE_TAIL=n` reports the last 1-1024 pre-instruction
 snapshots with PC, SR, D0-D7, and A0-A7. `TRACE_A1=offset,...` captures A0/A1
