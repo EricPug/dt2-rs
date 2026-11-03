@@ -590,3 +590,38 @@ In the snapshot the list holds one listener at `0x450cb250`, whose callback is `
 - Correction: `0x44f37bd0` is not zero. It holds sixteen copies of one default pointer `0x41776cb8`, both in the 1.5B snapshot and in a from-reset 900M run. It is an "all slots unpopulated" table, not an absent one.
 
 **Open.** What dispatches `MainScreenView` (the vtable `0x401f7ab0` slots `0x54` / `0x58`)? A static scan for virtual calls at `+0x54` / `+0x58` finds about 180 each, so it is too noisy to read directly. The next step is `TRACE_REGS` at the receiver handlers that reach the main view (type-`0x0a` handler `0x40033f58` calls `0x4004af1a` / `0x40043480`; types `0x0d` / `0x0e` call `0x40031ec2`), and a watch on `[0x45057c40+0x68]`, to find the caller that passes this object.
+
+## What should call MainScreenView's virtual methods (trace)
+
+**Slot correction.** The key handler `0x40065f08` and `0x40066058` are slots `+0x44` / `+0x48` relative to the primary vtable `0x401f7ac0` (the earlier `+0x54` / `+0x58` was relative to `0x401f7ab0`). `SamplerLedView` has the same slot `+0x44` (`0x40016c2a`), so it is the common view-base virtual. A static scan finds 43 `movea.l $44(aX),aY ... jsr (aY)` sites. The `0x400f5854..0x400f59a8` cluster is a generic predicate helper. The real view dispatcher is not identified.
+
+**1.5B from-reset hit counts (`TRACE_REGS`).**
+
+| PC | hits |
+|---|---|
+| `0x40033f58` (type 0x0a SSI tick) | 5 (1.1128B, 1.2011B, 1.2893B, 1.3776B, 1.4658B) |
+| `0x40031ec2` (type 0x0e listener walk) | 0 |
+| `0x4003419c` (type 0x0d, job "Screenshot") | 0 |
+| `0x40033e0c` (type 6) | 0 |
+| `0x40065f08`, `0x40066058` (view slots) | 0 |
+| `0x4019ae1c` (view singleton getter) | 2 (construction ~1.0917B in `0x400311d0`; receiver loop start ~1.0960B) |
+
+**Post-install snapshot (60M instructions, `UART8_RX_PERIODIC` key traffic).** Only the type 0 path runs (`0x40114904` and `0x4019f58a`, 19 hits each). Types 0x0d and 0x0e never run without extra input, and the SSI tick type 0x0a is the only other receiver handler seen. None of them touches the view.
+
+**Subscription.** `0x400311d0`, called from the receiver startup at `0x40033980`, constructs `MainScreenView` and calls `0x4011c08a(ctx+0x40, weak-ref(view), 0)`. That subscribes the view to the event bus at `ctx+0x40`, and then it submits "Load all samples".
+
+**Event bus.**
+- `0x4011c674` (bus publish) has a single caller, `0x40030b64` (at `0x40030bac`).
+- `0x40030b64` has a single caller, the receiver type-1 handler at `0x40033dde` (`0x40033da6..0x40033df0`). That handler builds the event from the message (`0x401119b8`) and then frees it (`0x4019e2ba`).
+- `0x40030bd0` (the type 0 listener walk) has a single caller, `0x40033d94`.
+- In the snapshot run with key traffic, `0x40030b64` and `0x4011c674` have 0 hits. Key frames (type 0) do not go through the bus, so MainScreenView is reached only via a type-1 message or via its own subscription callbacks.
+- `0x4011c08a` has about 150 callers (many `0x4002xxxx` and `0x400a4xxx` objects), so the bus is a general subscription service.
+
+**Object writes.** `WATCH_WRITE=0x45057c40:0x45057d00` over the 1.5B run (658 retained writes) shows only construction-era and heap-reuse writers (`0x4013709e`, `0x401cd288`, `0x401e43e8`, `0x4011b1xx`). It shows no post-construction writes to the view (no state change).
+
+**Answer.**
+- Nothing in the 1.5B boot or the snapshot reaches the view's virtual slots.
+- The two ways in are a type-1 receiver message (bus publish) and a type 0 key whose listener (`0x40061940`) forwards to the view. The type 0 listener only records modifiers `0x0a`, `0x0c` and `0x12`.
+- No poster of receiver type 1 (or 0x0e) has been found yet.
+
+**Open.** Who posts receiver type 1 and type 0x0e, and which code iterates views and invokes slot `+0x44`.
