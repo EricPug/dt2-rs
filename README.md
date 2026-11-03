@@ -83,6 +83,11 @@ hardware evidence. A restored snapshot must use the same `ESDHC_FILE` path.
 polled SRAM ring, then answers the section-3 UART8 handshake and DMA-delivers a
 group-0 button press, encoder-0 delta, and button release after TCD34 is enabled.
 Its panel records are synthetic diagnostics, not hardware behavior.
+`PANEL_STUB_FUNC` makes the section-2 discovery response report FUNC held at
+startup; it requires `PANEL_STUB`.
+`UART8_RX_PERIODIC=period:hex[,hex...]` schedules synthetic follow-up packets;
+with `PANEL_STUB`, packets arriving before UART8 DMA is enabled enter section 2's
+polled SRAM ring, and packets arriving afterward use the section-3 DMA ring.
 `DTIM1_BOOTSTRAP` models DMA Timer 1 reference compare and INTC0 source 33;
 `DTIM1_TICKS_PER_INSTRUCTION=n` sets an approximate instruction-to-bus-tick
 scale. `DSPI2_BOOTSTRAP` enables the DSPI2 register/FIFO model with no attached

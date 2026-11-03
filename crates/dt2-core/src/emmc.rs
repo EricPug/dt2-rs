@@ -58,7 +58,8 @@ impl Esdhc {
         let mut ext_csd = [0u8; BLOCK];
         ext_csd[192] = 5; // EXT_CSD_REV
         ext_csd[196] = 3; // DEVICE_TYPE
-        ext_csd[212..216].copy_from_slice(&0x0080_0000u32.to_le_bytes()); // SEC_COUNT: 4 GiB
+        let sec_count_be = (CARD_SECTORS as u32).to_be_bytes();
+        ext_csd[212..216].copy_from_slice(&sec_count_be);
         ext_csd[152] = 1; // the only field the "MMC NOT IN SLC MODE" check reads
         ext_csd[155] = 1; // PARTITION_SETTING_COMPLETED
         ext_csd[156] = 1; // PARTITIONS_ATTRIBUTE: enhanced user area
@@ -461,6 +462,10 @@ mod tests {
         }
         assert_eq!(block[152], 1);
         assert_eq!(block[192], 5);
+        assert_eq!(
+            u32::from_be_bytes(block[212..216].try_into().unwrap()),
+            CARD_SECTORS as u32
+        );
         assert!(!host.data_ready());
     }
 
