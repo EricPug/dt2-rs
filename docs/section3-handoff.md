@@ -345,3 +345,37 @@ Callers of the wrapper `0x40030b10`:
 **1.5B boot (6+4 `TRACE_REGS` runs): hit counts.** `0x40033d00` (receiver loop head) 7; `0x40154112`, `0x40030b10`, `0x400345ce`, `0x400f5a50`, `0x400269c6`, `0x400d45c4`, `0x400d4946`, `0x400d3660`, `0x400f09d6` all **0**.
 
 **Conclusion.** Neither poster has an independent caller. `0x401540ea` is the job task's own re-queue, so it needs an initial job. `0x40154324` is only reachable through `0x40154112`, whose only callers are (a) the receiver's type-`0x21` case, which needs the command decoder `0x400d45c4` to see command `0x34` with a non-zero flag, and (b) two object methods (`0x400f5a50`, `0x400269c6`) of UI/file objects that are never invoked. The command decoder itself never runs in the boot, so the missing first domino is whatever calls `0x400d45c4` (via `0x4003372e`/`0x4003376e`). Next: find which callback registers/enters that path (`0x400336f4`, `0x40033734`, `0x40032f4e`, `0x40033330` handler pointers stored at `-0x20/-0x24(a6)` in the receiver setup) and why it is not invoked.
+
+## Receiver callback region: who feeds command 0x34 (static + 1.5B `TRACE_REGS` hit counts)
+
+**The four "handler pointers" are not four handlers of one kind.** The receiver setup (`0x400337ba`, around `0x40033a40`-`0x40033b8c`) builds `std::function`-style objects on the stack (`-0x2c` data, `-0x24` manager, `-0x20` invoker) and assigns each to a *channel* of a global bus with `0x401347ba` (adds `0x2c`, tail-jumps to the function-object assign `0x401d96ba`; `0x401d9688` copies `+8` manager / `+0xc` invoker and calls the manager with op 2 = clone). The bus (`0x4019f91a`, singleton `0x44f371d8`, `0x82424` bytes) holds 8 channels of `0x10484` bytes each (`0x40134cc8(bus, n)` = `bus+4+n*0x10484`). The callback sits at channel `+0x2c`; the parser calls its invoker at `[ch+0x38]` when `[ch+0x34] != 0`.
+
+| Pointer | Role | Channel(s) | Does |
+|---|---|---|---|
+| `0x40032efc` / `0x40032f4e` / `0x40032fa0` | **manager** routines (op 0 type, 1 clone, 2 create, 3 destroy) | n/a | not handlers; never the entry |
+| `0x400336f4` (invoker, manager `0x40032efc`) | invoker | 0 | `0x4019e44e()` ctx, then `jmp 0x400d45c4` (command decoder) |
+| `0x40033734` (invoker, manager `0x40032f4e`) | invoker | 1 | same thunk, then `jmp 0x400d45c4` |
+| `0x40033330` (invoker, manager `0x40032fa0`) | invoker | 2-7 (loop at `0x40033aca`) | lazy-creates a `0x284` object `0x44f371d0`, forwards to `0x40135012` |
+| `0x40032c36` / `0x40032c42` | invokers on named signals `0x44f2bc58` / `0x44f2bc48` | n/a | frame gate: `0x4002dcb2(1)` / `0x400d8f5e(1)` then `0x4002dcb2(0)`; unrelated to commands |
+
+So the real entry to `0x400d45c4` / command `0x34` is the **channel-0 or channel-1 invoker** (`0x400336f4` / `0x40033734`).
+
+**How they are called.** Only by the byte-stream parser `0x401349f0(channel, buf, len)` at `0x40134ab2` (`jsr [ch+0x38]`, args fo-ptr, channel id, header ptr, payload ptr, payload len). It requires: first byte `0xE0+n` equals the header's channel; a `0x1c`-byte header with valid magic/size words and a payload length that matches `[hdr+0x16] & 0x7fffffff`; and a non-null callback manager `[ch+0x34]`. The decoder reads the command byte at `hdr+0xe`; command `0x34` with payload flag byte `[a2]` builds the 10-byte type `0x21`/`0x22` receiver message.
+
+**What feeds the parser.** Three pump tasks, each pending on a queue for a message whose first byte is `0x25`:
+
+| Task | Queue | Parser call |
+|---|---|---|
+| `0x401353dc` (prio 5) | `0x44e4b028` (`[0x4029ef28]`) | channel 0, `0x40135360` |
+| `0x40135530` (prio 4) | `0x44e4afb4` (`[0x4029ef2c]`) | channel from `byte-0xe0`; `0xFF` bytes are echoed (inverted) to `0x44e4b048`, `0x40135472` |
+| `0x40135656` (prio 4) | `0x44e4af40` (`[0x4029ef24]`) | `0x40135302` |
+
+The only producer is `0x40004c4a` (receive-completion callback in a transfer descriptor at `+0x24`, magic `0xdead0001`, buffer pool `0x4fe4a000`, `0x400` bytes, DMA/USB slot 6). It copies the buffer, appends a type-`0x25` record to the ring `0x40312004`, and routes by the first byte: `0xE0` to `[0x4029ef28]`, `0xE1` or `0xFF` to `[0x4029ef2c]`, `0xE2`-`0xEF` to `[0x4029ef24]`, then `jsr 0x40001896` (return `0x40004d16`). The poll tick `0x40004b74` reads `0xFC0B014C`; the driver touches `0xFC0B01B4`/`0x1C8`/`0x1CC`. `0xFC0B0000` is the **MCF5441x USB OTG (ChipIdea EHCI) controller** (sibling notes `docs/mk1/03-peripherals.md`: not modelled; vector 209 handler reads `0xFC0B014C/1A4`). So this is a **USB device-side data path**: a PC host sends `0xE0`-framed packets, not the front panel.
+
+**1.5B boot hit counts (TRACE_REGS):** registration `0x401d96ba` 16, receiver setup `0x40033a64` 1, ctx getter `0x4019e44e` 9. **0 hits:** `0x400336f4`, `0x40033734`, `0x40033330`, `0x40032c36`, `0x40032c42`, `0x401349f0` (parser), `0x401354b2`/`0x401353a6` (pump receive), `0x40004c4a` (rx completion), `0x40004b74` (tick), `0x40004b20` (descriptor start), `0x40004dac` (USB driver init), `0x40004a4e`.
+
+**Why it never fires / what is upstream.** The USB driver is never started: `0x40004dac` is reached only by `bra` from the init variants `0x40004e92` (jumped from `0x40003690`, inside start function `0x40003608`, which calls `0x400035ee` init) and `0x40004e9c`. `0x40003608`/`0x400035ee` appear only as data words in a driver record at `0x4029f06c`-`0x4029f074` (`0x40003608` start, `0x400035ee` init); no direct caller exists. Nothing walks that record in the 1.5B boot (I did not find the walker statically). Even if started, without a USB host nothing arrives, so no `0xE0` frame, no command `0x34`, no type `0x21` and no job on `0x405a0f44`.
+
+**No other path:** the only statically-referenced producer of command-`0x34` records is that parser; the panel UART/SPI paths post receiver events of other types (not `0x21`/`0x22`).
+
+**Conclusion.** The command-0x34 -> type-0x21 -> `0x40154112` -> job-queue chain is a USB host command path, not the front-panel path. It is expected to be idle on a headless boot and should not be used as the reason the UI is stuck. The dispatcher semaphore `0x44e15bcc` / job queue `0x405a0f44` producers should be looked for elsewhere (the task `0x4011f08e` side), not here.
