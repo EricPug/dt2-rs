@@ -465,3 +465,34 @@ This is exactly the path described in "Panel input on OS 1.17: what we confirmed
 | `0x400f0df2` / `0x400f0f0a` (`0x450575d4` / `0x450cdfd4`), engine `0x400d1a12` (`0x43149548`) | not traced in this round | still open |
 
 Next candidates: (1) who enters the UI page/mode code that calls the LED setters (it must come from the receiver's post-install state machine or a project-load step, since neither the host paths nor the panel path starts it); (2) the three still-untraced waiters above; (3) feed real panel events (`UART8_RX_PERIODIC`) from the post-install snapshot while tracing the first page-code entry (e.g. the `0x40016c72` caller) to see which input first reaches UI code.
+
+## Remaining waiters: `0x400f0df2`, `0x400f0f0a`, `0x400d1a12`
+
+None of the three is a UI / "first view" task.
+
+- `0x400f0df2` / `0x400f0f0a` are the worker tasks of two background job executors
+  (singletons `0x44f37090`, prio 2, getter `0x40198cf2`; `0x44f37158`, prio 3, getter `0x4019e65c`).
+  Each runs the worker loop `0x400f0abc` and pends on the executor's `+0x14` semaphore.
+  Submit is `0x400f0c1c(executor, "name", fn...)`, with 82 call sites.
+  After a job runs, `0x400f09d6` posts a type-6 record onto the receiver queue `0x40966f3c`.
+- `0x400d1a12` (prio 7) is a boot-time engine helper. It checks CPU speed, stops PIT3,
+  posts `0x43149550`, then pends forever on `0x43149548`. It is not on the UI path.
+
+TRACE_REGS over 1.5B (hit counts):
+
+| PC | hits | notes |
+|----|------|-------|
+| `0x400f0abc` worker loop | 2 | one per executor, at 592.0M and 1095.97M |
+| `0x400f0c1c` submit | 4 | exec 1 at 592.0M (`0x4023b82e`), 592.0M (`0x4023bfcf`), 822.25M (`0x4023afff` "Factory reset"); exec 2 at 1095.66M (`0x4023aaa6` "Load all samples") |
+| `0x400f0b3c` run job | 4 | one per submit |
+| `0x400f09d6` completion post | 0 | no job completion is ever delivered to the receiver |
+
+Findings:
+- The receiver's startup submits "Factory reset" and "Load all samples". "Migrate presets" and
+  "Update MMC Caches" were not submitted (conditional).
+- "Project Init/Load" (`0x400a4af4`, a vtable method with no direct callers) is never submitted.
+  `0x44f37bd0` stays empty.
+- Type-6 continuations never reach the receiver, so the receiver cannot advance to the next
+  startup step. The next question is why `0x400f09d6` never fires. Either the jobs block
+  (for example on the card) or the post-run path is skipped.
+- Option 2 (resume with `UART8_RX_PERIODIC` and trace the page code) is not yet done.
