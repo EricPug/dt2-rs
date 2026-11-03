@@ -256,3 +256,9 @@ Input after the install (snapshot `out/blank-factory-1p5b.snap` saved at 1.5B wi
 - After the post-install snapshot with TRIG taps, `0x4011e220` is hit, but none of the LED/raw senders (`0x40133b56`, `0x40133d76`, `0x40133f7a`, `0x401340ca`) or `0x40133da4`/`0x401340fe` are reached in 60M instructions. So the input is consumed by the receiver loop, and the LED writer is not triggered by it.
 - The sibling Digitakt 1 project's notes list `0xB9 idx val` (3 bytes) as observed, but our DT2 captures have never shown `b9`, so the `b9` decoder assumption is unverified for 1.17. `b5 id r g b` palette records are sent after install (136 of them).
 - `bc 01` meaning, the LED encoding, and the 22 vs 11 per-tap counts remain open.
+
+### Update: `0x40030bd0` dispatcher
+
+- `0x40030bd0(obj, ev)` (called from the receiver loop at `0x40033d94`, right after `0x40114904(ev, +4, +8, +c, 0x7f)`) does three things: (1) calls `0x40030b50(obj)`, which sends `bc 01` and clears `obj+0xe4`; (2) walks 16-byte entries in `[obj+0x94, obj+0x98)` and calls `entry+0xc(entry, ev)` for each entry whose `+8` is non-zero; (3) tail-calls `0x4011c79c(obj+0x40, ev)`, a tree lookup keyed on the event.
+- So `bc 01` is sent per dispatched input event, before the per-listener callbacks. It looks like a panel activity/wake notification, not an LED update. LED output must come from a listener callback or from a separate refresh path that these taps do not trigger. The 22 (TRIG) vs 11 (PLAY) difference is probably the number of events each tap packet produces after filtering in `0x40114904`; this is unverified.
+- Next: dump the listener list at `obj+0x94` after install (`obj = [receiver frame -0x80(a6)]`) and trace the callbacks.
