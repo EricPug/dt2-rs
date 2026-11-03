@@ -413,3 +413,55 @@ The init at `0x40120a06-0x40120a48` creates the three queues (`0x40001834`) and 
 **Conclusion.** `0x4011f08e` waits for MIDI IN (UART 31250 baud) or USB-MIDI input. It is idle because nothing arrives; it is not part of the front-panel UI path, and the emulator need not "post" to it. (The "first frame ready / panel scan complete" hypothesis does not apply to this task.) Together with the previous section, both of the originally suspicious tasks (`0x4011f08e` and `0x40153f34`) are host-input paths (MIDI and USB).
 
 **Remaining unidentified waiters (candidate UI path).** `0x4012c590` (prio 8; many sem posts nearby at `0x4012d5a8..0x4012d6b6`, `0x4012b76a`), `0x400f0df2` / `0x400f0f0a` (`0x450575d4` / `0x450cdfd4`), the engine task `0x400d1a12`, and `0x40133922` (`0x44e460d8`, the panel sender side). Panel (UART8) input becoming receiver events is still not located.
+
+## Remaining waiters: `0x4012c590`, `0x40133922`, and the UART8 RX path
+
+Trace only; static disassembly plus 1.5B-boot `TRACE_REGS` hit counts (`TRACE_REGS` keeps the newest 192 snapshots) and one `STOP_PC` run.
+
+### `0x4012c590` (prio 8): audio-engine control task, alive, not on the panel path
+
+- Created at `0x4012d4a6` (`0x400012c8`) with queue `0x44e25220` (`0x40001834` at `0x4012d492`). It pends on it at `0x4012c5a6` and switches on the message type word at `+0`. Records are 16 bytes in per-type rings of 64 (`0x44e25240`, `0x44e2614c`, `0x44e25c48`, `0x44e25744`, `0x44e3...`).
+- Posters (all go through the put `0x40001896` with `pea 0x44e25220`):
+
+| type | poster | owner | 1.5B hits |
+|---|---|---|---|
+| 1 | `0x4012d4ce` (builds a note/voice descriptor; put at `0x4012d578`) | note-on routine, callers `0x40120382` (in `0x401200f2`) and `0x401205d6` (in `0x401204ec`); those two functions have ~7 and ~8 callers across the sequencer/UI/command decoder (`0x4001a890`, `0x4005c660`, `0x400d470a`, ...) | 0 / 0 / 0 |
+| 2 | `0x4002e74a` | inside the SSI audio-DMA ISR `0x4002dd0c` (reads TCD `0xFC045640`, compares with `0x4fe58900`) | **111** |
+| 3 | `0x4002df6e` | same ISR, other branch | 0 |
+| 4 | `0x4012c01e` (put at `0x4012c054`) and `0x4012c05e` | `0x4012c01e` called only from `0x400d678a`, `0x400d74ae`, `0x400d7a1e`: the USB/host command decoder region (`0x400d45c4` family); `0x4012c05e` has no caller | 0 |
+| 5 | `0x4012c096` (put at `0x4012c0c4`) | called only from `0x400d7b38` (same command-decoder region) | 0 |
+
+- The task is **not stuck**. It was released 112 times: once at about 578.3M (initial pend) and then 111 times from 1.0944B to the end, one every ~3.7M instructions, each time by the type-2 post from the SSI ISR (`D1` counts up in steps of `0x10`). So its only live input is the audio block tick that the diagnostic `SSI_AUDIO_IRQ` produces. The end-of-boot idle wait at `0x4012c5a6` is the normal state between ticks.
+- What it emits: a `0x1d` record put (`0x4012d110`) on the queue returned by `0x4012bda0` (`[0x402b4f60]`, default `0x47db3f70`); `0x4012d10c` has 0 hits, so no such record is produced yet. Types 1/4/5 (note, host-command) never arrive: they are triggered by sequencer/pad trigger code or by the USB command decoder, neither of which runs.
+- Verdict: audio/voice engine control (note triggers, host commands, audio ticks). Not the panel/UI gate. Its non-running posters are the same unexercised UI-trigger and USB-command callers found earlier.
+
+### `0x40133922` (prio 6): factory-install progress bar, finished by design
+
+- Waits on sem `0x44e460d8` (task create `0x4013388c`, queue/sem init `0x40133862`). That sem is posted only by the **PIT3 ISR** `0x401337f4` (vector 208; registered at `0x401338b0` and enabled by `0x401338c6-0x401338ee`), which sets bit 2 of `0xFC08C000` and posts via `0x4000148c`.
+- Gate: it loops on `[0x44e4655c]` (total) until `0x40133822` stores total/current (`0x44e4655c`/`0x44e46560`, callers are the `jmp`s at `0x40032b7a`/`0x40032b8e`), then draws a bar scaled `current*0x27/total` after each tick (`0x80`/`0x40` geometry).
+- Runtime: the PIT3 ISR hit 30 times at ~8.8M-instruction spacing, 831M to 1.086B (the whole factory-install progress window). `0x40133902` (stop PIT3: writes `0` to `0xFC08C000`, masks the interrupt, then posts the receiver sem `0x44e460e0` via `0x4000141a`) is reached at instruction **1,091,563,074** (`STOP_PC` run), 15 instructions before the receiver wake already recorded at 1,091,563,089. Its callers are `0x400334a0`, `0x400335b6`, `0x40033618`, all in the receiver's install-complete handler.
+- Verdict: its idle wait at `0x401339f0` is expected after the install. Not a UI blocker. `WATCH_WRITE` cannot capture MMIO (`cannot capture WATCH_WRITE initial bytes at 0xfc08c000`), hence the `STOP_PC` approach.
+
+### UART8 RX path (panel input to receiver events): present and working
+
+Chain, with addresses (earlier hits in this file confirm each link):
+1. Init `0x4000243e` (called at `0x400cca82`, gated by `0x4029eef0 & 0x40`): UART8 at `0xEC070000`, RX DMA TCD34 (`SADDR 0xEC07000C`, `DADDR` ring `0x4fe3a000`, 1 KiB ring, state `0x40964d74..0x40964db4`), callback pointer stored at `0x40964db4` = `0x4011e648`.
+2. RX interrupt/DMA ISR `0x40001f1a` (installed at `0x40002576`): drains the ring (read index `0x40964da4`, mask `0x3ff`, compared with `[0xFC045450]`) and calls `jsr (a0)` with `a0 = [0x40964db4]` once per byte (`0x40001f6a`).
+3. `0x4011e648` byte callback, then button decoder `0x4011e318`, encoder decoder `0x4011e598`, then the queue put `0x40001896` into the receiver queue `0x40966f3c`. With the `bc 01` ack at `0x4011e220`.
+4. Receiver event loop `0x400337ba` -> `0x40030bd0` -> listener `0x40061940`.
+
+This is exactly the path described in "Panel input on OS 1.17: what we confirmed" (a `2x` packet reaches the queue in ~170 instructions; the handshake bytes `70 0b 00 00 00 20 01 30 01 20 00` reach `0x4011e648`). So no link is missing: with no panel traffic the receiver gets only the SSI diagnostic and one self-post, which is the observed idle. The remaining open items are not input plumbing but UI-start: the 11 callers of the LED setter `0x400308e0` (`0x40016c72`, `0x4005c2e0`, `0x4005d892`, `0x4005d8c0`, `0x40066272`, `0x4007cf76`, `0x4007ef7e`, `0x40081376`, `0x40094ed4`, `0x400a6342`, `0x400fb370`) and the 4 callers of `0x40133e58` (`0x4005c0fc`, `0x4005c14e`, `0x400aacea`, `0x400b9a1c`) all sit in page/mode code that is never entered, plus the missing per-track objects (pointer table `0x44f37bd0`).
+
+### Waiter map after this round
+
+| task | wait | status |
+|---|---|---|
+| `0x4011f08e` | MIDI IN (`0x44e15bcc`) | host input, idle by design |
+| `0x40153f34` | job queue `0x405a0f44` | USB host command path, idle by design |
+| `0x401353dc`/`0x40135530`/`0x40135656` | USB packet queues | USB, idle by design |
+| `0x4012c590` | `0x44e25220` | alive, audio ticks only; note/host types never posted |
+| `0x40133922` | `0x44e460d8` (PIT3) | install progress bar, finished at 1.0916B |
+| `0x400337ba` receiver | `0x40966f3c` | alive, no panel traffic |
+| `0x400f0df2` / `0x400f0f0a` (`0x450575d4` / `0x450cdfd4`), engine `0x400d1a12` (`0x43149548`) | not traced in this round | still open |
+
+Next candidates: (1) who enters the UI page/mode code that calls the LED setters (it must come from the receiver's post-install state machine or a project-load step, since neither the host paths nor the panel path starts it); (2) the three still-untraced waiters above; (3) feed real panel events (`UART8_RX_PERIODIC`) from the post-install snapshot while tracing the first page-code entry (e.g. the `0x40016c72` caller) to see which input first reaches UI code.
