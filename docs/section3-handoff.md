@@ -560,3 +560,33 @@ In the snapshot the list holds one listener at `0x450cb250`, whose callback is `
 - The receiver, the UART8 decoder and the listener chain are all alive and receive input events. Nothing is missing upstream: the UI is not stuck on a missing message.
 - The remaining gate is the key code. The listeners react to specific key ids, so the next experiment is to send `UART8_RX_PERIODIC` bytes that decode to key id `0x0a`, `0x0c` or `0x12` (map byte to key id in the decoder `0x4011e318`) and trace `0x4005af44` / `0x4005af84` and the 11 callers of `0x400308e0`.
 - Note: the older "natural chain" update (see "SSI marker" above) reported `0x44f37bd0` populated in a from-reset run. The factory-install run keeps it zero. That difference (factory-install vs. normal-boot branch of `0x400337ba`) is not explained yet.
+
+## UART8 key frames, key ids, and the UI view objects (trace only)
+
+**UART8 front-panel frame format** (callback `0x4011e648`, decoders `0x4011e318` / `0x4011e598`):
+- The first byte is a header. Its high nibble is the type and its low nibble is the row index (stored in `0x402b4588`).
+- A type-`0x7` header starts an 8-byte block. Type `0x3` goes to `0x4011e598`. Type `0x2` goes to the button-matrix decoder `0x4011e318`.
+- For type `0x2` the next byte is the 8-bit column mask of that row.
+- Key id = `row*8 + col + 1`, from the table `0x4020b150` (6 rows x 8 = ids `0x01..0x30`). So `2301` = id `0x19` (TRIG-area key). `2102` = `0x0a`, `2108` = `0x0c`, `2202` = `0x12`, `2201` = `0x11`.
+- The decoder debounces, then posts a type-0 record `{+4 = key id, +8 = state, +c = timestamp}` onto the receiver queue (ring `0x44dc7e14`).
+- `0x4011e150(id)` is the key-state query: it reads the held-key bitmap at `0x44dc8644`.
+
+**Runs** (resume `out/blank-factory-1p5b.snap`, 60-80M instructions, `UART8_RX_PERIODIC=3000000:<frames>`):
+
+| Frames | Key | Result |
+|---|---|---|
+| `2102,2100` | `0x0a` | `0x4005af44` hit 26 times. It stores a held flag at `obj+0x2bd`. |
+| `2108,2100` | `0x0c` | `0x4005af84` hit 8 times. It stores a held flag at `obj+0x2be`. |
+| `2202,2200`, `2201,2200` | `0x12`, `0x11` | no hit on `0x4005af44`/`0x4005af84`, none on `0x40065f08`/`0x40066058`/`0x400308e0` |
+
+- The listener callback `0x40061940` only tracks the modifier keys `0x0a`, `0x0c` and `0x12` (it sets held flags). It does not start any view or page.
+- `0x400308e0` (LED setter), `0x40133e58` and the page-code caller `0x40016c72` all have 0 hits with any of these keys.
+
+**View objects.**
+- `0x40016c2a` (holds the call at `0x40016c72`) is a vtable method of `SamplerLedView` (vtable `0x401ed94c`..`0x401ed99c`, slot at `0x401ed990`). The class is constructed at `0x400169e0` (called from `0x401afd28`, in a shared-ptr style factory `0x401afcee` that is called from `0x4006690c`).
+- `0x4006690c` is inside the `MainScreenView` virtual method `0x40065f08` (vtable `0x401f7ab0`, slot at `0x401f7b04`, the next slot `0x40066058`). The class is constructed at `0x40066584` (name string `0x4023d238`), from the lazy singleton getter `0x4019ae1c` (global `0x44f370f0`).
+- That singleton exists in the snapshot: `[0x44f370f0] = 0x45057c40`. So `MainScreenView` is built, and the receiver loop calls the getter (`0x40033cf2`).
+- `0x40065f08` tests key `0x11` (`pea 0x11; jsr 0x4011e150`) and creates the sub-views (`SamplerLedView` and others, stored at `+0xe4`, `+0xec`, and so on). Neither `0x40065f08` nor `0x40066058` is hit in any run, so nothing calls these virtual methods yet.
+- Correction: `0x44f37bd0` is not zero. It holds sixteen copies of one default pointer `0x41776cb8`, both in the 1.5B snapshot and in a from-reset 900M run. It is an "all slots unpopulated" table, not an absent one.
+
+**Open.** What dispatches `MainScreenView` (the vtable `0x401f7ab0` slots `0x54` / `0x58`)? A static scan for virtual calls at `+0x54` / `+0x58` finds about 180 each, so it is too noisy to read directly. The next step is `TRACE_REGS` at the receiver handlers that reach the main view (type-`0x0a` handler `0x40033f58` calls `0x4004af1a` / `0x40043480`; types `0x0d` / `0x0e` call `0x40031ec2`), and a watch on `[0x45057c40+0x68]`, to find the caller that passes this object.
