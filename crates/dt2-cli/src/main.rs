@@ -334,10 +334,18 @@ fn panel_stub_input_records() -> &'static [u8] {
     &[0x20, 0x01, 0x30, 0x01, 0x20, 0x00]
 }
 
-fn panel_stub_discovery_records() -> &'static [u8] {
-    &[
+fn panel_stub_discovery_records(func_held: bool) -> &'static [u8] {
+    const NEUTRAL: [u8; 14] = [
         0x20, 0x00, 0x21, 0x00, 0x22, 0x00, 0x23, 0x00, 0x24, 0x00, 0x25, 0x00, 0x26, 0x00,
-    ]
+    ];
+    const FUNC_HELD: [u8; 14] = [
+        0x20, 0x00, 0x21, 0x00, 0x22, 0x01, 0x23, 0x00, 0x24, 0x00, 0x25, 0x00, 0x26, 0x00,
+    ];
+    if func_held {
+        &FUNC_HELD
+    } else {
+        &NEUTRAL
+    }
 }
 
 fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
@@ -778,8 +786,15 @@ fn run_binary(args: &[String]) {
     let panel_stub = args[6..]
         .iter()
         .any(|assignment| assignment == "PANEL_STUB");
+    let panel_stub_func = args[6..]
+        .iter()
+        .any(|assignment| assignment == "PANEL_STUB_FUNC");
     if panel_stub && uart8_rx.is_some() {
         eprintln!("PANEL_STUB cannot be combined with UART8_RX=hex");
+        std::process::exit(2);
+    }
+    if panel_stub_func && !panel_stub {
+        eprintln!("PANEL_STUB_FUNC requires PANEL_STUB");
         std::process::exit(2);
     }
     if panel_stub && !range_fits(ram_base, ram_size, 0x4FE3_A000, 0x400) {
@@ -914,6 +929,7 @@ fn run_binary(args: &[String]) {
     }
     if panel_stub {
         bus.enable_panel_stub();
+        bus.panel_stub_func_held = panel_stub_func;
     }
     if let Some(bytes) = &uart8_rx {
         bus.queue_uart8_rx(bytes);
@@ -999,6 +1015,7 @@ fn run_binary(args: &[String]) {
             || assignment == "UART8_TX_READY"
             || assignment.starts_with("UART8_RX=")
             || assignment == "PANEL_STUB"
+            || assignment == "PANEL_STUB_FUNC"
             || assignment == "INSPECT_TRAP0"
         {
             continue;
@@ -1979,6 +1996,7 @@ struct ProbeBus {
     current_a: [u32; 8],
     uart8: Option<Uart8>,
     panel_stub: bool,
+    panel_stub_func_held: bool,
     panel_stub_discovery_queued: bool,
     panel_stub_handshake_queued: bool,
     panel_stub_tx_tail: VecDeque<u8>,
@@ -2400,6 +2418,7 @@ impl ProbeBus {
             current_a: [0; 8],
             uart8: None,
             panel_stub: false,
+            panel_stub_func_held: false,
             panel_stub_discovery_queued: false,
             panel_stub_handshake_queued: false,
             panel_stub_tx_tail: VecDeque::new(),
@@ -4134,10 +4153,17 @@ impl ProbeBus {
         {
             self.panel_stub_discovery_queued = true;
             let ring = 0x8000_8424;
-            for (offset, byte) in panel_stub_discovery_records().iter().copied().enumerate() {
+            for (offset, byte) in panel_stub_discovery_records(self.panel_stub_func_held)
+                .iter()
+                .copied()
+                .enumerate()
+            {
                 self.write8_inner(ring + offset as u32, byte)?;
             }
-            self.write32_inner(0x8000_8410, panel_stub_discovery_records().len() as u32)?;
+            self.write32_inner(
+                0x8000_8410,
+                panel_stub_discovery_records(self.panel_stub_func_held).len() as u32,
+            )?;
         }
         if !self.panel_stub_handshake_queued
             && self.panel_stub_tx_tail.iter().copied().eq(PANEL_STUB_QUERY)
@@ -4269,8 +4295,36 @@ impl ProbeBus {
         Ok(())
     }
 
-    // Late panel input after a restore: DMA the bytes into the RX ring and raise the RX interrupt.
+    // Route late panel input through section 2's polled ring until section-3 DMA is active.
     fn deliver_uart8_rx_now(&mut self, bytes: &[u8]) -> Result<(), BusError> {
+        if self.panel_stub && !self.uart8_dma_enabled {
+            const POLLED_RING: u32 = 0x8000_8424;
+            const POLLED_CURSOR: u32 = 0x8000_840C;
+            const POLLED_COUNT: u32 = 0x8000_8410;
+            const POLLED_CAPACITY: u32 = 0x100;
+
+            let cursor = self.read32_inner(POLLED_CURSOR)?;
+            let count = self.read32_inner(POLLED_COUNT)?;
+            let byte_count = u32::try_from(bytes.len()).map_err(|_| BusError {
+                addr: POLLED_RING,
+                write: true,
+            })?;
+            if cursor > POLLED_CAPACITY
+                || count > POLLED_CAPACITY - cursor
+                || byte_count > POLLED_CAPACITY - cursor - count
+            {
+                return Err(BusError {
+                    addr: POLLED_RING + cursor.min(POLLED_CAPACITY),
+                    write: true,
+                });
+            }
+            let end = count + byte_count;
+            for (offset, value) in bytes.iter().copied().enumerate() {
+                self.write8_inner(POLLED_RING + cursor + count + offset as u32, value)?;
+            }
+            self.write32_inner(POLLED_COUNT, end)?;
+            return Ok(());
+        }
         if let Some(uart) = &mut self.uart8 {
             uart.queue_receive(bytes);
         }
@@ -4312,7 +4366,7 @@ impl ProbeBus {
                 uart.queue_receive(if self.panel_stub_handshake_queued {
                     panel_stub_input_records()
                 } else {
-                    panel_stub_discovery_records()
+                    panel_stub_discovery_records(self.panel_stub_func_held)
                 });
             }
         }
@@ -6102,9 +6156,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            bus.dump_ram(ring, panel_stub_discovery_records().len())
+            bus.dump_ram(ring, panel_stub_discovery_records(false).len())
                 .unwrap(),
-            panel_stub_discovery_records()
+            panel_stub_discovery_records(false)
         );
         assert_eq!(
             bus.pending_interrupt(),
@@ -6129,13 +6183,39 @@ mod tests {
         }
 
         assert_eq!(
-            bus.dump_ram(ring, panel_stub_discovery_records().len())
+            bus.dump_ram(ring, panel_stub_discovery_records(false).len())
                 .unwrap(),
-            panel_stub_discovery_records()
+            panel_stub_discovery_records(false)
         );
         assert_eq!(bus.read32(0x8000_8410).unwrap(), 14);
         assert!(bus.panel_stub_discovery_queued);
         assert!(!bus.panel_stub_handshake_queued);
+    }
+
+    #[test]
+    fn panel_stub_can_report_func_held_during_discovery() {
+        assert_eq!(
+            &panel_stub_discovery_records(true)[4..6],
+            &[0x22, 0x01]
+        );
+        assert_eq!(
+            &panel_stub_discovery_records(false)[4..6],
+            &[0x22, 0x00]
+        );
+    }
+
+    #[test]
+    fn panel_stub_late_input_queues_in_section2_polled_ring_before_dma() {
+        let ring = 0x8000_8424;
+        let mut bus = ProbeBus::new(FlatRam::new(0x8000_0000, 0x1_0000));
+        bus.attach_uart8_tx();
+        bus.enable_panel_stub();
+        bus.write32(0x8000_840C, 14).unwrap();
+
+        bus.deliver_uart8_rx_now(&[0x23, 0x04]).unwrap();
+
+        assert_eq!(bus.read32(0x8000_8410).unwrap(), 2);
+        assert_eq!(bus.dump_ram(ring, 16).unwrap()[14..], [0x23, 0x04]);
     }
 
     #[test]
