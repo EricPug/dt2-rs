@@ -379,3 +379,37 @@ The only producer is `0x40004c4a` (receive-completion callback in a transfer des
 **No other path:** the only statically-referenced producer of command-`0x34` records is that parser; the panel UART/SPI paths post receiver events of other types (not `0x21`/`0x22`).
 
 **Conclusion.** The command-0x34 -> type-0x21 -> `0x40154112` -> job-queue chain is a USB host command path, not the front-panel path. It is expected to be idle on a headless boot and should not be used as the reason the UI is stuck. The dispatcher semaphore `0x44e15bcc` / job queue `0x405a0f44` producers should be looked for elsewhere (the task `0x4011f08e` side), not here.
+
+## Dispatcher task `0x4011f08e` / semaphore `0x44e15bcc`: it is the MIDI-input dispatcher
+
+**What the task is.** `0x4011f08e` links three queues to one select-semaphore through `0x4011d9fc(port, queue, sem)`, which stores `queue` at `0x44d4e8d8 + port*0x34 + 0x24` and `sem` at `+0x28`:
+
+| port | state block | queue | fed by |
+|---|---|---|---|
+| 0 | `0x44d4e8d8` | `0x44e15c14` | `0x4011d4d6` byte feeder, via wrapper `0x4011da38` (UART RX callback) |
+| 1 | `0x44d4e90c` | `0x44e15bf4` | `0x4011da4c` buffer parser (USB-MIDI packets) |
+| 2 | `0x44d4e940` | `0x44e15bd4` | `0x4011dc80` -> `0x4011d4d6` with port-2 state |
+
+The init at `0x40120a06-0x40120a48` creates the three queues (`0x40001834`) and the semaphore (`0x40001398`). The task body (`0x4011f146-0x4011f232`) takes the first byte of each message, tests `0xF0` or a channel-nibble match against `0x42936872`, and calls `[0x4021e67c + (status>>4)*4]`: a MIDI status-nibble dispatch (note on/off, CC, program change, sysex...). `0xF0`/`0xF7`/`0xF6`/`0xF8` real-time handling is in the byte feeder.
+
+**Posters (complete list).** Post primitives: `0x4000155c` = sem post wrapper (disables IRQs, calls `0x400011ee`); `0x40001896` = queue put (posts the queue's own embedded sem at `+8`). A scan of every `jsr/jmp/bsr` to `0x400011ee` finds only `0x40001568` (inside the wrapper) and `0x400018d6` (queue put). Posters of `0x4000155c` that belong to the MIDI module are the `queue put -> sem post` pairs at `0x4011d5e8/0x4011d5f2`, `0x4011d632/0x4011d642`, `0x4011d6d4/0x4011d6e4` (inside `0x4011d4d6`, completed sysex/short messages) and `0x4011dc64/0x4011dc6c` (inside `0x4011da4c`). All of them take `queue`/`sem` from `[state+0x24]`/`[state+0x28]`, which is why the literal xref scan sees no external poster.
+
+**Who calls the feeders.** `0x4011da38` is registered as the RX-byte callback of the MIDI UART (`0x40002844(0x7a12 = 31250 baud, cb)`, UART at `0xEC074000`, called from `0x400ccad0`). `0x4011da4c` / `0x4011dc80` are the two USB-MIDI callbacks stored at `0x409659d0` / `0x409659d4` by `0x4000434a` (called at `0x400ccae2`). There is no other caller.
+
+**1.5B boot results** (`TRACE_REGS` hit counts and `WATCH_WRITE`):
+
+| PC | hits |
+|---|---|
+| `0x40002844` (MIDI UART init) | 1 |
+| `0x4000434a` (USB-MIDI callback registration) | 1 |
+| `0x4011d9fc` (task links ports to the sem) | 3 (at instruction ~578.3M) |
+| `0x4011d4d6` (byte feeder) | 0 |
+| `0x4011da4c` (USB packet parser) | 0 |
+| `0x4011dc80` | 0 |
+
+- `WATCH_WRITE=0x44e15bcc:0x44e15c40` shows only the boot zero-fill, the three queue inits, the sem init, and one write at 578.30M (`0x40001432`, the task pending and registering itself as waiter at `+4`). No put or post ever touches the objects.
+- `WATCH_WRITE=0x44d4e8d8:0x44d4e974` shows only the per-port init (~35.06M) and the six queue/sem link stores at 578.30M (`0x4011da1c/0x4011da32`). The port state is never written afterwards, so no byte was ever fed.
+
+**Conclusion.** `0x4011f08e` waits for MIDI IN (UART 31250 baud) or USB-MIDI input. It is idle because nothing arrives; it is not part of the front-panel UI path, and the emulator need not "post" to it. (The "first frame ready / panel scan complete" hypothesis does not apply to this task.) Together with the previous section, both of the originally suspicious tasks (`0x4011f08e` and `0x40153f34`) are host-input paths (MIDI and USB).
+
+**Remaining unidentified waiters (candidate UI path).** `0x4012c590` (prio 8; many sem posts nearby at `0x4012d5a8..0x4012d6b6`, `0x4012b76a`), `0x400f0df2` / `0x400f0f0a` (`0x450575d4` / `0x450cdfd4`), the engine task `0x400d1a12`, and `0x40133922` (`0x44e460d8`, the panel sender side). Panel (UART8) input becoming receiver events is still not located.
