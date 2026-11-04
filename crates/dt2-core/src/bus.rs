@@ -95,6 +95,21 @@ pub trait Bus {
         0
     }
 
+    /// Upper bound on instructions the CPU may run back to back through `quiet_step` /
+    /// `quiet_retire` instead of the full per-instruction hooks (`begin_instruction`,
+    /// `report_instruction_state`, `stop_before_instruction`, `advance_instruction`).
+    /// The CPU still leaves the batch when `poll_due` turns true, the interrupt mask changes,
+    /// or a branch-to-self is taken. 0 (the default) means use the full hooks.
+    fn quiet_horizon(&self) -> usize {
+        0
+    }
+
+    /// Per-instruction bookkeeping for the quiet batch, before the instruction executes.
+    fn quiet_step(&mut self, _pc: u32, _sr: u16) {}
+
+    /// Per-instruction bookkeeping for the quiet batch, after the instruction retired.
+    fn quiet_retire(&mut self) {}
+
     /// Called when `run` returns, so a bus that batches per-instruction work can settle it.
     fn end_run(&mut self) {}
 
