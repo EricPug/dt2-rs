@@ -82,6 +82,14 @@ impl DmaTimer1 {
             && self.extended_mode & (DTXMR_DMAEN | DTXMR_EN1588) == 0
     }
 
+    /// Changes the tick rate; used to override the rate stored in a snapshot.
+    pub fn set_ticks_per_instruction(&mut self, ticks_per_instruction: u32) {
+        assert!(ticks_per_instruction > 0);
+        self.sync();
+        self.ticks_per_instruction = ticks_per_instruction;
+        self.recompute_deadline();
+    }
+
     pub fn advance_instruction(&mut self) {
         if self.eager {
             self.advance_ticks(u64::from(self.ticks_per_instruction));
