@@ -53,6 +53,7 @@ fn main() {
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
+        eprintln!("       run-bin option: SSI_TX_RAW=<path> captures channel-50 SSI TX DMA bytes");
         eprintln!("       dt2-cli trace-depack <packed-section.bin>");
         std::process::exit(2)
     });
@@ -409,6 +410,7 @@ fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
         eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value TRACE_TAIL=n ...]");
+        eprintln!("SSI_TX_RAW=<path> captures channel-50 SSI TX DMA bytes");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -1036,6 +1038,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("ESDHC_DUMP=")
             || assignment == "ESDHC_TRACE"
             || assignment.starts_with("UART8_TX_FILE=")
+            || assignment.starts_with("SSI_TX_RAW=")
             || assignment == "LIVE_WINDOW"
             || assignment == "LIVE_PANEL"
             || assignment.starts_with("PANEL_IMAGE=")
@@ -1217,6 +1220,17 @@ fn run_binary(args: &[String]) {
         };
         bus.uart8_tx_file = Some((open(path), open(&format!("{path}.times"))));
     }
+    let ssi_tx_raw_path = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("SSI_TX_RAW="))
+        .map(str::to_owned);
+    if ssi_tx_raw_path.as_deref().is_some_and(str::is_empty) {
+        eprintln!("SSI_TX_RAW path must not be empty");
+        std::process::exit(2);
+    }
+    if ssi_tx_raw_path.is_some() {
+        bus.ssi_tx_raw = Some(Vec::new());
+    }
     if let Some(spec) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_RX_PERIODIC=")) {
         let (period, messages) = spec.split_once(':').unwrap_or_else(|| {
             eprintln!("UART8_RX_PERIODIC expects period:hex[,hex...]");
@@ -1350,6 +1364,26 @@ fn run_binary(args: &[String]) {
         use std::io::Write;
         let _ = bytes.flush();
         let _ = times.flush();
+    }
+    if let Some(path) = ssi_tx_raw_path {
+        let Some(bytes) = bus.ssi_tx_raw.as_deref() else {
+            eprintln!("SSI_TX_RAW was requested but the capture buffer was not initialized");
+            std::process::exit(2)
+        };
+        std::fs::write(&path, bytes).unwrap_or_else(|error| {
+            eprintln!("cannot write SSI_TX_RAW {path}: {error}");
+            std::process::exit(2)
+        });
+        let nonzero_bytes = bytes.iter().filter(|&&byte| byte != 0).count();
+        let first_source = bus.ssi_tx_first_source.map_or_else(
+            || "none".to_owned(),
+            |address| format!("0x{address:08x}"),
+        );
+        println!(
+            "SSI TX raw capture: {} DMA block(s), {} byte(s), {nonzero_bytes} nonzero, first source {first_source}, written to {path}; byte order follows the big-endian eDMA source buffer",
+            bus.ssi_tx_dma_blocks,
+            bytes.len()
+        );
     }
     if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("SNAPSHOT_SAVE=")) {
         let data = bus
@@ -2306,6 +2340,9 @@ struct ProbeBus {
     ssi_audio_period: Option<usize>,
     ssi_audio_rearm_at: Option<usize>,
     ssi_audio_irq_pending: bool,
+    ssi_tx_raw: Option<Vec<u8>>,
+    ssi_tx_dma_blocks: u64,
+    ssi_tx_first_source: Option<u32>,
     esdhc_trace_enabled: bool,
     esdhc_commands_seen: u64,
     esdhc_write_blocks_seen: u64,
@@ -2443,6 +2480,7 @@ const SSI_AUDIO_INTC1_SOURCE: u32 = 42;
 const DTIM1_SOURCE: u32 = 33;
 const DTIM3_SOURCE: u32 = 35;
 const SSI_AUDIO_RX_BUFFER: u32 = 0x4FE5_7100;
+const SSI_AUDIO_TX_DATA: u32 = 0xFC0B_C000;
 const UART8_DMA_RING_MASK: u32 = 0x3FF;
 const PANEL_STUB_QUERY: [u8; 4] = [0x60, 0x02, 0x70, 0x00];
 const MAX_DSPI_PUSH_EVENTS: usize = 262_144;
@@ -2744,6 +2782,9 @@ impl ProbeBus {
             ssi_audio_period: None,
             ssi_audio_rearm_at: None,
             ssi_audio_irq_pending: false,
+            ssi_tx_raw: None,
+            ssi_tx_dma_blocks: 0,
+            ssi_tx_first_source: None,
             esdhc_trace_enabled: false,
             esdhc_commands_seen: 0,
             esdhc_write_blocks_seen: 0,
@@ -4629,6 +4670,13 @@ impl ProbeBus {
             _ => 1,
         };
         let (source_size, destination_size) = (transfer_size(attr >> 8), transfer_size(attr));
+        let capture_ssi_tx = channel == SSI_AUDIO_DMA_CHANNEL
+            && destination == SSI_AUDIO_TX_DATA
+            && self.ssi_tx_raw.is_some();
+        if capture_ssi_tx {
+            self.ssi_tx_dma_blocks = self.ssi_tx_dma_blocks.saturating_add(1);
+            self.ssi_tx_first_source.get_or_insert(source);
+        }
         for index in 0..iterations * minor_bytes {
             let from = source
                 .wrapping_add(((index / source_size) as i32).wrapping_mul(source_offset) as u32)
@@ -4638,6 +4686,11 @@ impl ProbeBus {
                 .wrapping_add(index % destination_size);
             let byte = self.read8_inner(from)?;
             self.write8_inner(to, byte)?;
+            if capture_ssi_tx {
+                if let Some(capture) = &mut self.ssi_tx_raw {
+                    capture.push(byte);
+                }
+            }
         }
         for (offset, byte) in (reload as u16).to_be_bytes().into_iter().enumerate() {
             self.edma_tcd.insert(base + 0x14 + offset as u32, byte);
@@ -6323,6 +6376,39 @@ fn branch_condition_name(condition: u8) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ssi_tx_raw_capture_records_channel_50_source_bytes() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
+        bus.ssi_tx_raw = Some(Vec::new());
+        bus.synthetic_mcf_mmio = true;
+        bus.write32(0x1000, 0x1234_5678).unwrap();
+
+        let tcd = 0xFC04_5000 + 0x20 * u32::from(SSI_AUDIO_DMA_CHANNEL);
+        for (offset, value, width) in [
+            (0x00, 0x1000, 4),
+            (0x04, 0x0202, 2),
+            (0x06, 4, 2),
+            (0x08, 4, 4),
+            (0x10, SSI_AUDIO_TX_DATA, 4),
+            (0x14, 1, 2),
+        ] {
+            let bytes = value.to_be_bytes();
+            for index in 0..width {
+                bus.edma_tcd.insert(
+                    tcd + offset + index,
+                    bytes[(4 - width + index) as usize],
+                );
+            }
+        }
+
+        bus.run_edma_memory_to_peripheral(SSI_AUDIO_DMA_CHANNEL)
+            .unwrap();
+
+        assert_eq!(bus.ssi_tx_dma_blocks, 1);
+        assert_eq!(bus.ssi_tx_first_source, Some(0x1000));
+        assert_eq!(bus.ssi_tx_raw.as_deref(), Some(&[0x12, 0x34, 0x56, 0x78][..]));
+    }
+
     #[test]
     fn panel_codes_map_to_channel_and_bit() {
         assert_eq!(super::panel_wire_for_code(1), Some((0, 0)));
