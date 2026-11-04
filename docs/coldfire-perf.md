@@ -242,3 +242,10 @@ Plan (each step measured, gates green, reference `execute` kept as fallback):
 - Gates: TX, times, all four state hashes identical, cache on and off; all tests pass.
 - Ablation note: stubbing hooks changes the executed workload, so use only the byte-identical gate for measurements.
 - Next: remaining per-instruction hooks (`begin_instruction`, `report_instruction_state`, `report_branch/tst` Option writes), then opcode-table handlers / block loop.
+
+### Slice 6 status: opcode sweep tool, negative results
+
+- Added `crates/dt2-core/examples/opsweep.rs`: executes all 65536 opcodes from 6 seeded states (user and supervisor, random flags/registers/extension words) and prints one FNV-1a64 hash of every outcome. Baseline at HEAD before this slice: `opsweep d6886cdab29e6c3f` (~30 s). This is the per-instruction differential gate any change to `execute` or any new handler tier must keep identical.
+- Tried and reverted (no measurable gain, gate green): hoisting the hot group-4 arms (RTS/NOP/JSR/JMP/LEA/TST/CLR) to the head of the first-match chain (+1%, hash unchanged); fat LTO + `panic=abort` (-6%); `target-cpu=native` (-8%).
+- Profile now: `execute` ~33%, run-loop wrapper (hooks, cache lookup, Result plumbing) ~30%, bus accesses ~15%. Effective cost is ~36 ns per executed instruction against 15 ns on `FlatRam`, so the ~20 ns gap is the `ProbeBus` path plus hooks.
+- Status: 12.1 -> ~27M instr/s on the gate workload (5.3M of the 40M are idle-skipped). Target of 50-65M not yet met; the remaining cheap wins are exhausted. Next step needs a structural change (handler tier / quiet batch loop with a single bus fast path), gated by the sweep hash.
