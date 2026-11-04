@@ -758,7 +758,7 @@ impl Cpu {
                     }
                 } else if op & 0xFFF8 == 0x0680 {
                     let immediate = self.fetch32(bus)?;
-                    self.d[reg] = self.add(self.d[reg], immediate, Size::L, false);
+                    self.d[reg] = self.add(self.d[reg], immediate, Size::L, true);
                 } else if op & 0xFFF8 == 0x0480 {
                     let immediate = self.fetch32(bus)?;
                     self.d[reg] = self.sub(self.d[reg], immediate, Size::L, true);
