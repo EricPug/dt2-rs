@@ -13,8 +13,9 @@ pub const PANEL_HEIGHT: usize = 856;
 const CROP_LEFT: f32 = 152.0;
 const CROP_TOP: f32 = 78.0;
 const GLASS: (f32, f32, f32, f32) = (335.0, 217.0, 289.0, 163.0);
-/// A full knob turn is about 350 window pixels of drag, so one pixel is one degree.
-const DEFAULT_COUNTS_PER_DEGREE: f32 = 4.0;
+/// A full knob turn is about 350 window pixels of drag, so one pixel is one degree. 30 counts is all the
+/// firmware takes per UI tick (see `PanelInput`), so a fast drag saturates it.
+const DEFAULT_COUNTS_PER_DEGREE: f32 = 30.0;
 const CLICK_SLOP_PIXELS: f32 = 3.0;
 const WHEEL_DEGREES_PER_NOTCH: f32 = 15.0;
 static COUNTS_PER_DEGREE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -475,10 +476,10 @@ mod tests {
         let mut ui = PanelUi::default();
         let (x, y) = at("B");
         assert_eq!(ui.handle_mouse(Some((x, y)), true, false, 0.0), vec![]);
-        assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), true, false, 0.0), vec![Action::Turn(1, 48)]);
+        assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), true, false, 0.0), vec![Action::Turn(1, 127), Action::Turn(1, 127), Action::Turn(1, 106)]);
         assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), false, false, 0.0), vec![]);
 
-        assert_eq!(ui.handle_mouse(Some((x, y)), false, false, -1.0), vec![Action::Turn(1, -60)]);
+        assert_eq!(ui.handle_mouse(Some((x, y)), false, false, -1.0), vec![Action::Turn(1, -127), Action::Turn(1, -127), Action::Turn(1, -127), Action::Turn(1, -69)]);
 
         ui.handle_mouse(Some((x, y)), true, false, 0.0);
         assert_eq!(ui.handle_mouse(Some((x, y)), false, false, 0.0), vec![Action::Press(42), Action::Release(42)]);
