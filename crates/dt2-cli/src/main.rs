@@ -3,7 +3,7 @@ use dt2_core::{
     coldfire::{Cpu, CpuError, InterruptInjection, RunStop},
     ddr::DdrController,
     dspi::Dspi,
-    dtim1::DmaTimer1,
+    dtim1::{DmaTimer1, DTIM3_BASE},
     emmc::{Esdhc, ESDHC_BASE, ESDHC_DATPORT},
     intc0::Intc0,
     intc2::Intc2,
@@ -44,7 +44,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -403,7 +403,7 @@ fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value TRACE_TAIL=n ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value TRACE_TAIL=n ...]");
         std::process::exit(2);
     }
     let ram_base = parse_address(&args[1]).unwrap_or_else(|error| {
@@ -472,6 +472,9 @@ fn run_binary(args: &[String]) {
     let dtim1_bootstrap = args[6..]
         .iter()
         .any(|assignment| assignment == "DTIM1_BOOTSTRAP");
+    let dtim3_bootstrap = args[6..]
+        .iter()
+        .any(|assignment| assignment == "DTIM3_BOOTSTRAP");
     let pit2_periodic = args[6..]
         .iter()
         .any(|assignment| assignment == "PIT2_PERIODIC");
@@ -758,6 +761,23 @@ fn run_binary(args: &[String]) {
         eprintln!("DTIM1_TICKS_PER_INSTRUCTION requires DTIM1_BOOTSTRAP");
         std::process::exit(2);
     }
+    let dtim3_tick_setting = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("DTIM3_TICKS_PER_INSTRUCTION="));
+    let dtim3_ticks_per_instruction = match dtim3_tick_setting {
+        Some(value) => match value.parse::<u32>() {
+            Ok(ticks) if ticks > 0 => ticks,
+            _ => {
+                eprintln!("DTIM3_TICKS_PER_INSTRUCTION must be a positive integer");
+                std::process::exit(2)
+            }
+        },
+        None => 1,
+    };
+    if dtim3_tick_setting.is_some() && !dtim3_bootstrap {
+        eprintln!("DTIM3_TICKS_PER_INSTRUCTION requires DTIM3_BOOTSTRAP");
+        std::process::exit(2);
+    }
     if pit0_oneshot && (!pit_bootstrap || !intc2_bootstrap) {
         eprintln!("PIT0_ONESHOT requires PIT_BOOTSTRAP and INTC2_BOOTSTRAP");
         std::process::exit(2);
@@ -867,6 +887,9 @@ fn run_binary(args: &[String]) {
     if dtim1_bootstrap {
         bus.attach_dtim1_bootstrap(dtim1_ticks_per_instruction);
     }
+    if dtim3_bootstrap {
+        bus.attach_dtim3_bootstrap(dtim3_ticks_per_instruction);
+    }
     if dspi1_bootstrap {
         bus.attach_dspi1_registers();
     }
@@ -972,6 +995,7 @@ fn run_binary(args: &[String]) {
             || assignment == "INTC1_BOOTSTRAP"
             || assignment.starts_with("SSI_AUDIO_IRQ=")
             || assignment == "DTIM1_BOOTSTRAP"
+            || assignment == "DTIM3_BOOTSTRAP"
             || assignment == "DSPI1_BOOTSTRAP"
             || assignment == "DSPI2_BOOTSTRAP"
             || assignment == "PIT0_ONESHOT"
@@ -1007,6 +1031,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("PIT_TICKS_PER_INSTRUCTION=")
             || assignment.starts_with("PIT_FIRST_TICK_DELAY=")
             || assignment.starts_with("DTIM1_TICKS_PER_INSTRUCTION=")
+            || assignment.starts_with("DTIM3_TICKS_PER_INSTRUCTION=")
             || assignment == "LOOP_DETECT"
             || assignment == "SCHED_TRACE"
             || assignment == "CONVERT_TRACE"
@@ -1229,6 +1254,9 @@ fn run_binary(args: &[String]) {
         if let Some(dtim1) = bus.dtim1.as_mut() {
             dtim1.set_eager(true);
         }
+        if let Some(dtim3) = bus.dtim3.as_mut() {
+            dtim3.set_eager(true);
+        }
         println!("timers: eager per-instruction path (PIT_EAGER)");
     }
     if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("IRQ_LOG=")) {
@@ -1369,6 +1397,9 @@ fn run_binary(args: &[String]) {
     }
     if pit2_periodic {
         println!("PIT2 periodic diagnostic: approximate 60 Hz timer source 15; not a measured OS1.17 rate");
+    }
+    if dtim3_bootstrap {
+        println!("DTIM3 diagnostic: reference-compare timer 3 with {dtim3_ticks_per_instruction} bus tick(s) per retired instruction; approximate timing; INTC0 source 35 (vector 99) is modeled");
     }
     if dtim1_bootstrap {
         println!("DTIM1 diagnostic: reference-compare timer 1 with {dtim1_ticks_per_instruction} bus tick(s) per retired instruction; approximate timing; INTC0 source 33 is modeled");
@@ -1986,6 +2017,7 @@ struct ProbeBus {
     ddr: Option<DdrController>,
     pit: Option<PitController>,
     dtim1: Option<DmaTimer1>,
+    dtim3: Option<DmaTimer1>,
     intc0: Option<Intc0>,
     intc1: Option<Intc0>,
     intc2: Option<Intc2>,
@@ -2138,6 +2170,8 @@ const ESDHC_DMA_CHANNEL: u8 = 0x3B;
 // Audio block DMA (SSI0 TX), vector 170 = INTC1 source 42.
 const SSI_AUDIO_DMA_CHANNEL: u8 = 0x32;
 const SSI_AUDIO_INTC1_SOURCE: u32 = 42;
+const DTIM1_SOURCE: u32 = 33;
+const DTIM3_SOURCE: u32 = 35;
 const SSI_AUDIO_RX_BUFFER: u32 = 0x4FE5_7100;
 const UART8_DMA_RING_MASK: u32 = 0x3FF;
 const PANEL_STUB_QUERY: [u8; 4] = [0x60, 0x02, 0x70, 0x00];
@@ -2409,6 +2443,7 @@ impl ProbeBus {
             ddr: None,
             pit: None,
             dtim1: None,
+            dtim3: None,
             intc0: None,
             intc1: None,
             intc2: None,
@@ -3664,6 +3699,9 @@ impl ProbeBus {
         if let Some(dtim1) = self.dtim1_for(address) {
             return dtim1.read8(address);
         }
+        if let Some(dtim3) = self.dtim3_for(address) {
+            return dtim3.read8(address);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.read8(address);
         }
@@ -3725,6 +3763,9 @@ impl ProbeBus {
         if let Some(dtim1) = self.dtim1_for(address) {
             return dtim1.read16(address);
         }
+        if let Some(dtim3) = self.dtim3_for(address) {
+            return dtim3.read16(address);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.read16(address);
         }
@@ -3778,6 +3819,9 @@ impl ProbeBus {
         }
         if let Some(dtim1) = self.dtim1_for(address) {
             return dtim1.read32(address);
+        }
+        if let Some(dtim3) = self.dtim3_for(address) {
+            return dtim3.read32(address);
         }
         if let Some(uart) = self.uart8_for(address) {
             return uart.read32(address);
@@ -3856,6 +3900,9 @@ impl ProbeBus {
         }
         if let Some(dtim1) = self.dtim1_for(address) {
             return dtim1.write8(address, value);
+        }
+        if let Some(dtim3) = self.dtim3_for(address) {
+            return dtim3.write8(address, value);
         }
         if self
             .uart8
@@ -3940,6 +3987,9 @@ impl ProbeBus {
         if let Some(dtim1) = self.dtim1_for(address) {
             return dtim1.write16(address, value);
         }
+        if let Some(dtim3) = self.dtim3_for(address) {
+            return dtim3.write16(address, value);
+        }
         if let Some(uart) = self.uart8_for(address) {
             return uart.write16(address, value);
         }
@@ -3987,6 +4037,9 @@ impl ProbeBus {
         }
         if let Some(dtim1) = self.dtim1_for(address) {
             return dtim1.write32(address, value);
+        }
+        if let Some(dtim3) = self.dtim3_for(address) {
+            return dtim3.write32(address, value);
         }
         if let Some(uart) = self.uart8_for(address) {
             return uart.write32(address, value);
@@ -4090,6 +4143,12 @@ impl ProbeBus {
     fn attach_dtim1_bootstrap(&mut self, ticks_per_instruction: u32) {
         self.dtim1 = Some(DmaTimer1::new(ticks_per_instruction));
         self.intc0 = Some(Intc0::new());
+    }
+
+    // DTIM3 (INTC0 source 35, vector 99) drives the firmware's UI tick; it shares INTC0 with DTIM1.
+    fn attach_dtim3_bootstrap(&mut self, ticks_per_instruction: u32) {
+        self.dtim3 = Some(DmaTimer1::at(DTIM3_BASE, ticks_per_instruction));
+        self.intc0.get_or_insert_with(Intc0::new);
     }
 
     fn attach_uart8_tx(&mut self) {
@@ -4575,6 +4634,10 @@ impl ProbeBus {
             .filter(|_| DdrController::contains(address))
     }
 
+    fn dtim3_for(&mut self, address: u32) -> Option<&mut DmaTimer1> {
+        self.dtim3.as_mut().filter(|timer| timer.covers(address))
+    }
+
     fn dtim1_for(&mut self, address: u32) -> Option<&mut DmaTimer1> {
         self.dtim1.as_mut().filter(|_| DmaTimer1::contains(address))
     }
@@ -4626,6 +4689,9 @@ impl ProbeBus {
         }
         if let Some(dtim1) = self.dtim1.as_mut() {
             dtim1.sync();
+        }
+        if let Some(dtim3) = self.dtim3.as_mut() {
+            dtim3.sync();
         }
         use dt2_core::snapshot::Writer;
         const PAGE: u32 = 4096;
@@ -4725,19 +4791,26 @@ impl ProbeBus {
         }
         // Optional tail written only when a display, INTC1 or EMAC state exists, so older configurations keep their hash.
         let emac_state = !cpu.emac.is_default();
-        if self.display.is_some() || self.intc1.is_some() || emac_state {
+        let dtim3_state = self.dtim3.is_some();
+        if self.display.is_some() || self.intc1.is_some() || emac_state || dtim3_state {
             w.bool(self.display.is_some());
             if let Some(display) = &self.display {
                 display.save_state(&mut w);
             }
-            if self.intc1.is_some() || emac_state {
+            if self.intc1.is_some() || emac_state || dtim3_state {
                 w.bool(self.intc1.is_some());
                 if let Some(intc1) = &self.intc1 {
                     intc1.save_state(&mut w);
                 }
-                if emac_state {
-                    w.bool(true);
-                    cpu.emac.save_state(&mut w);
+                if emac_state || dtim3_state {
+                    w.bool(emac_state);
+                    if emac_state {
+                        cpu.emac.save_state(&mut w);
+                    }
+                    if let Some(dtim3) = &self.dtim3 {
+                        w.bool(true);
+                        dtim3.save_state(&mut w);
+                    }
                 }
             }
         }
@@ -4887,6 +4960,11 @@ impl ProbeBus {
                 }
                 if r.remaining() > 0 && r.bool()? {
                     cpu.emac.load_state(&mut r)?;
+                }
+                if r.remaining() > 0 && r.bool()? {
+                    self.dtim3
+                        .get_or_insert_with(|| DmaTimer1::at(DTIM3_BASE, 1))
+                        .load_state(&mut r)?;
                 }
             }
         }
@@ -5606,10 +5684,15 @@ impl Bus for ProbeBus {
             .dtim1
             .as_ref()
             .is_some_and(DmaTimer1::interrupt_pending);
-        let intc0_request = self
-            .intc0
+        let timer3_pending = self
+            .dtim3
             .as_ref()
-            .and_then(|intc0| intc0.pending_interrupt(timer1_pending));
+            .is_some_and(DmaTimer1::interrupt_pending);
+        let intc0_request = self.intc0.as_ref().and_then(|intc0| {
+            intc0.pending_interrupt_with(
+                (u64::from(timer1_pending) << DTIM1_SOURCE) | (u64::from(timer3_pending) << DTIM3_SOURCE),
+            )
+        });
         let intc2_request = self
             .intc2
             .as_ref()
@@ -5647,6 +5730,9 @@ impl Bus for ProbeBus {
         }
         if let Some(dtim1) = &mut self.dtim1 {
             dtim1.advance_instruction();
+        }
+        if let Some(dtim3) = &mut self.dtim3 {
+            dtim3.advance_instruction();
         }
     }
 }
@@ -6328,6 +6414,36 @@ mod tests {
 
         bus.write8(dt2_core::dtim1::DTIM1_BASE + 0x03, 0x02)
             .unwrap();
+        assert_eq!(bus.pending_interrupt(), None);
+    }
+
+    #[test]
+    fn dtim3_reference_match_delivers_intc0_vector_99_with_firmware_setup() {
+        let mut bus = ProbeBus::new(FlatRam::new(0, 0x3000));
+        bus.attach_dtim3_bootstrap(1);
+        // Same register writes as the firmware's timer start at 0x400c0b84..0x400c0ba6.
+        bus.write8(dt2_core::intc0::INTC0_BASE + 0x63, 2).unwrap();
+        bus.write8(dt2_core::intc0::INTC0_BASE + 0x1D, 35).unwrap();
+        bus.write32(DTIM3_BASE + 0x0C, 0).unwrap();
+        bus.write32(DTIM3_BASE + 0x04, 3).unwrap();
+        bus.write16(DTIM3_BASE, 0x1D).unwrap();
+
+        for _ in 0..(3 * 16 - 1) {
+            bus.advance_instruction();
+        }
+        assert_eq!(bus.pending_interrupt(), None);
+
+        bus.advance_instruction();
+        assert_eq!(
+            bus.pending_interrupt(),
+            Some(InterruptRequest {
+                source: 35,
+                level: 2,
+                vector: 99,
+            })
+        );
+
+        bus.write8(DTIM3_BASE + 0x03, 0x02).unwrap();
         assert_eq!(bus.pending_interrupt(), None);
     }
 
