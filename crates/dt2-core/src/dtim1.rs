@@ -82,6 +82,12 @@ impl DmaTimer1 {
             && self.extended_mode & (DTXMR_DMAEN | DTXMR_EN1588) == 0
     }
 
+    /// (DTMR, DTXMR, DTER, DTRR, DTCN) for diagnostics.
+    pub fn debug_state(&mut self) -> (u16, u8, u8, u32, u32) {
+        self.sync();
+        (self.mode, self.extended_mode, self.event, self.reference, self.counter)
+    }
+
     /// Changes the tick rate; used to override the rate stored in a snapshot.
     pub fn set_ticks_per_instruction(&mut self, ticks_per_instruction: u32) {
         assert!(ticks_per_instruction > 0);
@@ -161,7 +167,7 @@ impl DmaTimer1 {
         if old_counter < reference && next_counter >= reference {
             self.event |= DTER_REF;
             self.counter = if self.mode & DTMR_FRR != 0 {
-                (next_counter - reference) as u32
+                ((next_counter - reference) % reference) as u32
             } else {
                 next_counter as u32
             };
@@ -351,6 +357,20 @@ mod tests {
 
         timer.write8(DTIM1_BASE + DTER, DTER_REF).unwrap();
         assert!(!timer.interrupt_pending());
+    }
+
+    #[test]
+    fn restart_mode_keeps_firing_after_a_multi_period_gap() {
+        let mut timer = DmaTimer1::new(1);
+        timer.write32(DTIM1_BASE + DTRR, 2).unwrap();
+        timer.write16(DTIM1_BASE, 0x841B).unwrap();
+
+        // Event left pending across several periods, as when the ISR is delayed.
+        timer.advance_ticks(7 * 133);
+        timer.write8(DTIM1_BASE + DTER, DTER_REF).unwrap();
+        assert!(!timer.interrupt_pending());
+        timer.advance_ticks(2 * 133);
+        assert!(timer.interrupt_pending());
     }
 
     #[test]

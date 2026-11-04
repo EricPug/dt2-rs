@@ -856,3 +856,11 @@ Findings (snapshot `out/panel-1p5b.snap`, tpi=16, `SSI_AUDIO_IRQ=100000`):
 - Estimated real hardware: ~113M useful instr/s needed vs ~10M/s emulated, so throughput (~11x) is the root cause.
 - `SSI_AUDIO_IRQ` 100000/400000/2000000 gives 10.7/14.4/15.8M instr/s but does not cut instruction latency. `LOOP_DETECT` disables the fast path (0.48M instr/s).
 - Open: tpi=320/3200 never produced a tile in 40M instructions (not investigated); `TRACE_REGS` caps at 192 snapshots, so hit counts are not reliable.
+
+### Why `DTIM3_TICKS_PER_INSTRUCTION` 320/3200 never produced a tile
+
+- At tpi=320 only ~20 DTIM3 ISRs ran in 40M instructions (expected ~2900). The new end-of-run `DTIM3 state:` line showed `DTCN=0x3325355` far above `DTRR=0x43238`.
+- Cause: a model bug in `DmaTimer1::advance_ticks`. If the event was left pending (ISR delayed) for more than one period, restart mode set `counter = next - reference`, which was still above the reference; the `old < reference` crossing test then never matched again. Fixed with `(next - reference) % reference`; regression test `restart_mode_keeps_firing_after_a_multi_period_gap`.
+- After the fix the timer keeps counting at every rate, but latency does not improve above tpi=16 (message-to-first-tile: tpi=16 3.4M instr, tpi=64 20.6M, tpi=320/3200 none within 40M). Roughly 3.3M instructions of firmware work separate frame ends (~12 ticks at tpi=16), and each tick handler costs far more than a 13.7k-instruction period, so a high tick rate just saturates the CPU with tick handling (tick storm).
+- Interpretation: one frame is ~3M instructions, ~30 ms on real hardware at ~100M instr/s. Latency is bounded by emulator throughput (~10M instr/s), not by the timer rate. The `0xaa/0xbf/0xcd` ISRs seen near `0x40053d1c` are the SSI/eDMA completion interrupts landing in the hottest loop, not per-instruction exceptions.
+- Next: raise instruction throughput (`coldfire.rs` fast path / native hooks for the `0x40053d00` call chain).
