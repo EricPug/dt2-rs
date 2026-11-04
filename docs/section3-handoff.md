@@ -914,3 +914,16 @@ Cold boot under Unicorn died at the first `TRAP #0` because the engine ran `MOVE
 - **TRIG.** On `out/panel-1p5b-fixed-card.snap` the per-track pointer table at `0x44f37bd0` is populated, and TRIG 1 taps for 150M instructions no longer stop (the old unmapped-read stop at `0x400d8e4c` was caused by the missing install/INTC1 state).
 - **Silent baseline.** TRIG 1 + PLAY taps for 300M instructions leave the SSI TX buffer (`0x4fe58100`, 4 KiB) all zero, and there is no SSI TX capture yet.
 - **Next.** Find where the firmware keeps sample audio (the 'SAMP' key page and the +Drive browser should show it) and its on-card layout by driving that UI, then write a WAV and add an SSI TX capture (channel 50 DMA writes to `0xFC0BC000`).
+
+## DT2 +Drive ekFS location (FORMAT +DRIVE capture)
+
+Menu path (scripted with `tools/panel-keys.sh`): SETTINGS, DOWN x7 to SYSTEM, YES,
+DOWN x5 then UP to FORMAT +DRIVE, YES, tick PROJ+PST+KIT and SAMPLES (YES, DOWN, YES, DOWN),
+YES on ERASE SELECTED DATA, YES again on "ARE YOU SURE? Y/N".
+
+Result: the format wrote 6,458 new blocks (33,126 -> 39,584). New extents are in the
+ekFS region, with the superblock magic `ekFS` (`656b4653`, version 4) at sector `0x5d8000`.
+Root and directory blocks around `0x5eff80..0x5f0140` hold `.`, `..`, `factory` and
+`incoming` entries. The DT2 ekFS base is therefore sector `0x5d8000`, past the
+`0x450001` limit the cold boot reads. Layout details (inodes, bitmaps, checksum) still
+need confirming against the documented MK1 format before writing a sample.

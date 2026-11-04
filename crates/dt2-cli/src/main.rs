@@ -1044,6 +1044,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("LIVE_WINDOW=")
             || assignment.starts_with("LIVE_PNG=")
             || assignment.starts_with("UART8_RX_PERIODIC=")
+            || assignment == "UART8_RX_ONCE"
             || assignment.starts_with("DUMP_CALL=")
             || assignment.starts_with("STOP_PC=")
             || assignment.starts_with("WATCH_WRITE=")
@@ -1228,6 +1229,9 @@ fn run_binary(args: &[String]) {
         let messages: Vec<Vec<u8>> = messages
             .split(',')
             .map(|hex| {
+                if hex == "-" {
+                    return Vec::new(); // a pause of one period
+                }
                 parse_uart_rx_bytes(hex).unwrap_or_else(|error| {
                     eprintln!("{error}");
                     std::process::exit(2)
@@ -1235,6 +1239,7 @@ fn run_binary(args: &[String]) {
             })
             .collect();
         bus.uart8_rx_periodic = Some((period, messages, 0, 0));
+        bus.uart8_rx_once = args[6..].iter().any(|a| a == "UART8_RX_ONCE");
     }
     bus.gpio_loopback = args[6..].iter().any(|a| a == "GPIO_LOOPBACK");
     if args[6..].iter().any(|a| a == "RGPIO_READY_MODEL") {
@@ -2311,6 +2316,7 @@ struct ProbeBus {
     esdhc_dma_events: Vec<EsdhcDmaTrace>,
     edma_deferred: std::collections::BTreeSet<u8>,
     uart8_rx_periodic: Option<(usize, Vec<Vec<u8>>, usize, usize)>,
+    uart8_rx_once: bool,
     uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
     display: Option<display::Display>,
     fast_ram: Option<(u32, u32)>,
@@ -2748,6 +2754,7 @@ impl ProbeBus {
             esdhc_dma_events: Vec::new(),
             edma_deferred: std::collections::BTreeSet::new(),
             uart8_rx_periodic: None,
+            uart8_rx_once: false,
             uart8_tx_file: None,
             display: None,
             fast_ram: None,
@@ -5509,6 +5516,9 @@ impl Bus for ProbeBus {
                 let _ = self.deliver_uart8_rx_now(&message);
                 self.irq_dirty = true;
             }
+        }
+        if self.uart8_rx_once && self.uart8_rx_periodic.as_ref().is_some_and(|(_, m, _, cursor)| *cursor >= m.len()) {
+            self.uart8_rx_periodic = None;
         }
     }
 
