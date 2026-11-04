@@ -1,0 +1,101 @@
+--- a/uc.c	2026-11-04 14:15:00.545432805 -0500
++++ b/uc.c
+@@ -3604,6 +3604,34 @@
+ #define UC_DIGIKIT_NO_HOOK_PC_SYNC 4u
+ 
+ UNICORN_EXPORT
++void uc_digikit_set_irq_level(uc_engine *uc, uint32_t level)
++{
++    uc->digikit_irq_level = level;
++}
++
++/* Stop at the next instruction boundary; safe from MMIO callbacks. */
++UNICORN_EXPORT
++void uc_digikit_stop_at_boundary(uc_engine *uc)
++{
++    uc->emu_count = uc->emu_counter;
++}
++
++/* Instructions begun so far in the current uc_emu_start() count run. */
++UNICORN_EXPORT
++uint64_t uc_digikit_counter(uc_engine *uc)
++{
++    return uc->emu_counter;
++}
++
++/* The limit emu_counter is compared against (uc_emu_start's count, or the
++ * counter itself once a stop was requested). */
++UNICORN_EXPORT
++uint64_t uc_digikit_count_limit(uc_engine *uc)
++{
++    return uc->emu_count;
++}
++
++UNICORN_EXPORT
+ uint32_t uc_digikit_options_supported(void)
+ {
+     return UC_DIGIKIT_NATIVE_RTE | UC_DIGIKIT_NO_MEM_EXIT |
+--- a/include/uc_priv.h	2026-11-04 14:15:00.548046739 -0500
++++ b/include/uc_priv.h
+@@ -418,6 +418,10 @@
+     int nested_level;                         // Current nested_level
+     bool mem_hooks_changed; // digikit: a memory hook was added/removed while
+                             // emulating; flush the TLB at the next top level
++    uint32_t digikit_irq_level; // digikit: level of an interrupt the host holds
++                                // pending; an SR change that drops the mask
++                                // below it stops emulation at the next
++                                // instruction boundary
+     bool digikit_native_rte;  // digikit: m68k `rte` natively, not via
+                               // UC_HOOK_INTR (uc_digikit_set_options)
+     bool digikit_no_mem_exit; // digikit: no exit-request check after each
+--- a/qemu/target/m68k/helper.c	2026-11-04 14:15:00.553814642 -0500
++++ b/qemu/target/m68k/helper.c
+@@ -606,6 +606,12 @@
+     env->sr = sr & 0xffe0;
+     cpu_m68k_set_ccr(env, sr);
+     m68k_switch_sp(env);
++    /* digikit: the host holds an interrupt pending; if this SR change
++     * unmasked it (MOVE/ANDI to SR, RTE), stop before the next instruction. */
++    if (env->uc->digikit_irq_level &&
++        ((env->sr >> 8) & 7) < env->uc->digikit_irq_level) {
++        env->uc->emu_count = env->uc->emu_counter;
++    }
+ }
+ 
+ void HELPER(set_sr)(CPUM68KState *env, uint32_t val)
+--- a/qemu/target/m68k/unicorn.c	2026-11-04 14:17:31.398147740 -0500
++++ b/qemu/target/m68k/unicorn.c
+@@ -266,3 +266,33 @@
+     uc->cpu_context_size = offsetof(CPUM68KState, end_reset_fields);
+     uc_common_init(uc);
+ }
++
++/* digikit: the raw EMAC register file (macc[] is the 48-bit accumulator the
++ * guest's ACC/ACCext reads are derived from; reading those saturates). */
++UNICORN_EXPORT
++void uc_digikit_emac_get(uc_engine *uc, uint64_t macc[4], uint32_t *macsr,
++                         uint32_t *mask)
++{
++    CPUM68KState *env = &M68K_CPU(uc->cpu)->env;
++    int i;
++
++    for (i = 0; i < 4; i++) {
++        macc[i] = env->macc[i];
++    }
++    *macsr = env->macsr;
++    *mask = env->mac_mask;
++}
++
++UNICORN_EXPORT
++void uc_digikit_emac_set(uc_engine *uc, const uint64_t macc[4], uint32_t macsr,
++                         uint32_t mask)
++{
++    CPUM68KState *env = &M68K_CPU(uc->cpu)->env;
++    int i;
++
++    for (i = 0; i < 4; i++) {
++        env->macc[i] = macc[i];
++    }
++    env->macsr = macsr;
++    env->mac_mask = mask;
++}

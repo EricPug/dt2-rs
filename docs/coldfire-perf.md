@@ -304,3 +304,36 @@ Needed for byte-identical gates: Unicorn -> Rust EMAC/MACSR extraction, exact id
 and time accounting, and exact event ordering around RTE/mask changes. Other caveats:
 patched-C dependency and build story, `emu_count` offset fragility, host writes to code
 pages (stale TB cache), snapshot of Unicorn state.
+
+## Slice 11: Unicorn tier, all gates exact
+
+`DT2_UNICORN=1` (feature `unicorn`, patched library built by `tools/unicorn/build.sh`) now matches
+the Rust interpreter on every gate. The Rust interpreter stays the default and the fallback.
+
+Fixes since Slice 10:
+- **Large-slice stall.** `pending_interrupt()` can return a masked request. Native RTE and SR writes
+  unmask it inside Unicorn without the host noticing. A seventh patch hooks `cpu_m68k_set_sr`; when
+  the host-held pending level exceeds the new mask it stops at the next instruction boundary. The
+  host sets the level with `uc_digikit_set_irq_level` before each slice.
+- **No struct-offset probe.** `uc_digikit_stop_at_boundary`, `uc_digikit_counter` and
+  `uc_digikit_count_limit` are exported.
+- **EMAC state.** `uc_digikit_emac_get/set` move raw macc/macsr/mask each slice (verified against
+  the old stub injection over 64 rounds in both modes).
+- **TRAP accounting.** (a) A pending TRAP or rejected opcode ran one instruction past the budget.
+  (b) The INTR hook did not stop the engine, so the faulting instruction was retried and counted
+  until the count limit. `on_intr` now records the counter and stops at the boundary.
+
+Results (40M-instruction gate workload):
+- TX sha, `.times` sha, interrupt histogram and state hashes at 1M/8M/20M/40M are identical to gold
+  at slices 4096, 65536 and 1000000.
+- About 103-108M instr/s, 0.37-0.39 s wall versus 1.06 s for Rust (about 2.8x wall-clock; the Rust
+  budget includes about 5.3M idle-skipped instructions, so wall-clock is the fair metric).
+- 165 fallback steps (TRAP #0 and rejected opcodes).
+- `DT2_UNICORN=1 tools/perf-gate.sh <unicorn-bin>` prints GATE PASS. Rust-only gate (33M) and
+  opsweep (`3522f4128fba249a`) still pass.
+
+Caveats still open:
+- Host writes to RAM code pages do not invalidate Unicorn's TB cache.
+- No Unicorn-state snapshot/restore beyond `store()` into `Cpu`.
+- `first_pc` in MMIO reports is wrong under Unicorn (cosmetic).
+- The patched C library is a GPL-2.0 dependency; it is built outside the repo.

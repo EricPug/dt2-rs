@@ -22,9 +22,7 @@ type IntrCb = extern "C" fn(Uc, u32, *mut c_void);
 extern "C" {
     fn uc_open(arch: i32, mode: i32, uc: *mut Uc) -> i32;
     fn uc_ctl(uc: Uc, control: i32, ...) -> i32;
-    fn uc_mem_map(uc: Uc, address: u64, size: usize, perms: u32) -> i32;
     fn uc_mem_map_ptr(uc: Uc, address: u64, size: usize, perms: u32, ptr: *mut u8) -> i32;
-    fn uc_mem_write(uc: Uc, address: u64, bytes: *const u8, size: usize) -> i32;
     fn uc_mmio_map(
         uc: Uc,
         address: u64,
@@ -39,6 +37,12 @@ extern "C" {
     fn uc_reg_read(uc: Uc, reg: i32, value: *mut c_void) -> i32;
     fn uc_reg_write(uc: Uc, reg: i32, value: *const c_void) -> i32;
     fn uc_digikit_set_options(uc: Uc, bits: u32) -> i32;
+    fn uc_digikit_set_irq_level(uc: Uc, level: u32);
+    fn uc_digikit_stop_at_boundary(uc: Uc);
+    fn uc_digikit_emac_set(uc: Uc, macc: *const u64, macsr: u32, mask: u32);
+    fn uc_digikit_emac_get(uc: Uc, macc: *mut u64, macsr: *mut u32, mask: *mut u32);
+    fn uc_digikit_counter(uc: Uc) -> u64;
+    fn uc_digikit_count_limit(uc: Uc) -> u64;
 }
 
 const UC_ARCH_M68K: i32 = 7;
@@ -54,20 +58,18 @@ const NATIVE_RTE: u32 = 1;
 const NO_MEM_EXIT: u32 = 2;
 const NO_HOOK_PC_SYNC: u32 = 4;
 const ERR_INSN_INVALID: i32 = 10;
-const SCRATCH: u32 = 0xFFFF_F000;
 
 /// State the callbacks share with the run loop.
 struct Shared {
     bus: *mut ProbeBus,
-    counter: *const usize,
-    /// `uc_struct.emu_count`, the limit `emu_counter` is compared against after each instruction.
-    count_limit: *mut usize,
+    uc: Uc,
     begun: bool,
     /// Instructions of the current slice already credited to the bus.
     credited: usize,
     first_error: Option<(u32, BusError)>,
     stop_on_access: bool,
     intr: Option<u32>,
+    intr_counter: usize,
 }
 
 impl Shared {
@@ -75,7 +77,7 @@ impl Shared {
     /// earlier instructions have retired, and this one has begun (the count includes it, the
     /// timers' lag does not).
     fn credit(&mut self) {
-        let counter = unsafe { self.counter.read_volatile() };
+        let counter = unsafe { uc_digikit_counter(self.uc) } as usize;
         let before = counter.saturating_sub(1);
         let bus = unsafe { &mut *self.bus };
         if before > self.credited {
@@ -89,10 +91,10 @@ impl Shared {
     }
 
     /// Ends the slice at the next instruction boundary when the access may have changed what
-    /// is pending: the engine's own count hook stops once `emu_counter` exceeds the limit.
+    /// is pending.
     fn finish_access(&mut self) {
         if self.stop_on_access && unsafe { &*self.bus }.irq_dirty {
-            unsafe { self.count_limit.write(self.counter.read_volatile()) };
+            unsafe { uc_digikit_stop_at_boundary(self.uc) };
         }
     }
 }
@@ -138,8 +140,15 @@ extern "C" fn mmio_write(_uc: Uc, offset: u64, size: u32, value: u64, user: *mut
     shared.finish_access();
 }
 
-extern "C" fn on_intr(_uc: Uc, number: u32, user: *mut c_void) {
-    unsafe { &mut *(user as *mut Shared) }.intr.get_or_insert(number);
+extern "C" fn on_intr(uc: Uc, number: u32, user: *mut c_void) {
+    let shared = unsafe { &mut *(user as *mut Shared) };
+    if shared.intr.is_none() {
+        shared.intr = Some(number);
+        // The faulting instruction has begun but not retired. Returning from the hook makes the
+        // engine retry it, so stop at that retry and remember which instruction it was.
+        shared.intr_counter = unsafe { uc_digikit_counter(uc) } as usize;
+        unsafe { uc_digikit_stop_at_boundary(uc) };
+    }
 }
 
 pub struct UnicornTier {
@@ -152,29 +161,8 @@ pub struct UnicornTier {
     pub irqs: std::collections::BTreeMap<u8, u64>,
 }
 
-/// Finds `uc_struct.emu_counter` (the per-instruction count behind `uc_emu_start`'s count
-/// argument) by running a known number of instructions in a scratch engine.
-fn probe_counter_offset() -> usize {
-    unsafe {
-        let mut uc: Uc = std::ptr::null_mut();
-        assert_eq!(uc_open(UC_ARCH_M68K, UC_MODE_BIG_ENDIAN, &mut uc), 0);
-        uc_ctl(uc, UC_CTL_WRITE_CPU_MODEL, UC_CPU_M68K_CFV4E);
-        uc_mem_map(uc, 0x1000, 0x1000, 7);
-        uc_mem_write(uc, 0x1000, [0x60u8, 0xFE].as_ptr(), 2);
-        uc_emu_start(uc, 0x1000, u64::MAX, 0, 7919);
-        let words = uc as *const usize;
-        for i in 0..4096 {
-            if words.add(i).read() == 7920 && words.add(i + 1).read() == 7919 {
-                return i * std::mem::size_of::<usize>();
-            }
-        }
-        panic!("emu_counter not found in uc_struct");
-    }
-}
-
 impl UnicornTier {
     fn new(bus: &mut ProbeBus) -> Self {
-        let counter_offset = probe_counter_offset();
         let max_slice = std::env::var("DT2_UNICORN_SLICE").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
         let mut uc: Uc = std::ptr::null_mut();
         unsafe {
@@ -183,19 +171,15 @@ impl UnicornTier {
         }
         let mut shared = Box::new(Shared {
             bus: bus as *mut ProbeBus,
-            counter: unsafe { (uc as *const u8).add(counter_offset) as *const usize },
-            count_limit: unsafe { (uc as *mut u8).add(counter_offset + 8) as *mut usize },
+            uc,
             begun: false,
             credited: 0,
             first_error: None,
             stop_on_access: std::env::var_os("DT2_UNICORN_NOSTOP").is_none(),
             intr: None,
+            intr_counter: 0,
         });
         let mut windows = bus.host_memory();
-        // Scratch page for the register-injection stub, at the top of the address space.
-        let mut scratch = vec![0u8; 0x1000].into_boxed_slice();
-        windows.push((SCRATCH, scratch.as_mut_ptr(), scratch.len()));
-        std::mem::forget(scratch);
         windows.sort_by_key(|w| w.0);
         let mut cursor: u64 = 0;
         let mut regions = Vec::new();
@@ -231,11 +215,11 @@ impl UnicornTier {
         let mut tier = Self::new(bus);
         tier.load(cpu);
         tier.shared.bus = bus as *mut ProbeBus;
-        tier.inject_emac(cpu);
         tier
     }
 
     fn load(&mut self, cpu: &Cpu) {
+        self.load_emac(cpu);
         // SR first: writing it can swap stack pointers.
         unsafe {
             let sr = u32::from(cpu.sr);
@@ -248,31 +232,21 @@ impl UnicornTier {
         }
     }
 
-    /// Loads the EMAC register file by running `move.l #value,d0; move.l d0,<reg>` stubs.
-    fn inject_emac(&mut self, cpu: &Cpu) {
-        let (acc, ext01, ext23, macsr, mask) = cpu.emac.raw_registers();
-        let mut code: Vec<u8> = Vec::new();
-        let mut put = |value: u32, op: u16| {
-            code.extend_from_slice(&0x203Cu16.to_be_bytes());
-            code.extend_from_slice(&value.to_be_bytes());
-            code.extend_from_slice(&op.to_be_bytes());
-        };
-        for (n, value) in acc.iter().enumerate() {
-            put(*value, 0xA100 | ((n as u16) << 9));
-        }
-        put(ext01, 0xAB00);
-        put(ext23, 0xAF00);
-        put(mask, 0xAD00);
-        put(macsr, 0xA900);
-        unsafe {
-            uc_mem_write(self.uc, u64::from(SCRATCH), code.as_ptr(), code.len());
-            let end = u64::from(SCRATCH) + code.len() as u64;
-            let status = uc_emu_start(self.uc, u64::from(SCRATCH), end, 0, 0);
-            assert_eq!(status, 0, "EMAC injection stub failed");
-        }
+    fn load_emac(&mut self, cpu: &Cpu) {
+        let macc = [0, 1, 2, 3].map(|n| cpu.emac.raw48(n));
+        let (_, _, _, macsr, mask) = cpu.emac.raw_registers();
+        unsafe { uc_digikit_emac_set(self.uc, macc.as_ptr(), macsr, mask) };
+    }
+
+    /// Reads the engine's raw EMAC state back into `cpu`.
+    fn extract_emac(&mut self, cpu: &mut Cpu) {
+        let (mut macc, mut macsr, mut mask) = ([0u64; 4], 0u32, 0u32);
+        unsafe { uc_digikit_emac_get(self.uc, macc.as_mut_ptr(), &mut macsr, &mut mask) };
+        cpu.emac.load_raw(macc, macsr, mask);
     }
 
     fn store(&mut self, cpu: &mut Cpu) {
+        self.extract_emac(cpu);
         unsafe {
             let mut sr = 0u32;
             uc_reg_read(self.uc, REG_SR, &mut sr as *mut u32 as *mut c_void);
@@ -285,20 +259,34 @@ impl UnicornTier {
         }
     }
 
+    fn set_irq_level(&mut self, level: u32) {
+        unsafe { uc_digikit_set_irq_level(self.uc, level) };
+    }
+
     /// Runs up to `n` instructions from `pc`; returns (executed, engine status).
     fn slice(&mut self, bus: &mut ProbeBus, pc: u32, n: usize) -> (usize, i32) {
         self.slices += 1;
         self.shared.bus = bus as *mut ProbeBus;
         self.shared.credited = 0;
         self.shared.begun = false;
+        self.shared.intr = None;
         let status = unsafe { uc_emu_start(self.uc, u64::from(pc), u64::MAX, 0, n) };
-        let counter = unsafe { self.shared.counter.read_volatile() };
-        let limit = unsafe { self.shared.count_limit.read_volatile() };
-        let executed = if status == 0 { limit.min(counter) } else { counter.saturating_sub(1) };
+        let counter = unsafe { uc_digikit_counter(self.uc) } as usize;
+        let limit = unsafe { uc_digikit_count_limit(self.uc) } as usize;
+        // An exception leaves the faulting instruction begun but not retired.
+        let executed = if let Some(at) = self.shared.intr.and(Some(self.shared.intr_counter)) {
+            at.saturating_sub(1)
+        } else if status != 0 {
+            counter.saturating_sub(1)
+        } else {
+            limit.min(counter)
+        };
         let begun = usize::from(self.shared.begun);
         bus.retire_external(executed.saturating_sub(self.shared.credited + begun), executed.saturating_sub(self.shared.credited));
         if std::env::var_os("DT2_UNICORN_TRACE").is_some() {
-            eprintln!("slice pc={pc:#010x} n={n} executed={executed} status={status} count={}", bus.current_instruction_count);
+            let mut pc_after = 0u32;
+            unsafe { uc_reg_read(self.uc, REG_PC, &mut pc_after as *mut u32 as *mut c_void) };
+            eprintln!("slice pc={pc:#010x} n={n} executed={executed} status={status} counter={counter} limit={limit} intr={:?} pc_after={pc_after:#010x} count={}", self.shared.intr, bus.current_instruction_count);
         }
         (executed, status)
     }
@@ -358,7 +346,11 @@ fn run_with(
         }
         if force_poll || bus.poll_due() {
             force_poll = false;
-            if let Some(request) = bus.pending_interrupt() {
+            let pending = bus.pending_interrupt();
+            // Tell the engine which request is held back, so that an SR change (RTE, MOVE to
+            // SR) that unmasks it ends the slice there.
+            tier.set_irq_level(pending.filter(|r| r.level <= mask).map_or(0, |r| u32::from(r.level)));
+            if let Some(request) = pending {
                 if request.level > mask {
                     if let Err(error) = cpu.take_interrupt(bus, request.level, request.vector) {
                         break RunStop::Error(error);
@@ -397,7 +389,8 @@ fn run_with(
                 eprintln!("unicorn tier: bus error {error:?} at {address:#010x}");
                 break RunStop::Error(CpuError::Bus(error));
             }
-            if tier.shared.intr.is_none() && status == 0 {
+            // At the budget the pending TRAP / rejected opcode stays unexecuted for the next run.
+            if (tier.shared.intr.is_none() && status == 0) || done >= limit {
                 continue;
             }
         }
@@ -425,6 +418,7 @@ fn run_with(
             Err(error) => break RunStop::Error(error),
         }
     };
+    if std::env::var_os("DT2_UNICORN_TRACE").is_some() { eprintln!("run_with end: limit={limit} done={done} instructions={instructions} count={}", bus.current_instruction_count); }
     bus.end_run();
     RunReport {
         instructions,
