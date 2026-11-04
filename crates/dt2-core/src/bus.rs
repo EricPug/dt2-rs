@@ -120,6 +120,14 @@ pub trait Bus {
         Vec::new()
     }
 
+    /// Starts recording the address ranges this bus's host RAM is written through `write*`.
+    /// An engine that caches translated guest code needs them: its own stores invalidate that
+    /// cache, but writes made here (DMA, the Rust fallback, loads) bypass it.
+    fn track_host_writes(&mut self) {}
+
+    /// Drains the ranges (start, end exclusive) recorded since the last call.
+    fn take_host_writes(&mut self, _out: &mut Vec<(u32, u32)>) {}
+
     /// Retires `n` instructions executed by an external engine (the batched `quiet_retire`).
     fn retire_batch(&mut self, _n: usize) {}
 
@@ -154,12 +162,44 @@ pub trait Bus {
     fn interrupt_taken(&mut self, _level: u8, _vector: u8) {}
 }
 
+/// Coalesced record of written address ranges; inert until `enable` is called.
+#[derive(Clone, Default)]
+pub struct WriteLog {
+    on: bool,
+    ranges: Vec<(u32, u32)>,
+}
+
+impl WriteLog {
+    pub fn enable(&mut self) {
+        self.on = true;
+    }
+
+    #[inline]
+    pub fn note(&mut self, address: u32, bytes: u32) {
+        if self.on {
+            self.note_slow(address, address.wrapping_add(bytes));
+        }
+    }
+
+    fn note_slow(&mut self, start: u32, end: u32) {
+        match self.ranges.last_mut() {
+            Some(last) if start >= last.0 && start <= last.1 => last.1 = last.1.max(end),
+            _ => self.ranges.push((start, end)),
+        }
+    }
+
+    pub fn drain(&mut self, out: &mut Vec<(u32, u32)>) {
+        out.append(&mut self.ranges);
+    }
+}
+
 /// One flat RAM block, for tests and tools.
 #[derive(Clone)]
 pub struct FlatRam {
     base: u32,
     data: Vec<u8>,
     code: CodeMap,
+    writes: WriteLog,
 }
 
 impl FlatRam {
@@ -167,6 +207,7 @@ impl FlatRam {
         Self {
             base,
             data: vec![0; size],
+            writes: WriteLog::default(),
             code: {
                 let mut code = CodeMap::default();
                 code.enable(base, size as u32);
@@ -177,6 +218,7 @@ impl FlatRam {
 
     pub fn load(&mut self, addr: u32, bytes: &[u8]) {
         self.code.flush();
+        self.writes.note(addr, bytes.len() as u32);
         let o = (addr - self.base) as usize;
         self.data[o..o + bytes.len()].copy_from_slice(bytes);
     }
@@ -209,20 +251,29 @@ impl Bus for FlatRam {
     fn write8(&mut self, a: u32, v: u8) -> Result<(), BusError> {
         let o = self.range(a, 1, true)?;
         self.code.note_write(a, 1);
+        self.writes.note(a, 1);
         self.data[o] = v;
         Ok(())
     }
     fn write16(&mut self, a: u32, v: u16) -> Result<(), BusError> {
         let o = self.range(a, 2, true)?;
         self.code.note_write(a, 2);
+        self.writes.note(a, 2);
         self.data[o..o + 2].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
     fn write32(&mut self, a: u32, v: u32) -> Result<(), BusError> {
         let o = self.range(a, 4, true)?;
         self.code.note_write(a, 4);
+        self.writes.note(a, 4);
         self.data[o..o + 4].copy_from_slice(&v.to_be_bytes());
         Ok(())
+    }
+    fn track_host_writes(&mut self) {
+        self.writes.enable();
+    }
+    fn take_host_writes(&mut self, out: &mut Vec<(u32, u32)>) {
+        self.writes.drain(out);
     }
     fn code_epoch(&self) -> u32 {
         self.code.epoch()
@@ -236,6 +287,7 @@ impl Bus for FlatRam {
 pub struct Mcf5441xSram {
     data: Vec<u8>,
     sbf_reset_alias: bool,
+    writes: WriteLog,
 }
 
 impl Mcf5441xSram {
@@ -247,6 +299,7 @@ impl Mcf5441xSram {
         Self {
             data: vec![0; Self::SIZE],
             sbf_reset_alias: false,
+            writes: WriteLog::default(),
         }
     }
 
@@ -280,6 +333,12 @@ impl Bus for Mcf5441xSram {
     fn host_memory(&mut self) -> Vec<(u32, *mut u8, usize)> {
         vec![(Self::BASE, self.data.as_mut_ptr(), self.data.len())]
     }
+    fn track_host_writes(&mut self) {
+        self.writes.enable();
+    }
+    fn take_host_writes(&mut self, out: &mut Vec<(u32, u32)>) {
+        self.writes.drain(out);
+    }
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         Ok(self.data[self.offset(address, false)?])
     }
@@ -302,6 +361,8 @@ impl Bus for Mcf5441xSram {
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         let offset = self.offset(address, true)?;
+        // Recorded at the primary window, which is where an engine maps the host memory.
+        self.writes.note(Self::BASE + offset as u32, 1);
         self.data[offset] = value;
         Ok(())
     }
