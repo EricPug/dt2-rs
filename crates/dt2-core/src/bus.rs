@@ -95,6 +95,9 @@ pub trait Bus {
         0
     }
 
+    /// Called when `run` returns, so a bus that batches per-instruction work can settle it.
+    fn end_run(&mut self) {}
+
     /// False when nothing since the last `pending_interrupt` call can have changed which
     /// interrupts are pending, so the CPU may skip polling. The CPU still polls after a
     /// change to the interrupt mask.
