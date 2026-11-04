@@ -876,3 +876,7 @@ Baseline ~10.3M instr/s on the panel snapshot (tpi=16).
 - A 40M-instruction run with encoder traffic produced a byte-identical UART8 TX stream and `.times` file before and after.
 - gdb line sampling is flat: `step_with_loop_budget` ~38%, `run_with_interrupt` ~14%, ProbeBus helpers ~30%. The hot firmware code (`0x40053cf2`, `0x4003f2d0`) is generic C++ virtual-call parameter-object walking (16 × 0x6a5-byte objects, `jsr (a0)` through `$28(vtable)`), not a clean loop to hook natively.
 - Conclusion: a further ~10x needs a structural CPU change (pre-decoded instruction/block cache), not micro-tuning.
+
+## ColdFire performance design note
+
+See [coldfire-perf.md](coldfire-perf.md): bottleneck measurements, options, and the proposed decode-cache/block-cache plan (awaiting review; no code yet).
