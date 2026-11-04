@@ -938,11 +938,11 @@ fn run_binary(args: &[String]) {
     }
     let live_panel = args[6..].iter().any(|a| a == "LIVE_PANEL");
     let panel_image = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_IMAGE=")).map(str::to_owned);
-    if let Some(value) = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_DRAG_PIXELS=")) {
+    if let Some(value) = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_COUNTS_PER_DEGREE=")) {
         match value.parse::<f32>() {
-            Ok(pixels) if pixels > 0.0 => panel_ui::set_drag_pixels_per_detent(pixels),
+            Ok(pixels) if pixels > 0.0 => panel_ui::set_counts_per_degree(pixels),
             _ => {
-                eprintln!("PANEL_DRAG_PIXELS must be a positive number");
+                eprintln!("PANEL_COUNTS_PER_DEGREE must be a positive number");
                 std::process::exit(2)
             }
         }
@@ -1031,7 +1031,7 @@ fn run_binary(args: &[String]) {
             || assignment == "LIVE_WINDOW"
             || assignment == "LIVE_PANEL"
             || assignment.starts_with("PANEL_IMAGE=")
-            || assignment.starts_with("PANEL_DRAG_PIXELS=")
+            || assignment.starts_with("PANEL_COUNTS_PER_DEGREE=")
             || assignment.starts_with("LIVE_WINDOW=")
             || assignment.starts_with("LIVE_PNG=")
             || assignment.starts_with("UART8_RX_PERIODIC=")
