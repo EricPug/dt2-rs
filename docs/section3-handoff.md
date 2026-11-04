@@ -888,3 +888,5 @@ Measured on OS 1.17 from `out/panel-1p5b.snap` with `UART8_RX_PERIODIC` and the 
 ## Panel defaults from hand measurement
 
 With `PANEL_COUNTS_PER_DEGREE=30` and one full upward drag on E (maximum 120): `DTIM3_TICKS_PER_INSTRUCTION=4` reached the maximum, 8 about half, 16 about 6-7, 64 under 1. A faster UI tick means more 30-count flushes per second of wall time. `LIVE_PANEL` now defaults to 4 ticks (an explicit `DTIM3_TICKS_PER_INSTRUCTION=n` still wins) and the drag defaults to 30 counts per pixel.
+
+Revisit once audio exists: the one-30-count-message-per-slice pacing may make parameter changes audibly step-like (a fast drag becomes about 200 discrete changes per second). Judged by eye only so far.
