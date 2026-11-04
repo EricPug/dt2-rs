@@ -1705,7 +1705,12 @@ fn run_live(
         window.present(width, height, &pixels, &|id| display.led_rgb(id));
     }
     let mut done = 0usize;
+    // PANEL_PERF=1 prints where wall time goes (CPU, input, drawing) every two seconds.
+    let perf = std::env::var_os("PANEL_PERF").is_some();
+    let (mut t_cpu, mut t_in, mut t_draw) = (std::time::Duration::ZERO, std::time::Duration::ZERO, std::time::Duration::ZERO);
+    let (mut perf_start, mut perf_done, mut perf_slices) = (std::time::Instant::now(), 0usize, 0u32);
     loop {
+        let t0 = std::time::Instant::now();
         let chunk = LIVE_CHUNK_INSTRUCTIONS.min(instruction_limit - done);
         let shifted = injection.map(|mut event| {
             event.instruction_count = event.instruction_count.saturating_sub(done);
@@ -1716,12 +1721,34 @@ fn run_live(
             injection = None;
         }
         done += report.instructions + report.fast_forwarded_instructions;
+        let t1 = std::time::Instant::now();
         for message in window.input_messages() {
             let _ = bus.deliver_uart8_rx_now(&message);
         }
+        let t2 = std::time::Instant::now();
         if let Some(display) = &bus.display {
             let (width, height, pixels) = display.render_upright(scale);
             window.present(width, height, &pixels, &|id| display.led_rgb(id));
+        }
+        if perf {
+            let t3 = std::time::Instant::now();
+            t_cpu += t1 - t0;
+            t_in += t2 - t1;
+            t_draw += t3 - t2;
+            perf_slices += 1;
+            if t3 - perf_start >= std::time::Duration::from_secs(2) {
+                let wall = (t3 - perf_start).as_secs_f64();
+                eprintln!(
+                    "PANEL_PERF: {:.1} M instr/s, {:.1} slices/s, cpu {:.0}% input {:.0}% draw {:.0}%",
+                    (done - perf_done) as f64 / wall / 1e6,
+                    f64::from(perf_slices) / wall,
+                    t_cpu.as_secs_f64() / wall * 100.0,
+                    t_in.as_secs_f64() / wall * 100.0,
+                    t_draw.as_secs_f64() / wall * 100.0
+                );
+                (t_cpu, t_in, t_draw) = Default::default();
+                (perf_start, perf_done, perf_slices) = (t3, done, 0);
+            }
         }
         let finished = report.stop != RunStop::InstructionLimit || done >= instruction_limit || !window.is_open();
         if finished {
