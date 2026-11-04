@@ -6092,6 +6092,34 @@ impl Bus for ProbeBus {
         headroom as usize
     }
 
+    fn quiet_horizon(&self) -> usize {
+        if !self.lazy_poll
+            || self.instruction_hooks
+            || self.capture_registers
+            || self.loop_detection
+            || self.stop_pc.is_some()
+            || self.irq_dirty
+        {
+            return 0;
+        }
+        match self.uart8_rx_periodic.as_ref() {
+            Some((_, _, 0, _)) => 0,
+            Some((_, _, next, _)) => next.saturating_sub(self.current_instruction_count + 1),
+            None => usize::MAX,
+        }
+    }
+
+    fn quiet_step(&mut self, pc: u32, sr: u16) {
+        self.current_pc = pc;
+        self.current_instruction_count += 1;
+        self.current_sr = sr;
+    }
+
+    fn quiet_retire(&mut self) {
+        self.poll_countdown = self.poll_countdown.saturating_sub(1);
+        self.timer_pending += 1;
+    }
+
     fn poll_due(&self) -> bool {
         !self.lazy_poll || self.irq_dirty || self.poll_countdown == 0
     }

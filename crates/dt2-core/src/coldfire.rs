@@ -1448,6 +1448,38 @@ impl Cpu {
         Ok(())
     }
 
+    /// Runs up to `room` instructions with only the bus's quiet bookkeeping. Equivalent to the
+    /// main loop's per-instruction path whenever `Bus::quiet_horizon` allowed it; returns the
+    /// retired count and the error of the instruction that failed, if any.
+    fn run_quiet<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        room: usize,
+        force_poll: &mut bool,
+    ) -> (usize, Option<CpuError>) {
+        let mut done = 0;
+        while done < room {
+            let pc0 = self.pc;
+            bus.quiet_step(pc0, self.sr);
+            self.idle_branch_pc = None;
+            self.fast_forwarded_in_step = 0;
+            let mask = self.sr & 0x0700;
+            if let Err(error) = self.step_cached(bus, pc0, None) {
+                return (done, Some(error));
+            }
+            bus.quiet_retire();
+            done += 1;
+            if self.sr & 0x0700 != mask {
+                *force_poll = true;
+                break;
+            }
+            if self.idle_branch_pc.is_some() || bus.poll_due() {
+                break;
+            }
+        }
+        (done, None)
+    }
+
     pub fn run<B: Bus>(&mut self, bus: &mut B, instruction_limit: usize) -> RunReport {
         self.run_with_interrupt(bus, instruction_limit, None)
     }
@@ -1518,6 +1550,26 @@ impl Cpu {
                 fast_forwarded_instructions += skipped;
                 if budget_used >= instruction_limit {
                     break RunStop::InstructionLimit;
+                }
+            }
+            let mut room = if self.icache.is_some() { bus.quiet_horizon() } else { 0 };
+            if room > 1 {
+                room = room.min(instruction_limit - budget_used);
+                if let Some(event) = injection {
+                    room = room.min(event.instruction_count.saturating_sub(budget_used));
+                }
+            }
+            if room > 1 {
+                let (done, failure) = self.run_quiet(bus, room, &mut force_poll);
+                instructions += done;
+                budget_used += done;
+                match failure {
+                    None => continue,
+                    Some(CpuError::Halt { pc }) => {
+                        instructions += 1;
+                        break RunStop::Halt { pc };
+                    }
+                    Some(error) => break RunStop::Error(error),
                 }
             }
             let logical_instruction_count = budget_used + 1;
@@ -1631,6 +1683,43 @@ mod tests {
         let (cached, plain, hits) = cached_and_uncached(&[0x7003, 0x5380, 0x66FC, 0x4E71], &[7], None);
         assert!(hits > 0);
         assert_eq!((cached.d, cached.pc, cached.sr), (plain.d, plain.pc, plain.sr));
+    }
+
+    /// `FlatRam` that opts into the quiet batch loop and counts its bookkeeping calls.
+    struct QuietRam {
+        ram: FlatRam,
+        steps: usize,
+        retired: usize,
+    }
+
+    impl Bus for QuietRam {
+        fn read8(&mut self, a: u32) -> Result<u8, crate::bus::BusError> { self.ram.read8(a) }
+        fn read16(&mut self, a: u32) -> Result<u16, crate::bus::BusError> { self.ram.read16(a) }
+        fn read32(&mut self, a: u32) -> Result<u32, crate::bus::BusError> { self.ram.read32(a) }
+        fn write8(&mut self, a: u32, v: u8) -> Result<(), crate::bus::BusError> { self.ram.write8(a, v) }
+        fn write16(&mut self, a: u32, v: u16) -> Result<(), crate::bus::BusError> { self.ram.write16(a, v) }
+        fn write32(&mut self, a: u32, v: u32) -> Result<(), crate::bus::BusError> { self.ram.write32(a, v) }
+        fn code_epoch(&self) -> u32 { self.ram.code_epoch() }
+        fn cacheable_code(&mut self, pc: u32, bytes: u32) -> bool { self.ram.cacheable_code(pc, bytes) }
+        fn quiet_horizon(&self) -> usize { usize::MAX }
+        fn poll_due(&self) -> bool { false }
+        fn quiet_step(&mut self, _pc: u32, _sr: u16) { self.steps += 1; }
+        fn quiet_retire(&mut self) { self.retired += 1; }
+    }
+
+    #[test]
+    fn quiet_batch_matches_the_normal_loop() {
+        // Counts down d0 with a memory write each pass, so the loop also stores to RAM.
+        let code = [0x7000 | 25, 0x2080, 0x5380, 0x66FA, 0x4E71];
+        let (mut normal, mut ram_a) = machine(&code);
+        let (mut quiet, ram_b) = machine(&code);
+        let mut qram = QuietRam { ram: ram_b, steps: 0, retired: 0 };
+        let a = normal.run(&mut ram_a, 60);
+        let b = quiet.run(&mut qram, 60);
+        assert_eq!((format!("{:?}", a.stop), a.instructions), (format!("{:?}", b.stop), b.instructions));
+        assert_eq!((normal.d, normal.a, normal.pc, normal.sr), (quiet.d, quiet.a, quiet.pc, quiet.sr));
+        assert_eq!(qram.steps, 60);
+        assert_eq!(qram.retired, 60);
     }
 
     #[test]

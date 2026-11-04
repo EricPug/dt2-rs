@@ -249,3 +249,11 @@ Plan (each step measured, gates green, reference `execute` kept as fallback):
 - Tried and reverted (no measurable gain, gate green): hoisting the hot group-4 arms (RTS/NOP/JSR/JMP/LEA/TST/CLR) to the head of the first-match chain (+1%, hash unchanged); fat LTO + `panic=abort` (-6%); `target-cpu=native` (-8%).
 - Profile now: `execute` ~33%, run-loop wrapper (hooks, cache lookup, Result plumbing) ~30%, bus accesses ~15%. Effective cost is ~36 ns per executed instruction against 15 ns on `FlatRam`, so the ~20 ns gap is the `ProbeBus` path plus hooks.
 - Status: 12.1 -> ~27M instr/s on the gate workload (5.3M of the 40M are idle-skipped). Target of 50-65M not yet met; the remaining cheap wins are exhausted. Next step needs a structural change (handler tier / quiet batch loop with a single bus fast path), gated by the sweep hash.
+
+### Slice 7 status: quiet batch loop
+
+- Ablation first: stripping `begin_instruction`/`report_instruction_state` to their bare stores was worth ~12% (26.3 -> 29.5M, same workload without `UART8_RX_PERIODIC`), so the ceiling for this slice was ~12%.
+- `Bus::quiet_horizon/quiet_step/quiet_retire` (defaults: horizon 0 = off) and `Cpu::run_quiet`: with the decode cache on and a bus that allows it, the CPU runs a batch calling only the minimal bookkeeping. The batch ends on `poll_due()`, an interrupt-mask change, a branch-to-self, an error, the instruction limit or a not-yet-due injection. `ProbeBus` allows it only with `lazy_poll`, no instruction hooks, no register capture, no loop detection, no stop PC, no pending `irq_dirty`; the horizon is also bounded by the next `UART8_RX_PERIODIC` injection.
+- Result: ~27 -> 29.3-30.8M instr/s. Gate green with the cache on and off (off = old path, 22.7M); `opsweep` hash unchanged; new core test `quiet_batch_matches_the_normal_loop`.
+- Remaining budget on the gate workload (est.): execute ~35%, bus ~20%, icache lookup + dispatch ~15%, hooks inside `execute` (`report_branch`/`report_tst` Option writes) ~5%.
+- Next: pre-decoded handler tier (hot families with `opsweep` as differential gate) or the patched-Unicorn evaluation; neither is a small change, so this is the point to re-decide.
