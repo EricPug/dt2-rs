@@ -755,3 +755,16 @@ Hit counts in the snapshot (100M instructions each):
 The panel stream is the 64x128 portrait framebuffer already implemented in `crates/dt2-core/src/display.rs` and `tools/render-uart-frames.py`: tag `0x10|n` is the horizontal 8-pixel band (`x0 = n*8`), the second byte is the row `y0`, and the 8 data bytes are 8 rows with the most significant bit leftmost. My first attempt in this round assumed a landscape page/column layout, which scrambled the image (hourglass-shaped knobs, title at the bottom). Do not reuse it.
 
 Rendering the 1.1B capture with the repo tool and rotating the portrait frame 90 degrees counter-clockwise gives the expected Digitakt screen: `A01`, `WAXSAFETY`, a menu glyph and `102.0` in the top bar, then the SAMPLE page (`SMP 1`, `TUNE`, `PLAY`, `SAMP` and the `LEV`, `STRT`, `LEN`, `LOOP`, `LEV` knob row). The firmware UI therefore comes up and draws correctly; the open problem is only the missing redraw after input.
+
+## Redraw gap: `0x400a1b86`, `0x4003117c`, and the missing DTIM3 UI tick
+
+- `0x400a1b86` is the tail `jmp 0x4003117c` of thunk `0x400a1b7c`. The thunk is never called directly. It is stored as an immediate (`0x400a234a`) in a std::function-style callback, and likewise `0x400311c4` at `0x40031830`.
+- `0x4003117c(ctx)` reads bus `+0x21` (`0x4011bc76`). If set, it runs the layout step `0x4011bd1e` and `0x400309b6`. It never calls render `0x4011bc96` or present `0x40032992`. Render is only called from `0x40032b3a` and present from `0x4003398a`, `0x4011c070` and `0x40123a12`.
+- Bus `+0x20` (dirty): the only reader is `0x4011bc60`, called from `0x40032ad4` inside present. Bus `+0x21` is read only at `0x4003118c`.
+- Callbacks are registered by `0x40138292(host, n, fn)` (period 30/n, about 71 registrations by 1.5B). Callbacks on host `0x44f5fe60` include `0x4003117c`. They are fired by receiver message type 5 (handler `0x40033df4`, via `0x4013813c` and `0x401380b6`).
+- Type 5 is posted by the ISR `0x400c0b40` (DTIM3 event clear `0xFC07C003`, then queue put of constant `0x40241370`, first byte 5).
+- The installer at `0x400c0b76` writes vector 99 (`0x4000018c`) = `0x400c0b40`. It programs DTIM3 with TRR=`0x43238`, TMR=`0x1d` at `0xFC07C000`, and sets INTC1 `0xFC048063`=2 and `0xFC04801D`=0x23. Vector 99 holds `0x400c0b40` in the live table.
+- Hit counts: `0x4003117c`, `0x400311c4`, `0x4003128a` and the ISR `0x400c0b40` all have 0 hits, both from reset (1.5B) and from the snapshot (100M).
+- Root cause: the emulator has no DTIM3 model (only DTIM1, `crates/dt2-core/src/dtim1.rs`). The type-5 tick never arrives. No callbacks run, the bus `+0x21` layout step is skipped, and there is no redraw.
+- Not yet verified: the INTC1 source and level for DTIM3, and the singleton list at `0x44f371c8` containing host `0x44f5fe60`. The "with encoder traffic" run was not repeated, because the ISR cannot fire without a timer.
+- Suggested next step: add a DTIM3 model, or a `DTIM3_BOOTSTRAP` diagnostic like DTIM1, that raises vector 99.
