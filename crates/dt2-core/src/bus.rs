@@ -145,6 +145,7 @@ pub trait Bus {
 }
 
 /// One flat RAM block, for tests and tools.
+#[derive(Clone)]
 pub struct FlatRam {
     base: u32,
     data: Vec<u8>,

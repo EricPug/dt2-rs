@@ -10,6 +10,10 @@
 //! epoch they were filled in, so one epoch bump invalidates the whole cache in O(1).
 
 pub const MAX_WORDS: usize = 6;
+/// No handler: run the reference `execute`.
+pub const HANDLER_NONE: u8 = 0;
+/// MOVE.L / MOVEA.L with register, indirect, post/pre-increment or d16(An) operands.
+pub const HANDLER_MOVE_L: u8 = 1;
 const PAGE_SHIFT: u32 = 8;
 const ENTRIES: usize = 1 << 16;
 
@@ -18,6 +22,8 @@ pub struct Entry {
     pub pc: u32,
     pub epoch: u32,
     pub len: u8,
+    /// Pre-classified handler (`HANDLER_*`), chosen once when the entry is filled.
+    pub handler: u8,
     pub words: [u16; MAX_WORDS],
 }
 
@@ -27,6 +33,7 @@ impl Default for Entry {
             pc: 0,
             epoch: 0,
             len: 0,
+            handler: 0,
             words: [0; MAX_WORDS],
         }
     }
@@ -53,11 +60,12 @@ impl ICache {
         (e.pc == pc && e.epoch == epoch && e.len != 0).then_some(e)
     }
 
-    pub fn insert(&mut self, pc: u32, epoch: u32, words: &[u16]) {
+    pub fn insert(&mut self, pc: u32, epoch: u32, handler: u8, words: &[u16]) {
         let mut entry = Entry {
             pc,
             epoch,
             len: words.len() as u8,
+            handler,
             words: [0; MAX_WORDS],
         };
         entry.words[..words.len()].copy_from_slice(words);
