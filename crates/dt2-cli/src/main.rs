@@ -938,6 +938,15 @@ fn run_binary(args: &[String]) {
     }
     let live_panel = args[6..].iter().any(|a| a == "LIVE_PANEL");
     let panel_image = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_IMAGE=")).map(str::to_owned);
+    if let Some(value) = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_DRAG_PIXELS=")) {
+        match value.parse::<f32>() {
+            Ok(pixels) if pixels > 0.0 => panel_ui::set_drag_pixels_per_detent(pixels),
+            _ => {
+                eprintln!("PANEL_DRAG_PIXELS must be a positive number");
+                std::process::exit(2)
+            }
+        }
+    }
     let live_window = args[6..].iter().find_map(|a| {
         if a == "LIVE_WINDOW" || a == "LIVE_PANEL" {
             Some(4)
@@ -1022,6 +1031,7 @@ fn run_binary(args: &[String]) {
             || assignment == "LIVE_WINDOW"
             || assignment == "LIVE_PANEL"
             || assignment.starts_with("PANEL_IMAGE=")
+            || assignment.starts_with("PANEL_DRAG_PIXELS=")
             || assignment.starts_with("LIVE_WINDOW=")
             || assignment.starts_with("LIVE_PNG=")
             || assignment.starts_with("UART8_RX_PERIODIC=")
@@ -1909,7 +1919,9 @@ mod live_window {
             self.1.begin_slice();
             if let Some(ui) = self.2.as_mut() {
                 use super::panel_ui::Action;
-                let position = self.0.get_mouse_pos(minifb::MouseMode::Discard);
+                // While dragging, keep reporting positions outside the window so the turn continues.
+                let dragging = self.0.get_mouse_down(minifb::MouseButton::Left);
+                let position = self.0.get_mouse_pos(if dragging { minifb::MouseMode::Pass } else { minifb::MouseMode::Discard });
                 let wheel = self.0.get_scroll_wheel().map_or(0.0, |(_, y)| y);
                 let mut actions = ui.handle_mouse(
                     position,
