@@ -953,3 +953,30 @@ Root cause of the +DRIVE halt (resolved): the ekFS was never mounted. `std::stri
 Note `ESDHC_FILE=` and `STOP_PC=` are `dt2-cli` arguments, not environment variables. With the card model above and the stamped card, the firmware runs "VERIFYING FILE
 SYSTEM...", reports "FILE SYSTEM OK", and +DRIVE opens a browser listing `Factory` (locked, written by the factory install) and `incoming`. The Rust fallback gained EXTB.L
 (`0x49c0`), which the mount path executes.
+
+## Sample load and SSI TX diagnosis
+
+From `incoming`, YES selects a sample; RIGHT opens its action menu. Choose `LOAD TO TRK 01` and
+press YES. Use a short `GAP` for arrow navigation: `GAP=6000000` selects one item, while a much
+larger interval can repeat the arrow and move past the intended action. Loading `008 kick verb`
+updated Track 01's sample tile to `C44`. The eSDHC reads were CMD18 at sectors `0x5f01c0` and
+`0x5f0200` (64 sectors each). RAM at `0x40605770` begins `01 0e 01 10 01 0a`; this matches the
+converted `008 kick verb.wav` payload at file offset `0x8000`, the start of the second read, rather
+than the start of the sample file.
+
+`SSI_TX_RAW=<path>` is an opt-in `run-bin` argument that records source bytes only for eDMA channel
+50 transfers to SSI TX data register `0xfc0bc000`. It emits raw big-endian source-buffer bytes,
+without assuming a sample rate or audio container. Reproduce the trig-1 + PLAY capture from the
+post-load snapshot with:
+
+```sh
+GAP=6000000 \
+EXTRA='ESDHC_FILE=out/run-card.img SSI_TX_RAW=out/ssi-tx.raw' \
+tools/panel-keys.sh out/shots/main-after-load.snap out/shots/ssi-tx 120000000 2301 2208
+```
+
+In the captured run, channel 50 completed 1,199 DMA blocks (2,455,552 bytes) from `0x4fe58900`,
+but every captured byte was zero. A dump of that source buffer was also zero, while the loaded
+sample payload remained present at `0x40605770`. Thus the card/sample-load path is working, but
+the firmware is not filling its SSI TX buffer during this trig + PLAY test; no playable audio or
+WAV-format claim is established yet. `SSI_TX_RAW` is diagnostic-only and disabled unless requested.
