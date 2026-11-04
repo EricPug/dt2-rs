@@ -1040,6 +1040,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("STOP_PC=")
             || assignment.starts_with("WATCH_WRITE=")
             || assignment.starts_with("TRACE_REGS=")
+            || assignment.starts_with("STATE_HASH=")
             || assignment.starts_with("TRACE_TAIL=")
             || assignment.starts_with("TRACE_A1=")
             || assignment.starts_with("TRACE_A0_RANGE=")
@@ -1300,8 +1301,11 @@ fn run_binary(args: &[String]) {
     );
     println!("{fast_path_status}");
     let pc_sample = args[6..].iter().find_map(|a| a.strip_prefix("PC_SAMPLE="));
+    let state_hash = args[6..].iter().find_map(|a| a.strip_prefix("STATE_HASH="));
     let report = if let Some(spec) = pc_sample {
         run_pc_sampled(&mut cpu, &mut bus, instruction_limit, spec)
+    } else if let Some(spec) = state_hash {
+        run_state_hashed(&mut cpu, &mut bus, instruction_limit, spec, ram_base, ram_size as u32)
     } else if let Some(scale) = live_window {
         run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale, live_panel.then_some(panel_image))
     } else {
@@ -1717,6 +1721,52 @@ fn run_pc_sampled(cpu: &mut Cpu, bus: &mut ProbeBus, instruction_limit: usize, s
     }
     std::fs::write(path, out).unwrap_or_else(|error| eprintln!("cannot write PC_SAMPLE {path}: {error}"));
     report.instructions = done;
+    report
+}
+
+/// `STATE_HASH=n1,n2,...` prints an FNV-1a hash of the full snapshot (CPU, RAM, devices) after each instruction count
+/// (counted from this run's start). It is the regression gate for CPU-core changes: equal hashes mean equal machine state.
+fn run_state_hashed(
+    cpu: &mut Cpu,
+    bus: &mut ProbeBus,
+    instruction_limit: usize,
+    spec: &str,
+    ram_base: u32,
+    ram_size: u32,
+) -> dt2_core::coldfire::RunReport {
+    let mut points: Vec<usize> = spec
+        .split(',')
+        .map(|n| {
+            n.parse().unwrap_or_else(|_| {
+                eprintln!("STATE_HASH expects a comma-separated list of instruction counts");
+                std::process::exit(2)
+            })
+        })
+        .collect();
+    points.sort_unstable();
+    points.push(instruction_limit);
+    let mut done = 0usize;
+    let mut report = cpu.run_with_interrupt(bus, 0, None);
+    for point in points {
+        let target = point.min(instruction_limit);
+        if target > done {
+            report = cpu.run_with_interrupt(bus, target - done, None);
+            done += report.instructions + report.fast_forwarded_instructions;
+        }
+        let snapshot = bus.save_snapshot(cpu, ram_base, ram_size).unwrap_or_else(|error| {
+            eprintln!("STATE_HASH: cannot snapshot: {error}");
+            std::process::exit(2)
+        });
+        let hash = snapshot
+            .iter()
+            .fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3));
+        println!("STATE_HASH {done} {hash:016x}");
+        if report.stop != RunStop::InstructionLimit {
+            break;
+        }
+    }
+    report.instructions = done;
+    report.fast_forwarded_instructions = 0;
     report
 }
 

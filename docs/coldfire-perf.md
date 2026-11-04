@@ -176,3 +176,10 @@ End-state structure for a later reader:
 - `icache.rs`: `DecodeCache`, `Block`, `CodeMap`. Invalidation rules and event horizon documented in the module header.
 - `coldfire.rs`: registers, exceptions, and a short run loop (`horizon` → run block or single-step → poll if `irq_dirty`).
 - The diagnostic features sit behind the same `execute`, selected by the horizon, not by separate paths.
+
+## Status log
+
+### Slice 0 — gate tooling (done)
+- `STATE_HASH=n1,n2,...` (dt2-cli) prints an FNV-1a64 hash of the full snapshot bytes (CPU, RAM, devices) at each instruction count.
+- `tools/perf-gate.sh [binary]` checks the TX stream and `.times` sha1s plus state hashes at 1M/8M/20M/40M against golden values, and prints throughput. Needs `out/panel-1p5b.snap`.
+- Baseline (`b86c3d7` + STATE_HASH): GATE PASS, 12.1M instr/s. Hash runs are deterministic across runs and chunking does not change the TX stream.
