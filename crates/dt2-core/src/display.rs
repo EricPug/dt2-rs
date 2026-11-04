@@ -10,6 +10,9 @@ pub struct Display {
     needed: usize,
     pub updates: u64,
     pub unknown_bytes: u64,
+    palette: [[u8; 3]; 256],
+    leds: [u8; 64],
+    leds_seen: bool,
 }
 
 impl Display {
@@ -20,7 +23,45 @@ impl Display {
             needed: 0,
             updates: 0,
             unknown_bytes: 0,
+            palette: [[0; 3]; 256],
+            leds: [0; 64],
+            leds_seen: false,
         }
+    }
+
+    pub fn has_led_state(&self) -> bool {
+        self.leds_seen
+    }
+
+    /// Colour (0x00RRGGBB) of an LED, or `None` when it is unset or shows the dim idle palette entries.
+    pub fn led_rgb(&self, id: u8) -> Option<u32> {
+        let [r, g, b] = self.palette[usize::from(self.leds[usize::from(id & 63)])];
+        // Palette channels are 6-bit; entry 1 (4,4,4) is the unlit glow.
+        if r.max(g).max(b) <= 8 {
+            return None;
+        }
+        let scale = |c: u8| u32::from(c.min(63)) * 255 / 63;
+        Some(scale(r) << 16 | scale(g) << 8 | scale(b))
+    }
+
+    pub fn save_led_state(&self, w: &mut crate::snapshot::Writer) {
+        let flat: Vec<u8> = self.palette.iter().flatten().copied().collect();
+        w.bytes(&flat);
+        w.bytes(&self.leds);
+    }
+
+    pub fn load_led_state(&mut self, r: &mut crate::snapshot::Reader) -> Result<(), String> {
+        let flat = r.bytes()?;
+        let leds = r.bytes()?;
+        if flat.len() != 768 || leds.len() != 64 {
+            return Err("snapshot LED state size mismatch".into());
+        }
+        for (entry, chunk) in self.palette.iter_mut().zip(flat.chunks(3)) {
+            entry.copy_from_slice(chunk);
+        }
+        self.leds.copy_from_slice(leds);
+        self.leds_seen = true;
+        Ok(())
     }
 
     pub fn feed(&mut self, byte: u8) {
@@ -45,6 +86,16 @@ impl Display {
         self.needed = 0;
         match self.pending[0] {
             0xB8 => self.updates += 1,
+            0xB5 => {
+                // `b5 index r g b`
+                self.palette[usize::from(self.pending[1])] = [self.pending[2], self.pending[3], self.pending[4]];
+                self.leds_seen = true;
+            }
+            0xB9 => {
+                // `b9 led palette_index`
+                self.leds[usize::from(self.pending[1] & 63)] = self.pending[2];
+                self.leds_seen = true;
+            }
             tag @ 0x10..=0x17 => {
                 let x0 = usize::from(tag & 7) * 8;
                 let y0 = usize::from(self.pending[1]);
@@ -188,6 +239,17 @@ mod tests {
         assert_eq!(display.unknown_bytes, 0);
         display.feed(0xFF);
         assert_eq!(display.unknown_bytes, 1);
+    }
+
+    #[test]
+    fn led_records_update_palette_and_led_colours() {
+        let mut display = Display::new();
+        for byte in [0xB5, 0x01, 4, 4, 4, 0xB5, 0x71, 0x3F, 0x3F, 0x3F, 0xB9, 0x14, 0x71, 0xB9, 0x15, 0x01] {
+            display.feed(byte);
+        }
+        assert_eq!(display.led_rgb(0x14), Some(0x00FF_FFFF));
+        assert_eq!(display.led_rgb(0x15), None);
+        assert_eq!(display.unknown_bytes, 0);
     }
 
     #[test]
