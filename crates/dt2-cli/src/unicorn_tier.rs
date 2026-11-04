@@ -41,6 +41,8 @@ extern "C" {
     fn uc_digikit_stop_at_boundary(uc: Uc);
     fn uc_digikit_emac_set(uc: Uc, macc: *const u64, macsr: u32, mask: u32);
     fn uc_digikit_emac_get(uc: Uc, macc: *mut u64, macsr: *mut u32, mask: *mut u32);
+    fn uc_digikit_vbr_get(uc: Uc) -> u32;
+    fn uc_digikit_vbr_set(uc: Uc, vbr: u32);
     fn uc_digikit_counter(uc: Uc) -> u64;
     fn uc_digikit_count_limit(uc: Uc) -> u64;
 }
@@ -234,6 +236,7 @@ impl UnicornTier {
                 uc_reg_write(self.uc, REG_D0 + i as i32, &cpu.d[i] as *const u32 as *const c_void);
             }
             uc_reg_write(self.uc, REG_PC, &cpu.pc as *const u32 as *const c_void);
+            uc_digikit_vbr_set(self.uc, cpu.vbr);
         }
     }
 
@@ -261,6 +264,7 @@ impl UnicornTier {
                 uc_reg_read(self.uc, REG_D0 + i as i32, &mut cpu.d[i] as *mut u32 as *mut c_void);
             }
             uc_reg_read(self.uc, REG_PC, &mut cpu.pc as *mut u32 as *mut c_void);
+            cpu.vbr = uc_digikit_vbr_get(self.uc);
         }
     }
 

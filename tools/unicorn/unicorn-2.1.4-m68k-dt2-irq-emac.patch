@@ -65,7 +65,7 @@
  void HELPER(set_sr)(CPUM68KState *env, uint32_t val)
 --- a/qemu/target/m68k/unicorn.c	2026-11-04 14:17:31.398147740 -0500
 +++ b/qemu/target/m68k/unicorn.c
-@@ -266,3 +266,33 @@
+@@ -266,3 +266,47 @@
      uc->cpu_context_size = offsetof(CPUM68KState, end_reset_fields);
      uc_common_init(uc);
  }
@@ -99,3 +99,41 @@
 +    env->macsr = macsr;
 +    env->mac_mask = mask;
 +}
++
++/* digikit: the guest's MOVEC to VBR runs natively; the host reads it back for
++ * its own exception handling (TRAP, rejected opcodes) and can restore it. */
++UNICORN_EXPORT
++uint32_t uc_digikit_vbr_get(uc_engine *uc)
++{
++    return M68K_CPU(uc->cpu)->env.vbr;
++}
++
++UNICORN_EXPORT
++void uc_digikit_vbr_set(uc_engine *uc, uint32_t vbr)
++{
++    M68K_CPU(uc->cpu)->env.vbr = vbr;
++}
+--- a/qemu/target/m68k/translate.c
++++ b/qemu/target/m68k/translate.c
+@@ -4868,6 +4868,21 @@
+ 
+     ext = read_im16(env, s);
+ 
++    /* digikit: control registers the helper does not model (RAMBAR, RGPIOBAR,
++     * ...) are left to the host as an illegal instruction instead of aborting. */
++    switch (ext & 0xfff) {
++    case M68K_CR_CACR:
++    case M68K_CR_ACR0:
++    case M68K_CR_ACR1:
++    case M68K_CR_ACR2:
++    case M68K_CR_ACR3:
++    case M68K_CR_VBR:
++        break;
++    default:
++        gen_exception(s, s->base.pc_next, EXCP_ILLEGAL);
++        return;
++    }
++
+     if (ext & 0x8000) {
+         reg = AREG(ext, 12);
+     } else {
