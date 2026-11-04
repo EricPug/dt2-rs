@@ -658,3 +658,42 @@ In the snapshot the list holds one listener at `0x450cb250`, whose callback is `
    - Its key predicate is the default `return 0`.
    - It is never invoked, but that is the intended fallback behaviour. The "UI start" is therefore not a missing dispatcher.
 6. **Open:** the screen content is produced by something else (the per-frame draw or update path of the views, or the page-mode code that sets the LED and screen). The next candidate is who triggers a view repaint or update after `0x400311d0`, since the 8 views already exist and subscribe, and the unidentified listeners `0x450a9d50` / `0x450b0050`.
+
+## Listeners `0x450a9d50` / `0x450b0050`, and the draw / present path
+
+### The two listeners
+- `0x450a9d50` is a **SamplerLedView**. Primary vtable is `0x401ed94c`, class name at `0x4022945a`, sub-vtables at `0x401ed99c` and `0x401ed9b0`.
+  - Slot `+8` = `0x40016b3a` is the key handler (YES `0x0a` and NO `0x0c`, via `0x40114984`).
+  - Slot `+0x44` = `0x40016c2a` is the LED update. It calls the LED setter `0x400308e0` at `0x40016c72`.
+- `0x450b0050` is a **TransportView**. Primary vtable is `0x401fa004`, class name at `0x4023e57a`, sub-vtables at `0x401fa050` and `0x401fa064`.
+  - Slot `+8` = `0x400786ae` is the key handler. It tests keys PLAY and STOP via `0x4011e150(0x13)` and `0x4011e150(0x15)`.
+- Both are passive listeners. They wait on nothing and are only called by the bus iterator. In the 1.5B boot they only get the default key handler return, and nobody claims keys.
+- Neither is on the draw path itself. The render calls their slot `+0x10` (`draw(canvas)`) only if the bus dirty flag is set.
+
+### Draw / present path
+- Bus object `0x44f5fe80` is `ctx+0x40`. It holds a circular listener list (sentinel at `+0x14`, nodes `{next, prev, listener}`).
+  - `+0x1c` is the topmost opaque view.
+  - `+0x20` is the **dirty flag**.
+  - `0x4011bc60` reads it and `0x4011bc6a` sets it. Its only caller is the tail-jump inside `0x4011b126(view)`, the generic "invalidate view" helper (about 450 call sites).
+- `0x4011bc96(bus, canvas)` is the **render**. If dirty, it clears the canvas, calls each listener's slot `+0x10` from `+0x1c` onward, and clears the dirty flag. Its only caller is `0x40032b3a`.
+- `0x40032992(ctx)` is the **UI draw and present step**. It sends `b7`, `bc`, then if dirty it runs `0x401124b6` (canvas), `0x4011bc96` (render), `jsr (a4)` = `0x40133bea` (diff send over UART8), and `0x401123e8`.
+  - Callers: `0x4003398a` (receiver startup), `0x4011c070` (tail of the bus update `0x4011bfa6`) and `0x40123a12` (screenshot).
+- `0x4011bfa6(bus)` is the **bus update**. It is called from the subscribe, unsubscribe and emit wrappers (`0x4011c1b8` etc.) and ends by calling `0x40032992`. It is not a frame tick.
+- Present is **event-driven**. There is no separate timer and no tick-driven flip. It is triggered by a bus update or by startup, and only draws when the dirty flag is set.
+
+### Runtime hits (1.5B from reset)
+| PC | hits | when |
+|---|---|---|
+| `0x4011bfa6` (bus update) | 8 | 1094.82M to 1095.52M, all from `0x4011c1bc` (subscribe of the 8 views) |
+| `0x40032992` (present step) | 9 | 8 from `0x4011c076` (same window), 1 at 1095.665M from `0x40033990` (receiver startup) |
+| `0x40133bea` (diff send) | 192 (ring-limited) | last at 1095.724M from `0x40032b42`, i.e. the `jsr (a4)` inside `0x40032992`. Earlier ones are the logo task. |
+| `0x40133c86` (clear / blank) | 2 | 822.26M from the install bar, 1091.56M from receiver startup `0x40033968` |
+
+- So the real UI **does** draw and present once, at ~1095.7M, right after the views are subscribed. After that, nothing calls the bus update or the present step.
+- In the idle snapshot, `0x4011bfa6`, `0x40032992`, `0x40133bea` and `0x40133c86` have 0 hits in 100M instructions, and `0x4000220c` has 0 hits in 60M.
+- Keys and encoder frames reach the bus but no view claims them or calls `0x4011b126`, so the dirty flag is never set again. Because no further bus update runs, nothing redraws.
+
+### Conclusion
+- The draw path works and is not gated by a flag that is still clear. The one initial present happened. After it the display is static until some view invalidates itself (`0x4011b126`) and a bus update follows.
+- The logo task `0x400d1a12` (priority 7, TCB `0x4314d558`) is the boot-logo animation task. It picks one of the scripts at `0x402a1b64`..`0x402a1ba4`, steps them with `0x400d18f0`, then blocks forever on semaphore `0x43149548`. This corrects the earlier "engine helper" note.
+- **Open:** what the 1095.7M frame actually contains, and which events (for example a real key press the views claim, or a sequencer / audio tick) are meant to invalidate views. Check the UART8 bytes sent at 1095.7M.
