@@ -880,3 +880,7 @@ Baseline ~10.3M instr/s on the panel snapshot (tpi=16).
 ## ColdFire performance design note
 
 See [coldfire-perf.md](coldfire-perf.md): bottleneck measurements, options, and the proposed decode-cache/block-cache plan (awaiting review; no code yet).
+
+## Encoder turns: the firmware applies two messages per burst
+
+Measured on OS 1.17 from `out/panel-1p5b.snap` with `UART8_RX_PERIODIC` and the Start (E) encoder, reading the value off the rendered frame: five bursts of one `3410` message gave 0.18, of two gave 0.35, and of four gave 0.35. So only the first two encoder messages of a burst take effect. A delta above 0x40 counts the same as 0x40 (`3440` and `347f` gave identical frames). The live loop delivered a whole drag in one burst, which is why `PANEL_COUNTS_PER_DEGREE=100` and `=400` felt identical. `PanelInput::take` now sends at most two messages of at most 0x40 counts per encoder per slice and carries the rest to later slices. Start saturates at 1.75 on this sample (and Tune clamped in the same snapshot), so end values from long runs say nothing about rate; compare short runs.
