@@ -18,7 +18,7 @@ use dt2_core::display;
 
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 mod panel_ui;
-#[cfg(feature = "unicorn")]
+#[cfg(dt2_unicorn)]
 mod unicorn_tier;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -1315,7 +1315,7 @@ fn run_binary(args: &[String]) {
     } else {
         run_engine(&mut cpu, &mut bus, instruction_limit, interrupt_injection)
     };
-    #[cfg(feature = "unicorn")]
+    #[cfg(dt2_unicorn)]
     unicorn_tier::print_stats();
     if let (Some(path), Some(display)) = (live_png, &bus.display) {
         let (width, height, pixels) = display.render_upright(4);
@@ -1737,9 +1737,9 @@ fn run_pc_sampled(cpu: &mut Cpu, bus: &mut ProbeBus, instruction_limit: usize, s
 /// `STATE_HASH=n1,n2,...` prints an FNV-1a hash of the full snapshot (CPU, RAM, devices) after each instruction count
 /// (counted from this run's start). It is the regression gate for CPU-core changes: equal hashes mean equal machine state.
 fn unicorn_enabled() -> bool {
-    #[cfg(feature = "unicorn")]
+    #[cfg(dt2_unicorn)]
     return unicorn_tier::enabled();
-    #[cfg(not(feature = "unicorn"))]
+    #[cfg(not(dt2_unicorn))]
     false
 }
 
@@ -1750,7 +1750,7 @@ fn run_engine(
     limit: usize,
     injection: Option<InterruptInjection>,
 ) -> dt2_core::coldfire::RunReport {
-    #[cfg(feature = "unicorn")]
+    #[cfg(dt2_unicorn)]
     if unicorn_tier::enabled() {
         return unicorn_tier::run(cpu, bus, limit, injection);
     }

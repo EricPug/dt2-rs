@@ -337,3 +337,15 @@ Caveats still open:
 - No Unicorn-state snapshot/restore beyond `store()` into `Cpu`.
 - `first_pc` in MMIO reports is wrong under Unicorn (cosmetic).
 - The patched C library is a GPL-2.0 dependency; it is built outside the repo.
+
+## Unicorn is now the default engine
+
+`crates/dt2-cli/build.rs` links the patched libunicorn when it finds one (`UNICORN_LIB_DIR`, else
+`~/.cache/dt2-unicorn/build`, the default output of `tools/unicorn/build.sh`) and sets `cfg(dt2_unicorn)`.
+Without it the build warns and produces the pure-Rust interpreter. `--features unicorn` turns a missing
+library into a build error. At run time the tier is on by default; `DT2_UNICORN=0` selects the Rust
+interpreter. The perf gate passes both ways (about 104M vs 32M instr/s).
+
+Still follow-on: RAM code-page invalidation, Unicorn snapshot/restore, and `LIVE_WINDOW`, whose
+chunk loop still calls the Rust interpreter directly. QEMU's build fails in directories with spaces,
+hence the cache-directory default.

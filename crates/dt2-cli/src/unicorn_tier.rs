@@ -4,7 +4,7 @@
 //! never leave the JIT. Every other address is an MMIO region whose callbacks call the bus.
 //! Execution is sliced to the bus's next poll event; between slices the registers are copied
 //! to the Rust `Cpu`, which delivers interrupts and executes anything Unicorn rejects.
-//! Enabled with `--features unicorn` and `DT2_UNICORN=1`; the Rust interpreter is the fallback.
+//! Built when the patched libunicorn is found and on by default (`DT2_UNICORN=0` opts out); the Rust interpreter is the fallback.
 
 use super::ProbeBus;
 use dt2_core::bus::{Bus, BusError};
@@ -296,8 +296,9 @@ thread_local! {
     static TIER: RefCell<Option<Box<UnicornTier>>> = const { RefCell::new(None) };
 }
 
+/// On by default when built; `DT2_UNICORN=0` selects the Rust interpreter.
 pub fn enabled() -> bool {
-    std::env::var_os("DT2_UNICORN").is_some()
+    std::env::var("DT2_UNICORN").map_or(true, |v| v != "0")
 }
 
 pub fn run(

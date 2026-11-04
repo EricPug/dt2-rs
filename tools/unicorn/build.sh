@@ -3,12 +3,12 @@
 #
 #   DIGIEMU_PATCHES=/path/to/digiemu/patches tools/unicorn/build.sh [build-dir]
 #
-# Prints the UNICORN_LIB_DIR to use with `cargo build --release --features window,unicorn`.
+# Default output is ~/.cache/dt2-unicorn, which `cargo build` picks up automatically.
 # UNICORN_SRC overrides the upstream clone URL (a local checkout works too).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
-DEST=${1:-/tmp/dt2-unicorn}
+DEST=${1:-${XDG_CACHE_HOME:-$HOME/.cache}/dt2-unicorn} # QEMU's build breaks on paths with spaces
 SRC=${UNICORN_SRC:-https://github.com/unicorn-engine/unicorn}
 COMMIT=8028ec436f2d9376525352dd38ed9ed6b9f6be10 # Unicorn 2.1.4
 PATCHES=${DIGIEMU_PATCHES:?set DIGIEMU_PATCHES to the digiemu patches directory}
@@ -35,4 +35,4 @@ git -C "$DEST" apply "$HERE/unicorn-2.1.4-m68k-dt2-irq-emac.patch"
 cmake -S "$DEST" -B "$DEST/build" -DCMAKE_BUILD_TYPE=Release -DUNICORN_ARCH=m68k >/dev/null
 cmake --build "$DEST/build" -j"$(nproc)" >/dev/null
 nm -D "$DEST/build/libunicorn.so" | grep -q uc_digikit_set_irq_level
-echo "UNICORN_LIB_DIR=$DEST/build"
+echo "built $DEST/build/libunicorn.so"
