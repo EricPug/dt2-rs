@@ -13,7 +13,21 @@ pub const PANEL_HEIGHT: usize = 856;
 const CROP_LEFT: f32 = 152.0;
 const CROP_TOP: f32 = 78.0;
 const GLASS: (f32, f32, f32, f32) = (335.0, 217.0, 289.0, 163.0);
-const DRAG_PIXELS_PER_DETENT: f32 = 6.0;
+const DEFAULT_DRAG_PIXELS_PER_DETENT: f32 = 3.0;
+static DRAG_PIXELS_PER_DETENT_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Mouse travel (window pixels) per encoder detent while dragging; 0 or less restores the default.
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+pub fn set_drag_pixels_per_detent(pixels: f32) {
+    DRAG_PIXELS_PER_DETENT_BITS.store(pixels.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn drag_pixels_per_detent() -> f32 {
+    match f32::from_bits(DRAG_PIXELS_PER_DETENT_BITS.load(std::sync::atomic::Ordering::Relaxed)) {
+        pixels if pixels > 0.0 => pixels,
+        _ => DEFAULT_DRAG_PIXELS_PER_DETENT,
+    }
+}
 const CLICK_SLOP_PIXELS: f32 = 3.0;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -196,7 +210,7 @@ impl PanelUi {
                 if let Some(encoder) = CONTROLS[press.control].encoder {
                     let travelled = (position.0 - press.start.0).hypot(position.1 - press.start.1);
                     press.moved |= travelled > CLICK_SLOP_PIXELS;
-                    press.remainder += (press.last_y - position.1) / DRAG_PIXELS_PER_DETENT;
+                    press.remainder += (press.last_y - position.1) / drag_pixels_per_detent();
                     let detents = press.remainder.trunc();
                     if detents != 0.0 && press.moved {
                         press.remainder -= detents;
@@ -448,7 +462,7 @@ mod tests {
         let mut ui = PanelUi::default();
         let (x, y) = at("B");
         assert_eq!(ui.handle_mouse(Some((x, y)), true, false, 0.0), vec![]);
-        assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), true, false, 0.0), vec![Action::Turn(1, 2)]);
+        assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), true, false, 0.0), vec![Action::Turn(1, 4)]);
         assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), false, false, 0.0), vec![]);
 
         assert_eq!(ui.handle_mouse(Some((x, y)), false, false, -1.0), vec![Action::Turn(1, -1)]);

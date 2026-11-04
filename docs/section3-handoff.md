@@ -826,3 +826,8 @@ Unmapped/unclear: ids 0, 1, 8, 16, 17 and PRESET, direction, YES/NO, TRK, FUNC, 
 Encoder turns only reach the screen on the next UI tick (receiver type 5, DTIM3 ISR `0x400c0b40`): the dirty flag is consumed by present, which runs from the tick. DTIM3 counts 275,000 x 16 timer ticks per period, and the model advances 1 tick per instruction, so the tick fires every ~4.4M instructions (measured with `TRACE_REGS=0x400c0b40`: 23 hits per 100M). The emulator retires roughly 7M instructions/s, so a tick comes about every 0.6 s of wall time (the hardware's ~33 ms at 133 MHz); that is the encoder lag, not the input path.
 
 `DTIM3_TICKS_PER_INSTRUCTION=n` now also overrides the rate stored in a loaded snapshot (`DmaTimer1::set_ticks_per_instruction`). With `=16`: 192 hits per 100M (~520k instructions per tick). Use ~16-32 for LIVE_PANEL. Only the UI tick uses DTIM3, so audio/sequencer timing is unaffected.
+
+## Panel encoder drag
+
+- Dragging a knob already turned it wherever the pointer went inside the window (the turn is tied to the pressed knob, not the hover). The remaining gap was the pointer leaving the window: minifb's `Discard` mode drops those samples, so `LIVE_PANEL` now reads positions with `Pass` while the left button is held and the turn continues off-window.
+- Sensitivity: default 3 px of vertical travel per detent (was 6); `PANEL_DRAG_PIXELS=<n>` changes it. For fine adjustment latch FUNC with a right click, as on the hardware, then drag or use the wheel.
