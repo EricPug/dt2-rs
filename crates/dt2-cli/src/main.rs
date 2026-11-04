@@ -1033,6 +1033,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("IRQ_LOG=")
             || assignment == "ESDHC_EMMC"
             || assignment.starts_with("ESDHC_FILE=")
+            || assignment.starts_with("ESDHC_DUMP=")
             || assignment == "ESDHC_TRACE"
             || assignment.starts_with("UART8_TX_FILE=")
             || assignment == "LIVE_WINDOW"
@@ -1357,6 +1358,30 @@ fn run_binary(args: &[String]) {
             std::process::exit(2)
         });
         println!("saved snapshot {path}: {} bytes", data.len());
+    }
+    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("ESDHC_DUMP=")) {
+        let Some(esdhc) = bus.esdhc.as_ref() else {
+            eprintln!("ESDHC_DUMP requires ESDHC_EMMC");
+            std::process::exit(2)
+        };
+        // Sparse raw image of every written block (a hole reads as zeros).
+        let result = std::fs::File::create(path).and_then(|mut file| {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut count = 0usize;
+            for (block, data) in esdhc.written_blocks() {
+                file.seek(SeekFrom::Start(u64::from(block) * 512))?;
+                file.write_all(data)?;
+                count += 1;
+            }
+            Ok(count)
+        });
+        match result {
+            Ok(count) => println!("ESDHC_DUMP {path}: {count} written blocks"),
+            Err(error) => {
+                eprintln!("cannot write ESDHC_DUMP {path}: {error}");
+                std::process::exit(2)
+            }
+        }
     }
     for (address, length) in ram_dumps {
         match bus.dump_ram(address, length) {
