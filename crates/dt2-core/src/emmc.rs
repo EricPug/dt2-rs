@@ -427,6 +427,10 @@ impl Bus for Esdhc {
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         let offset = address - ESDHC_BASE;
+        if offset & !3 == 0x20 {
+            // eDMA writes the FIFO one byte at a time; each byte is one byte of data.
+            return self.data_write(&[value]);
+        }
         let shift = 8 * (3 - (offset & 3));
         let current = self.regs[(offset / 4) as usize & 63];
         self.write_register(offset & !3, (current & !(0xFF << shift)) | u32::from(value) << shift)?;
@@ -435,6 +439,9 @@ impl Bus for Esdhc {
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         let offset = address - ESDHC_BASE;
+        if offset & !3 == 0x20 {
+            return self.data_write(&value.to_be_bytes());
+        }
         let shift = if offset & 2 == 0 { 16 } else { 0 };
         let current = self.regs[(offset / 4) as usize & 63];
         self.write_register(offset & !3, (current & !(0xFFFF << shift)) | u32::from(value) << shift)?;
@@ -517,6 +524,26 @@ mod tests {
         host.write32(ESDHC_BASE + 0x08, 1).unwrap();
         host.write32(ESDHC_BASE + 0x0C, 17 << 24).unwrap();
         assert_eq!(host.read32(ESDHC_DATPORT).unwrap(), 0);
+    }
+
+    #[test]
+    fn byte_and_halfword_fifo_writes_store_the_bytes_written() {
+        let mut host = Esdhc::new();
+        host.write32(ESDHC_BASE + 0x04, (1 << 16) | BLOCK as u32).unwrap();
+        host.write32(ESDHC_BASE + 0x08, 1).unwrap();
+        host.write32(ESDHC_BASE + 0x0C, 23 << 24).unwrap();
+        for index in 0..BLOCK / 2 {
+            if index % 2 == 0 {
+                host.write8(ESDHC_DATPORT + (index as u32 * 2 & 3), index as u8).unwrap();
+                host.write8(ESDHC_DATPORT + (index as u32 * 2 & 3) + 1, 0x5A).unwrap();
+            } else {
+                host.write16(ESDHC_DATPORT + 2, (index as u16) << 8 | 0x3C).unwrap();
+            }
+        }
+        host.write32(ESDHC_BASE + 0x08, 0x900).unwrap();
+        host.write32(ESDHC_BASE + 0x0C, 25 << 24).unwrap();
+        let block = host.storage.get(&0x900).expect("block written");
+        assert_eq!(&block[..6], &[0, 0x5A, 1, 0x3C, 2, 0x5A]);
     }
 
     #[test]

@@ -890,3 +890,18 @@ Measured on OS 1.17 from `out/panel-1p5b.snap` with `UART8_RX_PERIODIC` and the 
 With `PANEL_COUNTS_PER_DEGREE=30` and one full upward drag on E (maximum 120): `DTIM3_TICKS_PER_INSTRUCTION=4` reached the maximum, 8 about half, 16 about 6-7, 64 under 1. A faster UI tick means more 30-count flushes per second of wall time. `LIVE_PANEL` now defaults to 4 ticks (an explicit `DTIM3_TICKS_PER_INSTRUCTION=n` still wins) and the drag defaults to 30 counts per pixel.
 
 Revisit once audio exists: the one-30-count-message-per-slice pacing may make parameter changes audibly step-like (a fast drag becomes about 200 discrete changes per second). Judged by eye only so far.
+
+## Factory install content (eSDHC FIFO write bug fixed)
+
+- **Bug.** eDMA writes the eSDHC data port one byte at a time. `Esdhc::write8`/`write16` treated that as a read-modify-write of the 32-bit register and pushed a full word per byte, so every DMA-written block was garbled (header `be 00 00 00 00 ef ...`, 4x expansion). Only the project pool at `0x58000` appeared to be written; the firmware's read-back of the sounds/kits then failed. Byte and halfword FIFO writes now push exactly the bytes written (`byte_and_halfword_fifo_writes_store_the_bytes_written`).
+- **Result.** A cold boot to 3B (16,387 eSDHC commands, 33,131 block writes, 33,126 distinct) now installs, with `ESDHC_DUMP=path` (writes every written block as a sparse image):
+  - `0x0`, `0x800`: header and protect area; the pool header reads `beefbace 00000005 "PRESETS" ...`.
+  - `0x12000..0x12418` (1,048 blocks): the factory **sound** presets, each record starting `beefbace`. Names include ACID DD, BAM BASS, BLUE KICK, BRUM KIT SD, BUG RIM, CAFE BELL, CHIP SNARE and others.
+  - `0x16000..0x16e80` (3,712 blocks): **kits**, first record `beefbace 00000000 "INIT"`.
+  - `0x58000..0x5eecc`: the project pool.
+- **No PCM yet.** The sound records have 1.3-3.4 bits/byte of entropy and the pool is mostly `0xff`/zero fill. These are parameter records with names, not sample audio. The factory sample audio is not on the card after the install, so it comes from somewhere else (NOR container or firmware image) or the presets reference samples that are loaded separately. Still to be traced: the "Load all samples" path and what a sound record stores to point at a sample.
+- `out/panel-1p5b-fixed-card.snap` is a 1.5B-instruction snapshot of the fixed install (the old `out/panel-1p5b.snap` carries the garbled card).
+
+## Unicorn cold-boot fixes
+
+Cold boot under Unicorn died at the first `TRAP #0` because the engine ran `MOVEC` to VBR natively and the host kept a stale VBR, then aborted on `MOVEC` to RGPIOBAR (an unmodelled control register). The patch now exports `uc_digikit_vbr_get/set` (synced on every slice) and makes `MOVEC` to registers other than CACR/ACR0-3/VBR an illegal-instruction exception that the host interpreter executes. The gate workload starts after the boot, which is why this was not caught earlier; a cold boot to 1.3B now matches the Rust engine (10,032 commands).
