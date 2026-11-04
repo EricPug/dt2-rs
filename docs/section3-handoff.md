@@ -905,3 +905,12 @@ Revisit once audio exists: the one-30-count-message-per-slice pacing may make pa
 ## Unicorn cold-boot fixes
 
 Cold boot under Unicorn died at the first `TRAP #0` because the engine ran `MOVEC` to VBR natively and the host kept a stale VBR, then aborted on `MOVEC` to RGPIOBAR (an unmodelled control register). The patch now exports `uc_digikit_vbr_get/set` (synced on every slice) and makes `MOVEC` to registers other than CACR/ACR0-3/VBR an illegal-instruction exception that the host interpreter executes. The gate workload starts after the boot, which is why this was not caught earlier; a cold boot to 1.3B now matches the Rust engine (10,032 commands).
+
+## Sample/sound discovery after the card fix (audio prerequisites)
+
+- **Sound records.** `0x12000..` holds 131 factory sound records, one per 4 KiB slot (8 blocks; the firmware reads the first 3 blocks of each slot). Each starts `beefbace`, has a 7-bit name (e.g. `ACID DD`, `BLUE KICK`) and about 448 bytes of parameters. Byte offset 106 takes 100 distinct values from 1 to 248 across the records, which is probably a sample-slot id (unverified; not yet cross-checked against the loader).
+- **Load all samples / startup reads.** The firmware scans all 2,048 sound slots (`0x12000..0x16000`), the kit slots (`0x16000..0x36000`) and 128 project headers at a 0x8000-block stride (`0x50000..0x450000`). It never reads above `0x450001`: no +Drive sample data is requested after the install. The pool at `0x58000` is project data (`PRESETS`), not audio.
+- **No factory PCM is reachable.** A scan of 4 KiB chunks for PCM-like data finds none in the card dump or the NOR image; the 59 hits in the 3.2 MB OS image are in code/table areas. So the factory sample audio does not ship in the OS update and is not part of the install. Samples must be supplied (the Elekfake WAVs copied to `samples/`) once the +Drive sample format is known.
+- **TRIG.** On `out/panel-1p5b-fixed-card.snap` the per-track pointer table at `0x44f37bd0` is populated, and TRIG 1 taps for 150M instructions no longer stop (the old unmapped-read stop at `0x400d8e4c` was caused by the missing install/INTC1 state).
+- **Silent baseline.** TRIG 1 + PLAY taps for 300M instructions leave the SSI TX buffer (`0x4fe58100`, 4 KiB) all zero, and there is no SSI TX capture yet.
+- **Next.** Find where the firmware keeps sample audio (the 'SAMP' key page and the +Drive browser should show it) and its on-card layout by driving that UI, then write a WAV and add an SSI TX capture (channel 50 DMA writes to `0xFC0BC000`).
