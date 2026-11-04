@@ -6201,6 +6201,20 @@ impl Bus for ProbeBus {
         regions
     }
 
+    fn track_host_writes(&mut self) {
+        self.ram.track_host_writes();
+        if let Some(sram) = self.sram_overlay.as_mut() {
+            sram.track_host_writes();
+        }
+    }
+
+    fn take_host_writes(&mut self, out: &mut Vec<(u32, u32)>) {
+        self.ram.take_host_writes(out);
+        if let Some(sram) = self.sram_overlay.as_mut() {
+            sram.take_host_writes(out);
+        }
+    }
+
     fn retire_batch(&mut self, n: usize) {
         self.retire_external(n, n);
     }

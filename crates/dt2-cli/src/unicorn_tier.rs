@@ -48,6 +48,8 @@ extern "C" {
 const UC_ARCH_M68K: i32 = 7;
 const UC_MODE_BIG_ENDIAN: i32 = 1 << 30;
 const UC_CTL_WRITE_CPU_MODEL: i32 = 1_140_850_695;
+// UC_CTL_WRITE(UC_CTL_TB_REMOVE_CACHE, 2): (start, end) of the translations to drop.
+const UC_CTL_WRITE_TB_REMOVE_CACHE: i32 = (1 << 30) | (2 << 26) | 9;
 const UC_CPU_M68K_CFV4E: i32 = 7;
 const UC_HOOK_INTR: i32 = 1;
 const REG_A0: i32 = 1;
@@ -158,6 +160,8 @@ pub struct UnicornTier {
     max_slice: usize,
     pub slices: u64,
     pub fallback_steps: u64,
+    pub invalidated: u64,
+    dirty: Vec<(u32, u32)>,
     pub irqs: std::collections::BTreeMap<u8, u64>,
 }
 
@@ -208,11 +212,12 @@ impl UnicornTier {
             let options = NATIVE_RTE | NO_MEM_EXIT | NO_HOOK_PC_SYNC;
             assert_eq!(uc_digikit_set_options(uc, options), 0, "patched Unicorn required");
         }
-        Self { uc, shared, _regions: regions, max_slice, slices: 0, fallback_steps: 0, irqs: Default::default() }
+        Self { uc, shared, _regions: regions, max_slice, slices: 0, fallback_steps: 0, invalidated: 0, dirty: Vec::new(), irqs: Default::default() }
     }
 
     fn start(bus: &mut ProbeBus, cpu: &Cpu) -> Self {
         let mut tier = Self::new(bus);
+        bus.track_host_writes();
         tier.load(cpu);
         tier.shared.bus = bus as *mut ProbeBus;
         tier
@@ -264,7 +269,20 @@ impl UnicornTier {
     }
 
     /// Runs up to `n` instructions from `pc`; returns (executed, engine status).
+    /// Drops translations for RAM the host wrote since the last slice (DMA, the Rust fallback step,
+    /// loads): the engine only notices its own stores. MMIO accesses end a slice, so a DMA's
+    /// writes are always invalidated before the guest can run the new bytes.
+    fn invalidate_host_writes(&mut self, bus: &mut ProbeBus) {
+        bus.take_host_writes(&mut self.dirty);
+        for (start, end) in self.dirty.drain(..) {
+            let status = unsafe { uc_ctl(self.uc, UC_CTL_WRITE_TB_REMOVE_CACHE, u64::from(start), u64::from(end)) };
+            debug_assert_eq!(status, 0);
+            self.invalidated += 1;
+        }
+    }
+
     fn slice(&mut self, bus: &mut ProbeBus, pc: u32, n: usize) -> (usize, i32) {
+        self.invalidate_host_writes(bus);
         self.slices += 1;
         self.shared.bus = bus as *mut ProbeBus;
         self.shared.credited = 0;
@@ -447,9 +465,40 @@ pub fn print_stats() {
     TIER.with(|cell| {
         if let Some(tier) = cell.borrow().as_ref() {
             println!(
-                "unicorn tier: {} slices, {} Rust fallback steps, interrupts by vector {:?}",
-                tier.slices, tier.fallback_steps, tier.irqs
+                "unicorn tier: {} slices, {} Rust fallback steps, {} host-write invalidations, interrupts by vector {:?}",
+                tier.slices, tier.fallback_steps, tier.invalidated, tier.irqs
             );
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dt2_core::bus::FlatRam;
+
+    const BASE: u32 = 0x4000_0000;
+
+    /// Unicorn translates `moveq #1,d0; nop` and then runs it again after the host rewrote the
+    /// instruction. Without the invalidation the stale translation would leave d0 at 1.
+    #[test]
+    fn host_write_to_translated_code_is_seen() {
+        let mut bus = ProbeBus::new(FlatRam::new(BASE, 0x1_0000));
+        bus.enable_fast_ram(BASE, 0x1_0000);
+        bus.write16(BASE, 0x7001).unwrap();
+        bus.write16(BASE + 2, 0x4e71).unwrap();
+        let mut cpu = Cpu::new();
+        cpu.pc = BASE;
+        cpu.sr = 0x2700;
+        let mut tier = UnicornTier::start(&mut bus, &cpu);
+        tier.slice(&mut bus, BASE, 2);
+        tier.store(&mut cpu);
+        assert_eq!(cpu.d[0], 1);
+
+        bus.write16(BASE, 0x7002).unwrap();
+        tier.slice(&mut bus, BASE, 1);
+        tier.store(&mut cpu);
+        assert_eq!(cpu.d[0], 2);
+        assert_eq!(tier.invalidated, 1);
+    }
 }

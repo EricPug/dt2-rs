@@ -351,3 +351,21 @@ interpreter. The perf gate passes both ways (about 104M vs 32M instr/s).
 
 Still follow-on: RAM code-page invalidation and Unicorn snapshot/restore. QEMU's build fails in directories with spaces,
 hence the cache-directory default.
+
+## Unicorn follow-ons closed: code-page invalidation and snapshots
+
+**Stale translations.** Unicorn invalidates translated blocks for its own stores only. Host writes to
+the shared RAM (eMMC and UART8 DMA from MMIO callbacks, the Rust fallback step, loads) bypassed it.
+`FlatRam` and `Mcf5441xSram` now keep a coalesced `WriteLog` (off unless `Bus::track_host_writes` is
+called, so the Rust path pays nothing); before every slice the tier drains it via
+`Bus::take_host_writes` and calls `UC_CTL_TB_REMOVE_CACHE` for each range. MMIO accesses end a slice,
+so DMA'd bytes are invalidated before the guest can run them. Test
+`unicorn_tier::tests::host_write_to_translated_code_is_seen` re-runs a rewritten instruction; it
+fails (d0 stays 1) with the drain disabled. Gate workload: 27k range invalidations in 17.8k slices,
+throughput 104M -> 98M instr/s, all gates still exact.
+
+**Snapshots.** Registers and EMAC are copied back into `Cpu` after every slice, so saving needs
+nothing new, and restore only happens at start-up before the tier exists (each run reloads from
+`Cpu`). Checked: `SNAPSHOT_SAVE` after 20M instructions is byte-identical (84,260,716 bytes) between
+`DT2_UNICORN=1` and `=0`, and resuming that file gives equal state hashes at 5M and 10M on both
+engines. There is no mid-run restore path to support yet.
