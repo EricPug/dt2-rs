@@ -25,6 +25,8 @@ const IRQ_CC: u32 = 1;
 const IRQ_TC: u32 = 2;
 const BLOCK: usize = 512;
 const CARD_SECTORS: u64 = 0x0080_0000;
+// SEC_COUNT the firmware is told: the SLC-mode capacity (table word 7) of the Kingston row it matches.
+const REPORTED_SECTORS: u32 = 0x02e1_a000;
 const CARD_BYTES: u64 = CARD_SECTORS * BLOCK as u64;
 const OCR: u32 = 0xC0FF_8080;
 const CARD_STATUS_TRAN: u32 = (4 << 9) | (1 << 8);
@@ -58,12 +60,15 @@ impl Esdhc {
         let mut ext_csd = [0u8; BLOCK];
         ext_csd[192] = 5; // EXT_CSD_REV
         ext_csd[196] = 3; // DEVICE_TYPE
-        let sec_count_be = (CARD_SECTORS as u32).to_be_bytes();
+        let sec_count_be = REPORTED_SECTORS.to_be_bytes();
         ext_csd[212..216].copy_from_slice(&sec_count_be);
-        ext_csd[152] = 1; // the only field the "MMC NOT IN SLC MODE" check reads
+        ext_csd[152] = 1; // SLC mode: the OS wants 1 here
         ext_csd[155] = 1; // PARTITION_SETTING_COMPLETED
-        ext_csd[156] = 1; // PARTITIONS_ATTRIBUTE: enhanced user area
         ext_csd[160] = 3; // PARTITIONING_SUPPORT
+        // bytes 156..158 (one 24-bit value), 222 and 227 must equal the matched table row's identity words
+        ext_csd[156..159].copy_from_slice(&[0x00, 0x04, 0xdb]);
+        ext_csd[222] = 0x10;
+        ext_csd[227] = 1;
         Self {
             regs: [0; 64],
             data_out: VecDeque::new(),
@@ -143,6 +148,15 @@ impl Esdhc {
         self.regs[RSP0] = CARD_STATUS_TRAN;
     }
 
+    // CID in the eSDHC R2 layout (CRC byte dropped): MID 0x70 and PNM "TX2932" select a row of the
+    // OS 1.17 supported-device table at 0x402b4f64; the +Drive is only mounted for a listed part.
+    fn respond_cid(&mut self) {
+        self.regs[RSP0] = 0;
+        self.regs[RSP0 + 1] = 0x3332_0000;
+        self.regs[RSP0 + 2] = 0x5458_3239;
+        self.regs[RSP0 + 3] = 0x0070_0000;
+    }
+
     fn respond_r2(&mut self, seed: u32) {
         for index in 0..4 {
             self.regs[RSP0 + index] = seed.wrapping_add(index as u32 * 0x0101_0101);
@@ -190,9 +204,9 @@ impl Esdhc {
         match command {
             0 => {}
             1 => self.regs[RSP0] = OCR,
-            2 => self.respond_r2(0x4453_3254),
+            2 => self.respond_cid(),
             9 => self.respond_r2(0x00D0_0F00),
-            10 => self.respond_r2(0x4453_3254),
+            10 => self.respond_cid(),
             6 => {
                 self.respond_r1();
                 if (argument >> 24) & 3 == 3 {
@@ -476,7 +490,7 @@ mod tests {
         assert_eq!(block[192], 5);
         assert_eq!(
             u32::from_be_bytes(block[212..216].try_into().unwrap()),
-            CARD_SECTORS as u32
+            REPORTED_SECTORS
         );
         assert!(!host.data_ready());
     }
