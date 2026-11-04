@@ -1829,7 +1829,7 @@ fn run_live(
             event.instruction_count = event.instruction_count.saturating_sub(done);
             event
         });
-        let mut report = cpu.run_with_interrupt(bus, chunk, shifted);
+        let mut report = run_engine(cpu, bus, chunk, shifted);
         if report.injected_interrupt.is_some() {
             injection = None;
         }
