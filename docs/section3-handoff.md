@@ -779,3 +779,18 @@ Rendering the 1.1B capture with the repo tool and rotating the portrait frame 90
 - Without input, render `0x4011bc96` has only the first-frame hits at 1094.8M to 1095.1M. The dirty flag is never set afterwards, so the ticks present nothing new.
 - Encoder traffic (`UART8_RX_PERIODIC=3000000:3005,3000`, 100M from the new snapshot): `0x4003117c` 23 hits, present `0x40032992` 23 hits (every tick, called from `0x4013811c`), `0x4011b126` (set dirty) 94 hits from `0x400f47ac` and `0x40062a82`, and render `0x4011bc96` 17 hits, all from `0x40032b40` inside present. The dirty flag at bus `+0x20` is now consumed by a present that renders. This closes the redraw gap.
 - Unit test: `dtim3_reference_match_delivers_intc0_vector_99_with_firmware_setup`. `cargo test` passes.
+
+## Screen and LED output after DTIM3 (encoder, FLTR and TRK inputs)
+
+Captured with `UART8_TX_FILE`: a 1.5B reset run with `DTIM3_BOOTSTRAP` (baseline), then 100M-instruction resumes of `out/blank-factory-1p5b-dtim3.snap` with `UART8_RX_PERIODIC=3000000:<hex>`. The frames were replayed on top of the baseline with `tools/render-uart-frames.py`, which now skips `b9 idx val` (3 bytes) and `bc x` (2 bytes). Frames are 64x128 portrait; rotate 90° counter-clockwise to read them.
+
+| input (hex) | continuation TX | result on screen |
+|---|---|---|
+| none (baseline boot) | 48,413 bytes | `A01 WAXSAFETY 102.0`, then the SAMPLE page (TUNE, PLAY, SAMP, LEV/STRT/LEN/LOOP/LEV) |
+| encoder A turn `3005,3000` | 2,055 bytes, 17 updates, 200 tile records | title bar becomes `Tune=4.27`, and the TUNE tile value changes from `1...0.` to `5.09`/`.0...1` as the encoder turns |
+| FLTR key tap `2004,2000` | 14,866 bytes, 20 updates, 1,476 tile records | the page changes to `Filter (2/2)` with a new set of widgets (DEL, KEY.T, BASE, WDTH, BW.RT, RSET) |
+| TRK key tap `2180,2100` | 3,981 bytes, 33 updates, 264 tile records | the layout stays on the SAMPLE page, with small changes (the `SMP 1` tile is highlighted) |
+
+- This is the first run where input produces UI changes that persist to the framebuffer: encoder values and page changes redraw. The tick and present path that DTIM3 turned on works end to end.
+- **LED records now appear.** The baseline boot has 108 `b9 idx val` records on 50 distinct indices (the first time `b9` has been seen), and `bc` appears per input event as before. The TRK tap sends 410 `b9` records on 36 distinct indices (`idx 25` and others), while the encoder turn sends 2 and the FLTR tap sends 6. The idx-to-LED mapping is still unknown.
+- **Open:** whether the code 16 = TRK mapping is right and what the TRK page should show (the screen is nearly the same), and the encoder direction (`3005` is read as positive, as a guess).

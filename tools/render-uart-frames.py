@@ -31,8 +31,10 @@ for input_index, input_path in enumerate(input_paths):
         byte = data[index]
         if byte == 0xB5:
             index += 5
-        elif byte in (0xB7, 0x60, 0x70, 0x73, 0xBA):
+        elif byte in (0xB7, 0x60, 0x70, 0x73, 0xBA, 0xBC):
             index += 2
+        elif byte == 0xB9:
+            index += 3
         elif byte == 0xB8:
             if current:
                 states.append(list(frame))
