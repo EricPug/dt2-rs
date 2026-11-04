@@ -346,6 +346,8 @@ Without it the build warns and produces the pure-Rust interpreter. `--features u
 library into a build error. At run time the tier is on by default; `DT2_UNICORN=0` selects the Rust
 interpreter. The perf gate passes both ways (about 104M vs 32M instr/s).
 
-Still follow-on: RAM code-page invalidation, Unicorn snapshot/restore, and `LIVE_WINDOW`, whose
-chunk loop still calls the Rust interpreter directly. QEMU's build fails in directories with spaces,
+`LIVE_WINDOW` now runs its 400k-instruction chunks through `run_engine` too: `PANEL_PERF` shows about
+80-85M instr/s (200 slices/s) against 32M (80 slices/s) on the Rust path, with drawing at about 30% of wall time.
+
+Still follow-on: RAM code-page invalidation and Unicorn snapshot/restore. QEMU's build fails in directories with spaces,
 hence the cache-directory default.
