@@ -1031,6 +1031,7 @@ fn run_binary(args: &[String]) {
             || assignment == "LIVE_WINDOW"
             || assignment == "LIVE_PANEL"
             || assignment.starts_with("PANEL_IMAGE=")
+            || assignment.starts_with("PC_SAMPLE=")
             || assignment.starts_with("PANEL_COUNTS_PER_DEGREE=")
             || assignment.starts_with("LIVE_WINDOW=")
             || assignment.starts_with("LIVE_PNG=")
@@ -1298,7 +1299,10 @@ fn run_binary(args: &[String]) {
         bus.configure_instruction_hooks()
     );
     println!("{fast_path_status}");
-    let report = if let Some(scale) = live_window {
+    let pc_sample = args[6..].iter().find_map(|a| a.strip_prefix("PC_SAMPLE="));
+    let report = if let Some(spec) = pc_sample {
+        run_pc_sampled(&mut cpu, &mut bus, instruction_limit, spec)
+    } else if let Some(scale) = live_window {
         run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale, live_panel.then_some(panel_image))
     } else {
         cpu.run_with_interrupt(&mut bus, instruction_limit, interrupt_injection)
@@ -1686,6 +1690,30 @@ fn parse_ram_file_dump_spec(spec: &str) -> Result<(u32, usize, String), String> 
         ));
     }
     Ok((address, length, path.to_string()))
+}
+
+/// `PC_SAMPLE=start:end:interval:path` records the program counter every `interval` instructions between
+/// instruction counts `start` and `end` (counted from this run's start) as `instruction pc` lines in `path`.
+fn run_pc_sampled(cpu: &mut Cpu, bus: &mut ProbeBus, instruction_limit: usize, spec: &str) -> dt2_core::coldfire::RunReport {
+    let fields: Vec<&str> = spec.splitn(4, ':').collect();
+    let number = |index: usize| fields.get(index).and_then(|f| f.parse::<usize>().ok());
+    let (Some(start), Some(end), Some(interval), Some(path)) = (number(0), number(1), number(2), fields.get(3)) else {
+        eprintln!("PC_SAMPLE expects start:end:interval:path");
+        std::process::exit(2)
+    };
+    let mut report = cpu.run_with_interrupt(bus, start.min(instruction_limit), None);
+    let mut done = report.instructions + report.fast_forwarded_instructions;
+    let mut out = String::new();
+    while report.stop == RunStop::InstructionLimit && done < end.min(instruction_limit) && interval > 0 {
+        report = cpu.run_with_interrupt(bus, interval, None);
+        done += report.instructions + report.fast_forwarded_instructions;
+        let sp = cpu.a[7];
+        let stack: Vec<String> = (0..12).map(|slot| format!("{:08x}", bus.peek_ram_u32(sp.wrapping_add(4 * slot)).unwrap_or(0))).collect();
+        out.push_str(&format!("{done} {:#010x} {}\n", cpu.pc, stack.join(" ")));
+    }
+    std::fs::write(path, out).unwrap_or_else(|error| eprintln!("cannot write PC_SAMPLE {path}: {error}"));
+    report.instructions = done;
+    report
 }
 
 const LIVE_CHUNK_INSTRUCTIONS: usize = 400_000;
