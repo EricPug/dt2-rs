@@ -996,6 +996,7 @@ fn run_binary(args: &[String]) {
         std::process::exit(2)
     });
     let mut cpu = Cpu::new();
+    cpu.set_icache(!args[6..].iter().any(|a| a == "DECODE_CACHE=off"));
     let mut cpu_overrides = Vec::new();
     let mut ram_dumps = Vec::new();
     let mut ram_file_dumps = Vec::new();
@@ -1041,6 +1042,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("WATCH_WRITE=")
             || assignment.starts_with("TRACE_REGS=")
             || assignment.starts_with("STATE_HASH=")
+            || assignment == "DECODE_CACHE=off"
             || assignment.starts_with("TRACE_TAIL=")
             || assignment.starts_with("TRACE_A1=")
             || assignment.starts_with("TRACE_A0_RANGE=")
@@ -1459,6 +1461,10 @@ fn run_binary(args: &[String]) {
     println!(
         "runner throughput: {elapsed_seconds:.3}s, {instructions_per_second:.0} instructions/s; {fast_path_status}"
     );
+    let (icache_hits, icache_misses) = cpu.icache_stats();
+    if icache_hits + icache_misses > 0 {
+        println!("icache: {icache_hits} hits, {icache_misses} misses, {} flushes", bus.code_map.flushes());
+    }
     if report.fast_forwarded_instructions > 0 {
         println!(
             "fast-forwarded {} stable-loop instructions",
@@ -2237,6 +2243,9 @@ struct ProbeBus {
     uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
     display: Option<display::Display>,
     fast_ram: Option<(u32, u32)>,
+    /// SRAM overlay accesses within its first 64 KiB go straight to the model.
+    sram_fast: bool,
+    code_map: dt2_core::icache::CodeMap,
     /// False when no diagnostic needs the per-instruction state report.
     instruction_hooks: bool,
     /// False when no diagnostic reads the per-instruction register copies.
@@ -2357,6 +2366,8 @@ const MAX_DSPI_PUSH_EVENTS: usize = 262_144;
 const MAX_DSPI_POP_EVENTS: usize = 262_144;
 const MAX_UART8_TRACE_EVENTS: usize = 32_768;
 const MCF_SRAM_ALIAS_WINDOW: (u32, u32) = (0x8000_0000, 0x9000_0000);
+const SRAM_FAST_BASE: u32 = 0x8000_0000;
+const SRAM_FAST_SIZE: u32 = 0x1_0000;
 const MCF_PERIPHERAL_WINDOWS: [(u32, u32); 2] =
     [(0xEC00_0000, 0xED00_0000), (0xFC00_0000, 0xFD00_0000)];
 const DDR_REGISTER_APERTURE: (u32, u32) = (0xFC0B_8000, 0xFC0B_8200);
@@ -2663,6 +2674,8 @@ impl ProbeBus {
             uart8_tx_file: None,
             display: None,
             fast_ram: None,
+            sram_fast: false,
+            code_map: dt2_core::icache::CodeMap::default(),
             instruction_hooks: true,
             capture_registers: true,
             irq_log: None,
@@ -2888,6 +2901,7 @@ impl ProbeBus {
         };
         for offset in 0..snapshot.length {
             let value = self.ram.read8(snapshot.source + offset)?;
+            self.code_map.note_write(snapshot.destination + offset, 1);
             self.ram.write8(snapshot.destination + offset, value)?;
         }
         if let Some(active) = &mut self.ram_snapshot {
@@ -3013,6 +3027,13 @@ impl ProbeBus {
         };
         if reason.is_none() {
             self.fast_ram = Some((base, (end - 1) as u32));
+            let sram_range = SRAM_FAST_BASE..SRAM_FAST_BASE + SRAM_FAST_SIZE;
+            self.sram_fast = self.sram_overlay.is_some()
+                && !self.mmio.keys().any(|a| sram_range.contains(a))
+                && !self.edma_tcd.keys().any(|a| sram_range.contains(a))
+                && !Rgpio::contains(SRAM_FAST_BASE)
+                && !self.rgpio_enabled(SRAM_FAST_BASE);
+            self.code_map.enable(base, size);
         }
         reason
     }
@@ -3041,6 +3062,11 @@ impl ProbeBus {
         if let Some(log) = &mut self.irq_log {
             let _ = log.write_all(line.as_bytes());
         }
+    }
+
+    fn in_fast_sram(&self, address: u32, width: u32) -> bool {
+        self.sram_fast
+            && address.wrapping_sub(SRAM_FAST_BASE) <= SRAM_FAST_SIZE - width
     }
 
     fn in_fast_ram(&self, address: u32, width: u32) -> bool {
@@ -4137,6 +4163,7 @@ impl ProbeBus {
         if self.synthetic_access(address) {
             Ok(())
         } else {
+            self.code_map.note_write(address, 1);
             self.ram.write8(self.remapped_ram_address(address), value)
         }
     }
@@ -5238,6 +5265,7 @@ impl ProbeBus {
         let result = if let Some(sram) = self.sram_for(address) {
             sram.write32(address, value)
         } else {
+            self.code_map.note_write(address, 4);
             self.ram.write32(self.remapped_ram_address(address), value)
         };
         result.map_err(|error| format!("RAM seed outside mapped memory at {:#010x}", error.addr))
@@ -5460,6 +5488,14 @@ impl Bus for ProbeBus {
             a: *a,
             sr,
         });
+    }
+
+    fn code_epoch(&self) -> u32 {
+        self.code_map.epoch()
+    }
+
+    fn cacheable_code(&mut self, pc: u32, bytes: u32) -> bool {
+        self.code_map.mark(pc, bytes)
     }
 
     fn begin_instruction_fetch(&mut self) {
@@ -5698,6 +5734,9 @@ impl Bus for ProbeBus {
         if self.in_fast_ram(address, 1) {
             return self.ram.read8(address);
         }
+        if self.in_fast_sram(address, 1) {
+            return self.sram_overlay.as_mut().unwrap().read8(address);
+        }
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
@@ -5723,6 +5762,9 @@ impl Bus for ProbeBus {
         if self.in_fast_ram(address, 2) {
             return self.ram.read16(address);
         }
+        if self.in_fast_sram(address, 2) {
+            return self.sram_overlay.as_mut().unwrap().read16(address);
+        }
         let source = self.source_for_access(address, 2);
         match self.read16_inner(address) {
             Ok(value) => {
@@ -5745,6 +5787,9 @@ impl Bus for ProbeBus {
         if self.in_fast_ram(address, 4) {
             return self.ram.read32(address);
         }
+        if self.in_fast_sram(address, 4) {
+            return self.sram_overlay.as_mut().unwrap().read32(address);
+        }
         let source = self.source_for_access(address, 4);
         match self.read32_inner(address) {
             Ok(value) => {
@@ -5765,7 +5810,11 @@ impl Bus for ProbeBus {
 
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         if self.in_fast_ram(address, 1) {
+            self.code_map.note_write(address, 1);
             return self.ram.write8(address, value);
+        }
+        if self.in_fast_sram(address, 1) {
+            return self.sram_overlay.as_mut().unwrap().write8(address, value);
         }
         let source = self.source_for_access(address, 1);
         let old = self.watched_old_bytes(address, 1)?;
@@ -5788,7 +5837,11 @@ impl Bus for ProbeBus {
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         if self.in_fast_ram(address, 2) {
+            self.code_map.note_write(address, 2);
             return self.ram.write16(address, value);
+        }
+        if self.in_fast_sram(address, 2) {
+            return self.sram_overlay.as_mut().unwrap().write16(address, value);
         }
         let source = self.source_for_access(address, 2);
         let old = self.watched_old_bytes(address, 2)?;
@@ -5808,7 +5861,11 @@ impl Bus for ProbeBus {
 
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         if self.in_fast_ram(address, 4) {
+            self.code_map.note_write(address, 4);
             return self.ram.write32(address, value);
+        }
+        if self.in_fast_sram(address, 4) {
+            return self.sram_overlay.as_mut().unwrap().write32(address, value);
         }
         let source = self.source_for_access(address, 4);
         let old = self.watched_old_bytes(address, 4)?;

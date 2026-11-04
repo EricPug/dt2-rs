@@ -6,6 +6,7 @@ pub mod emac;
 pub mod dspi;
 pub mod dtim1;
 pub mod emmc;
+pub mod icache;
 pub mod intc0;
 pub mod intc2;
 pub mod pit;
