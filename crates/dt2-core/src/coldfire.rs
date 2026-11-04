@@ -5,7 +5,7 @@
 
 use crate::bus::{Bus, BusError, LoopContext, TstOperand};
 use crate::emac::Emac;
-use crate::icache::{ICache, MAX_WORDS};
+use crate::icache::{ICache, HANDLER_MOVE_L, HANDLER_NONE, MAX_WORDS};
 
 pub const CCR_C: u16 = 0x01;
 pub const CCR_V: u16 = 0x02;
@@ -107,6 +107,17 @@ impl Size {
             Size::L => 4,
         }
     }
+}
+
+/// Picks the pre-decoded handler for an opcode; anything unlisted uses the reference `execute`.
+fn classify(op: u16) -> u8 {
+    if op >> 12 == 2 {
+        let (smode, dmode) = ((op >> 3) & 7, (op >> 6) & 7);
+        if smode <= 5 && dmode <= 5 {
+            return HANDLER_MOVE_L;
+        }
+    }
+    HANDLER_NONE
 }
 
 #[derive(Clone, Copy)]
@@ -601,15 +612,18 @@ impl Cpu {
             .icache
             .as_deref()
             .and_then(|cache| cache.lookup(pc0, epoch))
-            .map(|entry| (entry.words, entry.len as usize));
-        if let Some((words, len)) = hit {
+            .map(|entry| (entry.words, entry.len as usize, entry.handler));
+        if let Some((words, len, handler)) = hit {
             self.icache_stats[0] += 1;
             self.iw = words;
             self.iw_len = len;
             self.iw_pos = 1;
             self.pc = pc0.wrapping_add(2);
             self.fetch_mode = FetchMode::Replay;
-            let result = self.execute(bus, pc0, words[0], loop_budget);
+            let result = match handler {
+                HANDLER_MOVE_L => self.fast_move_l(bus, pc0, &words),
+                _ => self.execute(bus, pc0, words[0], loop_budget),
+            };
             self.fetch_mode = FetchMode::Bus;
             return result;
         }
@@ -626,10 +640,65 @@ impl Cpu {
         if cacheable && result.is_ok() && self.iw_len <= MAX_WORDS && bus.code_epoch() == epoch {
             let words = self.iw;
             if let Some(cache) = self.icache.as_deref_mut() {
-                cache.insert(pc0, epoch, &words[..self.iw_len]);
+                cache.insert(pc0, epoch, classify(words[0]), &words[..self.iw_len]);
             }
         }
         result
+    }
+
+    /// MOVE.L / MOVEA.L for the operand modes `classify` accepts. Mirrors the group 1..3 arm of
+    /// `execute` step for step (source EA, read, destination EA, write, flags), so side effects
+    /// and error states are identical; extension words come straight from the cached entry.
+    fn fast_move_l<B: Bus>(&mut self, bus: &mut B, pc0: u32, words: &[u16; MAX_WORDS]) -> Result<(), CpuError> {
+        let op = words[0];
+        let mut pos = 1;
+        self.pc = pc0.wrapping_add(2);
+        let (smode, sreg) = ((op >> 3) & 7, (op & 7) as usize);
+        let v = match smode {
+            0 => self.d[sreg],
+            1 => self.a[sreg],
+            2 => bus.read32(self.a[sreg])?,
+            3 => {
+                let a = self.a[sreg];
+                self.a[sreg] = a.wrapping_add(4);
+                bus.read32(a)?
+            }
+            4 => {
+                self.a[sreg] = self.a[sreg].wrapping_sub(4);
+                bus.read32(self.a[sreg])?
+            }
+            _ => {
+                let d = words[pos] as i16 as i32 as u32;
+                pos += 1;
+                self.pc = self.pc.wrapping_add(2);
+                bus.read32(self.a[sreg].wrapping_add(d))?
+            }
+        };
+        let (dmode, dreg) = ((op >> 6) & 7, ((op >> 9) & 7) as usize);
+        match dmode {
+            0 => self.d[dreg] = v,
+            1 => {
+                self.a[dreg] = v;
+                return Ok(());
+            }
+            2 => bus.write32(self.a[dreg], v)?,
+            3 => {
+                let a = self.a[dreg];
+                self.a[dreg] = a.wrapping_add(4);
+                bus.write32(a, v)?;
+            }
+            4 => {
+                self.a[dreg] = self.a[dreg].wrapping_sub(4);
+                bus.write32(self.a[dreg], v)?;
+            }
+            _ => {
+                let d = words[pos] as i16 as i32 as u32;
+                self.pc = self.pc.wrapping_add(2);
+                bus.write32(self.a[dreg].wrapping_add(d), v)?;
+            }
+        }
+        self.flags_move(v, Size::L);
+        Ok(())
     }
 
     fn execute<B: Bus>(
