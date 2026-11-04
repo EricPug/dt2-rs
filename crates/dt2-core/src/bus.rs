@@ -113,6 +113,16 @@ pub trait Bus {
     /// Called when `run` returns, so a bus that batches per-instruction work can settle it.
     fn end_run(&mut self) {}
 
+    /// Host RAM that plain loads and stores may touch directly, as (guest base, pointer, length).
+    /// For an engine that executes guest code outside this crate; the pointers stay valid
+    /// for the life of the bus.
+    fn host_memory(&mut self) -> Vec<(u32, *mut u8, usize)> {
+        Vec::new()
+    }
+
+    /// Retires `n` instructions executed by an external engine (the batched `quiet_retire`).
+    fn retire_batch(&mut self, _n: usize) {}
+
     /// False when nothing since the last `pending_interrupt` call can have changed which
     /// interrupts are pending, so the CPU may skip polling. The CPU still polls after a
     /// change to the interrupt mask.
@@ -182,6 +192,9 @@ impl FlatRam {
 }
 
 impl Bus for FlatRam {
+    fn host_memory(&mut self) -> Vec<(u32, *mut u8, usize)> {
+        vec![(self.base, self.data.as_mut_ptr(), self.data.len())]
+    }
     fn read8(&mut self, a: u32) -> Result<u8, BusError> {
         Ok(self.data[self.range(a, 1, false)?])
     }
@@ -264,6 +277,9 @@ impl Default for Mcf5441xSram {
 }
 
 impl Bus for Mcf5441xSram {
+    fn host_memory(&mut self) -> Vec<(u32, *mut u8, usize)> {
+        vec![(Self::BASE, self.data.as_mut_ptr(), self.data.len())]
+    }
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         Ok(self.data[self.offset(address, false)?])
     }

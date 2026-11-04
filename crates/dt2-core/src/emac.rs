@@ -33,6 +33,12 @@ impl Default for Emac {
 }
 
 impl Emac {
+    /// Raw register file for an engine that executes MAC instructions itself:
+    /// (ACC0..3, ACCext01, ACCext23, MACSR, MASK).
+    pub fn raw_registers(&self) -> ([u32; 4], u32, u32, u32, u32) {
+        (self.acc, self.ext_pair(false), self.ext_pair(true), self.macsr, self.read_mask())
+    }
+
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }

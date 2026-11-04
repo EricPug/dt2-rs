@@ -271,3 +271,36 @@ Plan (each step measured, gates green, reference `execute` kept as fallback):
 - Result: bit-exact on PC/SR/D0-7/A0-7 for 4561 instructions, then SR differed: `ADDI.L #imm,Dn` (0x0680) cleared X where the ColdFire PRM (and Unicorn) set X = C. Real dt2 bug (SUBI.L already set X). Fixed in `execute`; perf gate unchanged (state hashes identical, this workload never consumes that X), opsweep baseline moves to `3522f4128fba249a` (cached == uncached).
 - Next divergence at N=6594 is `A980` (EMAC accumulator read): harness artifact, ACC/MACSR/MASK are not loaded into Unicorn yet.
 - Raw Unicorn speed, RAM-only run (the dummy-MMIO code ends in an idle loop, so this is an upper bound, not the workload): ~140-200M instr/s, i.e. 4-6x the current 33M. A real execution tier also needs MMIO callbacks into ProbeBus, timer/interrupt delivery at event boundaries, snapshot of Unicorn state and the patched C dependency in the build; the pure-Rust interpreter would remain the fallback.
+
+## Slice 10: Unicorn execution-tier spike (feature `unicorn`, `DT2_UNICORN=1`)
+
+Build: `UNICORN_LIB_DIR=/tmp/uc/build cargo build --release --features window,unicorn`
+(digiemu's patched Unicorn 2.1.4, m68k only). Off by default; the Rust interpreter
+is untouched and remains the fallback (perf and opsweep gates still PASS without the feature).
+
+Design (`crates/dt2-cli/src/unicorn_tier.rs`):
+- Host RAM/SRAM mapped by pointer (`Bus::host_memory`); every other range is an MMIO
+  region whose callbacks call `ProbeBus` read/write.
+- Slices run to `min(limit, quiet_horizon, injection, poll countdown, max_slice)`.
+- A slow-path access that dirties the IRQ state makes the engine stop at the next
+  instruction boundary (writes `emu_counter` into `emu_count`; offset discovered at
+  startup by a probe loop). `uc_emu_stop` from a callback is not safe.
+- TRAP and opcodes Unicorn rejects fall back to one Rust `cpu.step()`.
+- EMAC state is injected via stub code (Rust -> Unicorn only).
+- The Rust icache is disabled in this mode.
+
+Results (40M gate workload, slice 4096): ~87M instr/s, 0.46 s wall vs 1.06 s (~2.3x
+wall-clock; the Rust run idle-skips 5.3M instructions, Unicorn executes them).
+Interrupt histogram nearly equals Rust (155: 404 vs 405, 170: 398 vs 399, 205: 167 vs 185).
+TX is 1283 bytes vs 1284: NOT byte-identical; state hashes will not match.
+
+Known problems:
+- Slices >= 65536 stall the firmware (vector 99 delivered once, TX empty); cause unknown.
+  Cap is 4096 by default. Making RTE a host step (to poll after mask change) was worse
+  (61M, more lost vectors, stall persists), so native RTE is kept.
+- Event ordering differs slightly (vector 205).
+
+Needed for byte-identical gates: Unicorn -> Rust EMAC/MACSR extraction, exact idle-skip
+and time accounting, and exact event ordering around RTE/mask changes. Other caveats:
+patched-C dependency and build story, `emu_count` offset fragility, host writes to code
+pages (stale TB cache), snapshot of Unicorn state.
