@@ -107,6 +107,20 @@ impl DmaTimer1 {
         }
     }
 
+    /// Retires `count` instructions at once; equivalent to `count` calls of `advance_instruction`.
+    pub fn advance_instructions(&mut self, count: u64) {
+        if self.eager {
+            for _ in 0..count {
+                self.advance_instruction();
+            }
+            return;
+        }
+        self.lag += count;
+        if self.lag >= self.deadline {
+            self.sync();
+        }
+    }
+
     /// Instruction retirements until the next event can be raised (1 if it may fire immediately).
     pub fn instructions_until_event(&self) -> u64 {
         if self.eager {

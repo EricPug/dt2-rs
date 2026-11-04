@@ -262,6 +262,7 @@ impl Cpu {
             .wrapping_add(ext as u8 as i8 as i32 as u32))
     }
 
+    #[inline(always)]
     fn ea<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -328,6 +329,7 @@ impl Cpu {
         }
     }
 
+    #[inline(always)]
     fn read<B: Bus>(&self, bus: &mut B, o: Operand, size: Size) -> Result<u32, CpuError> {
         Ok(match o {
             Operand::Dn(r) => self.d[r] & size.mask(),
@@ -341,6 +343,7 @@ impl Cpu {
         })
     }
 
+    #[inline(always)]
     fn write<B: Bus>(
         &mut self,
         bus: &mut B,
@@ -364,10 +367,12 @@ impl Cpu {
         Ok(())
     }
 
+    #[inline(always)]
     fn set_ccr(&mut self, mask: u16, bits: u16) {
         self.sr = (self.sr & !mask) | (bits & mask);
     }
 
+    #[inline(always)]
     fn flags_move(&mut self, v: u32, size: Size) {
         let mut f = 0;
         if v & size.msb() != 0 {
@@ -1535,6 +1540,7 @@ impl Cpu {
                 Err(error) => break RunStop::Error(error),
             }
         };
+        bus.end_run();
         RunReport {
             instructions,
             fast_forwarded_instructions,

@@ -216,3 +216,29 @@ Slice 1 landed under estimate (12.7M effective vs 15–17M), and the same reason
 - `Bus::poll_due()` (default `true`); `ProbeBus` tracks `irq_dirty` + `poll_countdown` (min of timer `instructions_until_event()` and SSI re-arm). Dirty is set on slow-path bus accesses, `interrupt_taken`, `set_rgpiobar`, UART8 RX injection. The CPU forces a poll after taking an interrupt or changing SR mask bits. Disabled when `pit0_oneshot` is on.
 - Result: 14.7M -> 18.5M instr/s (cache on), 16.0M with `DECODE_CACHE=off`. Gate (TX, times, state hashes) passes in both modes; all tests pass.
 - Next: execute-side specialization (pre-decoded hot-family variants with a generic fallback to the reference `execute`).
+
+## Design note 2: execute-side tier (after slice 4)
+
+Inputs: re-profile (execute+ea/read/write ~54%, run loop ~34% before slice 4), `docs/coldfire-perf-next.md`, and the digiemu project (patched Unicorn/TCG).
+
+Findings that shape the plan:
+- The decode cache gave +3%: fetch was never the bottleneck. `execute` costs ~28 ns/instr on `FlatRam` because of its size and `Result<Operand,_>` plumbing, not dispatch.
+- RAM fast path and SMC detection are already done (SRAM overlay fast path, `CodeMap` page bitmap, 0 flushes).
+- digiemu reaches ~2.8x real time on Unicorn only after fixing memory-hook slow paths, exit checks and MAC helpers. Its lazy-CCR bugs (flags committed stale at hook stops) are the risk to gate against for any lazy-flags work here. EMAC with load at 0x400db9e0 is a decoder test vector.
+- Events split blocks only at real deadlines (same as `poll_countdown`).
+
+Plan (each step measured, gates green, reference `execute` kept as fallback):
+1. Hot-family handlers selected through an opcode-indexed table, operands pre-extracted; anything not in the table calls the reference `execute`. Per-opcode differential test against the reference over randomized register/flag state.
+2. Lazy condition codes only if flags show up in the profile after step 1.
+3. Block cache up to the event horizon with threaded dispatch over the same handlers.
+4. Batch timer lag; trim remaining run-loop cost.
+5. Evaluate Unicorn (patched) as differential oracle first, as an engine tier only if the interpreter stalls. Needs project sign-off on the patched C dependency.
+
+### Slice 5 status: inline helpers + batched timer lag
+
+- Finding: the core on `FlatRam` was held back by non-inlined `read`/`write`/`ea`/`set_ccr`/`flags_move` (`Result<Operand,_>` plumbing); `#[inline(always)]` on those took `examples/bench` from 33 to 66M instr/s. Inlining `add`/`sub`/`fetch16/32` as well gave nothing.
+- Firmware workload: 18.5 -> 21.3M instr/s from the inlining alone (the bus and per-instruction hooks dominate there).
+- Batched timer lag: `ProbeBus.timer_pending` counts retirements; `flush_timers()` adds them to PIT/DTIM1/DTIM3 (`advance_instructions(n)`) before anything can observe timers: slow-path bus accesses, `pending_interrupt`, `idle_skip`, `interrupt_taken`, `save_snapshot`, and `Bus::end_run`. Only active with `lazy_poll`. 21.3 -> 27.0M instr/s (cache off: 23.6M).
+- Gates: TX, times, all four state hashes identical, cache on and off; all tests pass.
+- Ablation note: stubbing hooks changes the executed workload, so use only the byte-identical gate for measurements.
+- Next: remaining per-instruction hooks (`begin_instruction`, `report_instruction_state`, `report_branch/tst` Option writes), then opcode-table handlers / block loop.
