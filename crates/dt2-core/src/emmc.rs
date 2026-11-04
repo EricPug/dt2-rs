@@ -105,6 +105,11 @@ impl Esdhc {
         Ok(host)
     }
 
+    /// Blocks written so far, in block order (data that is not in the backing file).
+    pub fn written_blocks(&self) -> impl Iterator<Item = (u32, &[u8; BLOCK])> {
+        self.storage.iter().map(|(block, data)| (*block, data))
+    }
+
     pub fn contains(address: u32) -> bool {
         (ESDHC_BASE..ESDHC_BASE + ESDHC_SIZE).contains(&address)
     }
