@@ -1501,6 +1501,10 @@ fn run_binary(args: &[String]) {
             }
         }
     }
+    if let Some(dtim3) = bus.dtim3.as_mut() {
+        let (dtmr, dtxmr, dter, dtrr, dtcn) = dtim3.debug_state();
+        println!("DTIM3 state: DTMR={dtmr:#06x} DTXMR={dtxmr:#04x} DTER={dter:#04x} DTRR={dtrr:#x} DTCN={dtcn:#x}");
+    }
     if let Some(intc0) = &bus.intc0 {
         let (imrh, imrl, frch, frcl, icr) = intc0.debug_state();
         println!(
