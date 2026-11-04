@@ -1890,7 +1890,15 @@ struct PanelInput {
     pressed_this_slice: Vec<u8>,
     deferred_releases: Vec<u8>,
     out: Vec<[u8; 2]>,
+    /// Encoder counts not yet sent; see `TURN_MESSAGES_PER_SLICE`.
+    pending_turns: [i32; 9],
 }
+
+/// Measured on OS 1.17 with `UART8_RX_PERIODIC`: the firmware applies only the first two encoder messages
+/// of a burst (4 give the same result as 2), and a delta above 0x40 counts the same as 0x40. A drag is
+/// therefore sent as at most two capped messages per encoder per slice, the rest carried to later slices.
+const TURN_MESSAGES_PER_SLICE: usize = 2;
+const TURN_MAX_DELTA: i32 = 0x40;
 
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 impl PanelInput {
@@ -1929,11 +1937,21 @@ impl PanelInput {
 
     fn turn(&mut self, encoder: u8, delta: i8) {
         if encoder < 9 {
-            self.out.push([0x30 | encoder, delta as u8]);
+            self.pending_turns[usize::from(encoder)] += i32::from(delta);
         }
     }
 
     fn take(&mut self) -> Vec<[u8; 2]> {
+        for (encoder, pending) in self.pending_turns.iter_mut().enumerate() {
+            for _ in 0..TURN_MESSAGES_PER_SLICE {
+                let step = (*pending).clamp(-TURN_MAX_DELTA, TURN_MAX_DELTA);
+                if step == 0 {
+                    break;
+                }
+                *pending -= step;
+                self.out.push([0x30 | encoder as u8, step as i8 as u8]);
+            }
+        }
         std::mem::take(&mut self.out)
     }
 }
@@ -6280,6 +6298,20 @@ mod tests {
         input.turn(3, -1);
         input.turn(9, 1);
         assert_eq!(input.take(), vec![[0x33, 0xFF]]);
+    }
+
+    #[test]
+    fn panel_input_paces_large_turns() {
+        let mut input = super::PanelInput::default();
+        for _ in 0..3 {
+            input.turn(4, 127);
+        }
+        input.turn(4, 20);
+        assert_eq!(input.take(), vec![[0x34, 0x40], [0x34, 0x40]]);
+        assert_eq!(input.take(), vec![[0x34, 0x40], [0x34, 0x40]]);
+        assert_eq!(input.take(), vec![[0x34, 0x40], [0x34, 0x40]]);
+        assert_eq!(input.take(), vec![[0x34, 0x11]]);
+        assert!(input.take().is_empty());
     }
 
     use super::*;
