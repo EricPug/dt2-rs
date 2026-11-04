@@ -803,3 +803,20 @@ Captured with `UART8_TX_FILE`: a 1.5B reset run with `DTIM3_BOOTSTRAP` (baseline
 - Key codes follow the table above (1-6 pages, 7-9 PRESET/SETTINGS/TEMPO, 10-15 YES/UP/NO/LEFT/DOWN/RIGHT, 16 TRK, 17 FUNC, 18 KB, 19-21 REC/PLAY/STOP, 22-24 PAGE/PTN/SONG, 25-40 trigs, 41-48 encoder pushes, 49 LEVEL push, 50 SAMPLING). Encoder index 0-7 = A-H, 8 = LEVEL/DATA.
 - Run (the viewer needs the display attached when the snapshot is saved, or the screen starts blank until the firmware redraws it): save once with `tools/run-section3.sh target/release/dt2-cli 1500000000 RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP LIVE_PANEL PANEL_IMAGE=... SNAPSHOT_SAVE=out/panel-1p5b.snap`, then `... DTIM3_BOOTSTRAP LIVE_PANEL PANEL_IMAGE=... SNAPSHOT_LOAD=out/panel-1p5b.snap`.
 - Tests cover latching, momentary presses, knob drag/wheel/click and glass compositing. The window itself was checked by opening it: the photo backdrop and hit regions line up. Not yet checked interactively: knob drag feel and whether a restored display snapshot fills the glass.
+
+## Panel LEDs (`b5` palette + `b9` LED records)
+
+`Display::feed` now keeps the `b5 idx r g b` palette and the `b9 id palette_idx` LED table; `led_rgb(id)` returns a colour, or `None` for the dim idle entry (4,4,4). The state is saved as a further optional snapshot tail (after DTIM3; older snapshots still load, with LEDs filling in as the firmware sends changes).
+
+`LIVE_PANEL` tints each key with its LED colour. The LED id to key map in `panel_ui::led_for_code` is **inferred** from key-press captures and partly a guess:
+
+| LED id | key |
+|---|---|
+| 19..24 | TRIG SRC FLTR AMP FX MOD (page chase; SRC lit at boot on the SAMPLE page) |
+| 5 / 6 | SETTINGS / TEMPO |
+| 9, 10, 11 | REC, PLAY, STOP (10 turns green `0x21` while playing) |
+| 3 / 4 | PTN / SONG (4 lit in song mode) |
+| 25..40 | TRIG 1..16 |
+| 41..48 | encoder-row glow (not drawn) |
+
+Unmapped/unclear: ids 0, 1, 8, 16, 17 and PRESET, direction, YES/NO, TRK, FUNC, KEYBOARD, PAGE. Refine by watching the live panel. Scripted captures were ambiguous because LEDs follow UI state (page, playhead, blink), not key edges.

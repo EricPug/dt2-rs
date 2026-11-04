@@ -1686,7 +1686,7 @@ fn run_live(
     let mut window = live_window::open(scale, panel);
     if let Some(display) = &bus.display {
         let (width, height, pixels) = display.render_upright(scale);
-        window.present(width, height, &pixels);
+        window.present(width, height, &pixels, &|id| display.led_rgb(id));
     }
     let mut done = 0usize;
     loop {
@@ -1705,7 +1705,7 @@ fn run_live(
         }
         if let Some(display) = &bus.display {
             let (width, height, pixels) = display.render_upright(scale);
-            window.present(width, height, &pixels);
+            window.present(width, height, &pixels, &|id| display.led_rgb(id));
         }
         let finished = report.stop != RunStop::InstructionLimit || done >= instruction_limit || !window.is_open();
         if finished {
@@ -1809,10 +1809,10 @@ mod live_window {
     }
 
     impl Window {
-        pub fn present(&mut self, width: usize, height: usize, pixels: &[u32]) {
+        pub fn present(&mut self, width: usize, height: usize, pixels: &[u32], leds: &dyn Fn(u8) -> Option<u32>) {
             match &self.2 {
                 Some(ui) => {
-                    let frame = ui.render(Some((width, height, pixels)));
+                    let frame = ui.render(Some((width, height, pixels)), leds);
                     let _ = self.0.update_with_buffer(&frame, super::panel_ui::PANEL_WIDTH, super::panel_ui::PANEL_HEIGHT);
                 }
                 None => {
@@ -1952,7 +1952,7 @@ mod live_window {
     }
 
     impl Window {
-        pub fn present(&mut self, _width: usize, _height: usize, _pixels: &[u32]) {}
+        pub fn present(&mut self, _width: usize, _height: usize, _pixels: &[u32], _leds: &dyn Fn(u8) -> Option<u32>) {}
         pub fn is_open(&self) -> bool {
             false
         }
@@ -4843,6 +4843,7 @@ impl ProbeBus {
         // Optional tail written only when a display, INTC1 or EMAC state exists, so older configurations keep their hash.
         let emac_state = !cpu.emac.is_default();
         let dtim3_state = self.dtim3.is_some();
+        let led_state = self.display.as_ref().is_some_and(|d| d.has_led_state());
         if self.display.is_some() || self.intc1.is_some() || emac_state || dtim3_state {
             w.bool(self.display.is_some());
             if let Some(display) = &self.display {
@@ -4853,7 +4854,7 @@ impl ProbeBus {
                 if let Some(intc1) = &self.intc1 {
                     intc1.save_state(&mut w);
                 }
-                if emac_state || dtim3_state {
+                if emac_state || dtim3_state || led_state {
                     w.bool(emac_state);
                     if emac_state {
                         cpu.emac.save_state(&mut w);
@@ -4861,6 +4862,12 @@ impl ProbeBus {
                     if let Some(dtim3) = &self.dtim3 {
                         w.bool(true);
                         dtim3.save_state(&mut w);
+                    } else if led_state {
+                        w.bool(false);
+                    }
+                    if let (true, Some(display)) = (led_state, &self.display) {
+                        w.bool(true);
+                        display.save_led_state(&mut w);
                     }
                 }
             }
@@ -5016,6 +5023,11 @@ impl ProbeBus {
                     self.dtim3
                         .get_or_insert_with(|| DmaTimer1::at(DTIM3_BASE, 1))
                         .load_state(&mut r)?;
+                }
+                if r.remaining() > 0 && r.bool()? {
+                    self.display
+                        .get_or_insert_with(display::Display::new)
+                        .load_led_state(&mut r)?;
                 }
             }
         }

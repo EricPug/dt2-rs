@@ -237,17 +237,18 @@ impl PanelUi {
     }
 
     /// Draws the panel into a `PANEL_WIDTH` x `PANEL_HEIGHT` buffer with the live display in the glass area.
-    pub fn render(&self, display: Option<(usize, usize, &[u32])>) -> Vec<u32> {
+    pub fn render(&self, display: Option<(usize, usize, &[u32])>, leds: &dyn Fn(u8) -> Option<u32>) -> Vec<u32> {
         let mut out = match &self.backdrop {
             Some(backdrop) => backdrop.clone(),
             None => vec![0x0020_2020; PANEL_WIDTH * PANEL_HEIGHT],
         };
         for control in CONTROLS {
             let lit = self.is_lit(control.code);
+            let led = led_for_code(control.code).and_then(leds);
             if self.backdrop.is_none() {
-                draw_control(&mut out, control, lit);
-            } else if lit {
-                tint_control(&mut out, control);
+                draw_control(&mut out, control, lit, led);
+            } else if lit || led.is_some() {
+                tint_control(&mut out, control, led.unwrap_or(0x00FF_D23C));
             }
         }
         if let Some((width, height, pixels)) = display {
@@ -291,20 +292,41 @@ fn inside(control: &Control, x: isize, y: isize) -> bool {
     contains(control, (x as f32 + CROP_LEFT + 0.5, y as f32 + CROP_TOP + 0.5))
 }
 
-fn tint_control(buffer: &mut [u32], control: &Control) {
+fn tint_control(buffer: &mut [u32], control: &Control, color: u32) {
     let (left, top, right, bottom) = bounds(control);
     for y in top..bottom {
         for x in left..right {
             if inside(control, x, y) {
-                blend(buffer, x, y, 0x00FF_D23C, 110);
+                blend(buffer, x, y, color, 110);
             }
         }
     }
 }
 
-fn draw_control(buffer: &mut [u32], control: &Control, lit: bool) {
+/// LED id (as sent in UART8 `b9 id value` records) for a key code. Partly inferred from
+/// key-press captures, so some keys without an entry here have no LED shown yet.
+fn led_for_code(code: u8) -> Option<u8> {
+    match code {
+        1..=6 => Some(18 + code),
+        8 => Some(5),
+        9 => Some(6),
+        19 => Some(9),
+        20 => Some(10),
+        21 => Some(11),
+        23 => Some(3),
+        24 => Some(4),
+        25..=40 => Some(code),
+        _ => None,
+    }
+}
+
+fn draw_control(buffer: &mut [u32], control: &Control, lit: bool, led: Option<u32>) {
     let (left, top, right, bottom) = bounds(control);
-    let fill = if lit { 0x00A0_7A10 } else { 0x0040_4040 };
+    let fill = match (led, lit) {
+        (Some(color), _) => color,
+        (None, true) => 0x00A0_7A10,
+        (None, false) => 0x0040_4040,
+    };
     for y in top..bottom {
         for x in left..right {
             if !inside(control, x, y) {
@@ -439,7 +461,7 @@ mod tests {
     fn rendering_fits_display_into_glass() {
         let ui = PanelUi::default();
         let display = vec![0x00FF_FFFF; 8 * 4];
-        let frame = ui.render(Some((8, 4, &display)));
+        let frame = ui.render(Some((8, 4, &display)), &|_| None);
         assert_eq!(frame.len(), PANEL_WIDTH * PANEL_HEIGHT);
         let (gx, gy, ..) = GLASS;
         assert_eq!(frame[(gy - CROP_TOP) as usize * PANEL_WIDTH + (gx - CROP_LEFT) as usize + 10 + 40 * PANEL_WIDTH], 0x00FF_FFFF);
