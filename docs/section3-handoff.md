@@ -843,3 +843,16 @@ UART8 TX timestamps against `UART8_RX_PERIODIC` encoder messages show the firmwa
 - Encoder messages are clamped per message: deltas 0x20, 0x40 and 0x7f give the same Tune change. Splitting a drag into several messages is what carries large moves; the change per count rises with message rate (firmware acceleration).
 
 Lead for the next step: profile which PCs the CPU runs between the RX DMA and the first tile, to find out whether it is busy work (audio/DSP) or waiting on something that could be shortened.
+
+## Encoder lag: throughput profiling (PC_SAMPLE)
+
+New diagnostic `PC_SAMPLE=start:end:interval:path` writes `instr pc w0..w11` (12 stack words at A7) per sample.
+
+Findings (snapshot `out/panel-1p5b.snap`, tpi=16, `SSI_AUDIO_IRQ=100000`):
+- Message-to-first-changed-tile is ~2.7M instructions (~10.8M at tpi=1); UI renders ~3 fps in wall time (frame-end `b8` ~3.3M instr apart).
+- The PC profile is the same with and without an encoder message: the firmware does a constant per-frame workload, so input polling is not the cause.
+- Hot regions: `0x40053d00` (~18%, virtual call `jsr (a0)` via `$28(vtable)`, called from `0x40046114` `jsr (a3)`), `0x40046100`, `0x40042700`, `0x401aba00`, `0x40136300`, `0x40139600`. Call chain: `0x400310c6` -> `0x40046100` -> `0x40137ed0` (counter tick with `$18(a0)`/`$4(a0)` compare) -> `0x4003f304`/`0x40053d00`.
+- `0x400cce3c` is an idle `bra.b self`; `0x400d9400` is likely the SSI ISR.
+- Estimated real hardware: ~113M useful instr/s needed vs ~10M/s emulated, so throughput (~11x) is the root cause.
+- `SSI_AUDIO_IRQ` 100000/400000/2000000 gives 10.7/14.4/15.8M instr/s but does not cut instruction latency. `LOOP_DETECT` disables the fast path (0.48M instr/s).
+- Open: tpi=320/3200 never produced a tile in 40M instructions (not investigated); `TRACE_REGS` caps at 192 snapshots, so hit counts are not reliable.
