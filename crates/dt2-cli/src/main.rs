@@ -766,9 +766,13 @@ fn run_binary(args: &[String]) {
         eprintln!("DTIM1_TICKS_PER_INSTRUCTION requires DTIM1_BOOTSTRAP");
         std::process::exit(2);
     }
+    // The clickable panel defaults to 4: measured by hand, one upward drag then sweeps an encoder to its
+    // maximum (16 gave about half the range, 8 a quarter, 64 almost none); see docs/section3-handoff.md.
+    let panel_default_ticks = (dtim3_bootstrap && args[6..].iter().any(|a| a == "LIVE_PANEL")).then_some("4");
     let dtim3_tick_setting = args[6..]
         .iter()
-        .find_map(|assignment| assignment.strip_prefix("DTIM3_TICKS_PER_INSTRUCTION="));
+        .find_map(|assignment| assignment.strip_prefix("DTIM3_TICKS_PER_INSTRUCTION="))
+        .or(panel_default_ticks);
     let dtim3_ticks_per_instruction = match dtim3_tick_setting {
         Some(value) => match value.parse::<u32>() {
             Ok(ticks) if ticks > 0 => ticks,
