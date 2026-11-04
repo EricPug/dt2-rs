@@ -210,3 +210,9 @@ Slice 1 landed under estimate (12.7M effective vs 15–17M), and the same reason
 ### Slice 3b — direct SRAM-overlay path (done)
 - `ProbeBus::in_fast_sram`: accesses in `0x8000_0000..0x8001_0000` go straight to `Mcf5441xSram` when the same conditions that enable fast RAM hold and nothing (seeded MMIO, eDMA TCD bytes, RGPIO) lives in that window.
 - Gate PASS. **11.0 → 14.7M instr/s.**
+
+### Slice 4 status: event-driven interrupt poll
+
+- `Bus::poll_due()` (default `true`); `ProbeBus` tracks `irq_dirty` + `poll_countdown` (min of timer `instructions_until_event()` and SSI re-arm). Dirty is set on slow-path bus accesses, `interrupt_taken`, `set_rgpiobar`, UART8 RX injection. The CPU forces a poll after taking an interrupt or changing SR mask bits. Disabled when `pit0_oneshot` is on.
+- Result: 14.7M -> 18.5M instr/s (cache on), 16.0M with `DECODE_CACHE=off`. Gate (TX, times, state hashes) passes in both modes; all tests pass.
+- Next: execute-side specialization (pre-decoded hot-family variants with a generic fallback to the reference `execute`).

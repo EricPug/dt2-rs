@@ -198,6 +198,14 @@ impl PitController {
         }
     }
 
+    /// Instruction retirements until the next event can be raised (1 if it may fire immediately).
+    pub fn instructions_until_event(&self) -> u64 {
+        if self.eager {
+            return 1;
+        }
+        self.deadline.saturating_sub(self.lag).max(1)
+    }
+
     /// Instructions that can retire before the next event without changing visible state.
     pub fn idle_headroom(&self) -> u64 {
         if self.eager {

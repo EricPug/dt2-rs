@@ -2245,6 +2245,10 @@ struct ProbeBus {
     fast_ram: Option<(u32, u32)>,
     /// SRAM overlay accesses within its first 64 KiB go straight to the model.
     sram_fast: bool,
+    /// Poll interrupts only when something may have changed (see `poll_due`).
+    lazy_poll: bool,
+    irq_dirty: bool,
+    poll_countdown: u64,
     code_map: dt2_core::icache::CodeMap,
     /// False when no diagnostic needs the per-instruction state report.
     instruction_hooks: bool,
@@ -2675,6 +2679,9 @@ impl ProbeBus {
             display: None,
             fast_ram: None,
             sram_fast: false,
+            lazy_poll: false,
+            irq_dirty: true,
+            poll_countdown: 0,
             code_map: dt2_core::icache::CodeMap::default(),
             instruction_hooks: true,
             capture_registers: true,
@@ -3027,6 +3034,7 @@ impl ProbeBus {
         };
         if reason.is_none() {
             self.fast_ram = Some((base, (end - 1) as u32));
+            self.lazy_poll = !self.pit0_oneshot;
             let sram_range = SRAM_FAST_BASE..SRAM_FAST_BASE + SRAM_FAST_SIZE;
             self.sram_fast = self.sram_overlay.is_some()
                 && !self.mmio.keys().any(|a| sram_range.contains(a))
@@ -3062,6 +3070,24 @@ impl ProbeBus {
         if let Some(log) = &mut self.irq_log {
             let _ = log.write_all(line.as_bytes());
         }
+    }
+
+    /// Retirements until a time-driven event (timer expiry, SSI re-arm) may change what is pending.
+    fn instructions_until_poll_event(&self) -> u64 {
+        let mut n = u64::MAX;
+        if let Some(pit) = &self.pit {
+            n = n.min(pit.instructions_until_event());
+        }
+        if let Some(dtim1) = &self.dtim1 {
+            n = n.min(dtim1.instructions_until_event());
+        }
+        if let Some(dtim3) = &self.dtim3 {
+            n = n.min(dtim3.instructions_until_event());
+        }
+        if let Some(at) = self.ssi_audio_rearm_at {
+            n = n.min((at.saturating_sub(self.current_instruction_count) as u64).max(1));
+        }
+        n
     }
 
     fn in_fast_sram(&self, address: u32, width: u32) -> bool {
@@ -5381,6 +5407,7 @@ impl Bus for ProbeBus {
                 *cursor += 1;
                 *next += *period;
                 let _ = self.deliver_uart8_rx_now(&message);
+                self.irq_dirty = true;
             }
         }
     }
@@ -5390,6 +5417,7 @@ impl Bus for ProbeBus {
     }
 
     fn set_rgpiobar(&mut self, value: u32) {
+        self.irq_dirty = true;
         self.rgpiobar = value;
         self.rgpio.get_or_insert_with(Rgpio::new);
     }
@@ -5572,6 +5600,7 @@ impl Bus for ProbeBus {
     }
 
     fn interrupt_taken(&mut self, level: u8, vector: u8) {
+        self.irq_dirty = true;
         if self.irq_log.is_none() {
             return;
         }
@@ -5737,6 +5766,7 @@ impl Bus for ProbeBus {
         if self.in_fast_sram(address, 1) {
             return self.sram_overlay.as_mut().unwrap().read8(address);
         }
+        self.irq_dirty = true;
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
@@ -5765,6 +5795,7 @@ impl Bus for ProbeBus {
         if self.in_fast_sram(address, 2) {
             return self.sram_overlay.as_mut().unwrap().read16(address);
         }
+        self.irq_dirty = true;
         let source = self.source_for_access(address, 2);
         match self.read16_inner(address) {
             Ok(value) => {
@@ -5790,6 +5821,7 @@ impl Bus for ProbeBus {
         if self.in_fast_sram(address, 4) {
             return self.sram_overlay.as_mut().unwrap().read32(address);
         }
+        self.irq_dirty = true;
         let source = self.source_for_access(address, 4);
         match self.read32_inner(address) {
             Ok(value) => {
@@ -5816,6 +5848,7 @@ impl Bus for ProbeBus {
         if self.in_fast_sram(address, 1) {
             return self.sram_overlay.as_mut().unwrap().write8(address, value);
         }
+        self.irq_dirty = true;
         let source = self.source_for_access(address, 1);
         let old = self.watched_old_bytes(address, 1)?;
         self.write8_inner(address, value)?;
@@ -5843,6 +5876,7 @@ impl Bus for ProbeBus {
         if self.in_fast_sram(address, 2) {
             return self.sram_overlay.as_mut().unwrap().write16(address, value);
         }
+        self.irq_dirty = true;
         let source = self.source_for_access(address, 2);
         let old = self.watched_old_bytes(address, 2)?;
         self.write16_inner(address, value)?;
@@ -5867,6 +5901,7 @@ impl Bus for ProbeBus {
         if self.in_fast_sram(address, 4) {
             return self.sram_overlay.as_mut().unwrap().write32(address, value);
         }
+        self.irq_dirty = true;
         let source = self.source_for_access(address, 4);
         let old = self.watched_old_bytes(address, 4)?;
         self.write32_inner(address, value)?;
@@ -5898,6 +5933,8 @@ impl Bus for ProbeBus {
             self.ssi_audio_rearm_at = None;
             let _ = self.run_edma_memory_to_peripheral(SSI_AUDIO_DMA_CHANNEL);
         }
+        self.irq_dirty = false;
+        self.poll_countdown = self.instructions_until_poll_event();
         if self.uart8_rx_irq_pending {
             return Some(InterruptRequest {
                 source: 26,
@@ -6020,10 +6057,16 @@ impl Bus for ProbeBus {
             dtim3.skip_idle(headroom);
         }
         self.current_instruction_count = count.saturating_add(headroom as usize);
+        self.poll_countdown = self.poll_countdown.saturating_sub(headroom);
         headroom as usize
     }
 
+    fn poll_due(&self) -> bool {
+        !self.lazy_poll || self.irq_dirty || self.poll_countdown == 0
+    }
+
     fn advance_instruction(&mut self) {
+        self.poll_countdown = self.poll_countdown.saturating_sub(1);
         if let Some(pit) = &mut self.pit {
             pit.advance_instruction();
         }

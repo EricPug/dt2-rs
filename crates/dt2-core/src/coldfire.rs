@@ -1458,6 +1458,7 @@ impl Cpu {
         let mut fast_forwarded_instructions = 0;
         let mut injected_interrupt = None;
         let mut natural_interrupt = None;
+        let mut force_poll = true;
         let stop = loop {
             if budget_used >= instruction_limit {
                 break RunStop::InstructionLimit;
@@ -1471,6 +1472,7 @@ impl Cpu {
                     match self.take_interrupt(bus, event.level, event.vector) {
                         Ok(()) => {
                             bus.interrupt_taken(event.level, event.vector);
+                            force_poll = true;
                             injection = None;
                             injected_interrupt = Some(event);
                             continue;
@@ -1479,22 +1481,26 @@ impl Cpu {
                     }
                 }
             }
-            if let Some(request) = bus.pending_interrupt() {
-                let interrupt_mask = ((self.sr >> 8) & 7) as u8;
-                if request.level > interrupt_mask {
-                    if let Err(error) = self.take_interrupt(bus, request.level, request.vector) {
-                        break RunStop::Error(error);
+            if force_poll || bus.poll_due() {
+                force_poll = false;
+                if let Some(request) = bus.pending_interrupt() {
+                    let interrupt_mask = ((self.sr >> 8) & 7) as u8;
+                    if request.level > interrupt_mask {
+                        if let Err(error) = self.take_interrupt(bus, request.level, request.vector) {
+                            break RunStop::Error(error);
+                        }
+                        bus.interrupt_taken(request.level, request.vector);
+                        force_poll = true;
+                        if natural_interrupt.is_none() {
+                            natural_interrupt = Some(InterruptDelivery {
+                                instruction_count: budget_used,
+                                source: request.source,
+                                level: request.level,
+                                vector: request.vector,
+                            });
+                        }
+                        continue;
                     }
-                    bus.interrupt_taken(request.level, request.vector);
-                    if natural_interrupt.is_none() {
-                        natural_interrupt = Some(InterruptDelivery {
-                            instruction_count: budget_used,
-                            source: request.source,
-                            level: request.level,
-                            vector: request.vector,
-                        });
-                    }
-                    continue;
                 }
             }
             if self.idle_branch_pc == Some(self.pc) {
@@ -1511,8 +1517,10 @@ impl Cpu {
             }
             let logical_instruction_count = budget_used + 1;
             let remaining = instruction_limit - logical_instruction_count;
+            let mask_before = self.sr & 0x0700;
             match self.step_with_loop_budget(bus, Some((logical_instruction_count, remaining))) {
                 Ok(()) => {
+                    force_poll |= self.sr & 0x0700 != mask_before;
                     bus.advance_instruction();
                     instructions += 1;
                     budget_used += 1;

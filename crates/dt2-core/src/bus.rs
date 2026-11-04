@@ -95,6 +95,13 @@ pub trait Bus {
         0
     }
 
+    /// False when nothing since the last `pending_interrupt` call can have changed which
+    /// interrupts are pending, so the CPU may skip polling. The CPU still polls after a
+    /// change to the interrupt mask.
+    fn poll_due(&self) -> bool {
+        true
+    }
+
     /// Return the highest currently eligible peripheral interrupt request.
     fn pending_interrupt(&mut self) -> Option<InterruptRequest> {
         None
