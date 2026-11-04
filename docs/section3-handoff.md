@@ -939,7 +939,17 @@ with those constants patched in (not copied into this repo) parses the firmware-
 Opening the browser: FUNC held + panel message `2601` opens SAMPLES (+DRIVE / PROJECT RAM). `tools/panel-keys.sh` takes `+hex` to send a
 message without releasing it (`+2201 +2601 +2600 +2200` is FUNC+that key). `FULL_LOG=path` keeps the unfiltered run output.
 
-Open problem: YES on +DRIVE halts the firmware at `0x4013abc2` (`bra.b` to itself), called from `0x401862d2` after an
-inflate-style routine (`0x40185120`, wrapper `0x401869d0`) returns an error. It happens on any card, including one with no ekFS, so it is not the
-sample content. It is timing dependent: with `DT2_UNICORN` unset plus `ESDHC_TRACE` (Rust fallback inside the tier) the same key sequence does not halt
-but never opens the browser either. The input of that decode and why it fails are still unknown. DSPI0 does no NOR reads in that window.
+Root cause of the +DRIVE halt (resolved): the ekFS was never mounted. `std::string(nullptr)` threw (name lookup `0x40157a68` returns 0 while the mounted flag
+`0x44f2bd68` is 0), and with no FDE the unwinder (`0x40185120`) fails and parks the UI task at `0x4013abc2`. Two things kept the mount from happening:
+
+1. Storage identity. `0x4012df5c`/`0x4012debc` match the CID (MID, name) and EXT_CSD (`[156..158]`, `[222]`, `[227]`, SEC_COUNT, SLC flag `[152]`) against a seven-row
+   supported-device table at `0x402b4f64`; with no match the status word `0x42940a48` is non-zero and `0x400ccd42` skips the mount. `emmc.rs` now reports the Kingston
+   `TX2932` row (MID `0x70`) with SEC_COUNT `0x02e1a000` (the ekFS sits at sector `0x5d8000`, and `0x4012e1b6` rejects reads past SEC_COUNT). The part choice is an emulation
+   accommodation, not hardware evidence. EXT_CSD `[152]=1` (SLC) is needed or the OS shows "MMC NOT IN SLC MODE".
+2. A second on-card structure. After the superblock (magic, lookup3 checksum, version 3 or 4) the mount calls `0x4002cd6a`, which reads 0x8000 bytes at sector `0x458000` and
+   requires a "MaGj" block (`+4` CRC-32, `+8` u16 `0x2b`, `+0xa` u16 3, `+0xc` length, `+0x10` entry count; residue `0xDEBB20E3`). `tools/card-magj.py <card.img>` stamps a
+   minimal block with no entries; that satisfies the firmware's own validator but is not real card content.
+
+Note `ESDHC_FILE=` and `STOP_PC=` are `dt2-cli` arguments, not environment variables. With the card model above and the stamped card, the firmware runs "VERIFYING FILE
+SYSTEM...", reports "FILE SYSTEM OK", and +DRIVE opens a browser listing `Factory` (locked, written by the factory install) and `incoming`. The Rust fallback gained EXTB.L
+(`0x49c0`), which the mount path executes.

@@ -971,6 +971,10 @@ impl Cpu {
                     let value = self.d[reg] as u16 as i16 as i32 as u32;
                     self.d[reg] = value;
                     self.flags_move(value, Size::L);
+                } else if op & 0xFFF8 == 0x49C0 {
+                    let value = self.d[reg] as u8 as i8 as i32 as u32;
+                    self.d[reg] = value;
+                    self.flags_move(value, Size::L);
                 } else if op & 0xFFC0 == 0x48C0 && matches!(mode, 2 | 5) {
                     let mask = self.fetch16(bus)?;
                     let destination = self.ea(bus, mode, reg, Size::L, pc0, op)?;
@@ -2643,6 +2647,18 @@ mod tests {
         run(&mut c, &mut r, 1);
 
         assert_eq!(c.d[3], 0x1234_FF80);
+        assert_eq!(c.sr, CCR_X | CCR_N);
+    }
+
+    #[test]
+    fn extb_long_sign_extends_byte_to_long() {
+        let (mut c, mut r) = machine(&[0x49C3]);
+        c.d[3] = 0x1234_5680;
+        c.sr = CCR_X | CCR_V | CCR_C;
+
+        run(&mut c, &mut r, 1);
+
+        assert_eq!(c.d[3], 0xFFFF_FF80);
         assert_eq!(c.sr, CCR_X | CCR_N);
     }
 
