@@ -62,6 +62,10 @@ impl Intc0 {
         (self.base..self.base + 0x100).contains(&address)
     }
 
+    pub fn has_forced(&self) -> bool {
+        self.intfrch | self.intfrcl != 0
+    }
+
     /// Highest pending source: DMA timer 1 when `timer_pending` (subject to IMR), plus forced (INTFRC)
     /// sources, which the manual (17.2.3) says are not affected by the mask register.
     pub fn pending_interrupt(&self, timer_pending: bool) -> Option<InterruptRequest> {

@@ -23,6 +23,26 @@ pub struct InterruptRequest {
 }
 
 /// Big-endian system bus seen by a CPU core.
+/// Operand of a TST, formatted only when a diagnostic is printed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TstOperand {
+    Dn(usize),
+    An(usize),
+    Mem(u32),
+    Imm(u32),
+}
+
+impl std::fmt::Display for TstOperand {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Dn(register) => write!(f, "D{register}"),
+            Self::An(register) => write!(f, "A{register}"),
+            Self::Mem(address) => write!(f, "memory[{address:#010x}]"),
+            Self::Imm(value) => write!(f, "immediate[{value:#010x}]"),
+        }
+    }
+}
+
 pub trait Bus {
     fn read8(&mut self, addr: u32) -> Result<u8, BusError>;
     fn read16(&mut self, addr: u32) -> Result<u16, BusError>;
@@ -49,7 +69,7 @@ pub trait Bus {
     fn begin_instruction_fetch(&mut self) {}
     fn end_instruction_fetch(&mut self) {}
 
-    fn report_tst(&mut self, _pc: u32, _operand: &str, _value: u32, _size_bytes: u8, _sr: u16) {}
+    fn report_tst(&mut self, _pc: u32, _operand: TstOperand, _value: u32, _size_bytes: u8, _sr: u16) {}
 
     fn report_branch(&mut self, _pc: u32, _condition: u8, _taken: bool, _target: u32, _sr: u16) {}
 
