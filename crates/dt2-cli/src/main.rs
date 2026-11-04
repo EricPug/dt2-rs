@@ -1164,6 +1164,12 @@ fn run_binary(args: &[String]) {
                 std::process::exit(2)
             });
         bus.sync_esdhc_trace_baseline();
+        // An explicit rate overrides the one stored in the snapshot.
+        if dtim3_tick_setting.is_some() {
+            if let Some(dtim3) = bus.dtim3.as_mut() {
+                dtim3.set_ticks_per_instruction(dtim3_ticks_per_instruction);
+            }
+        }
         println!("restored snapshot {path}: PC={:#010x}", cpu.pc);
     }
     if let Some(list) = args[6..].iter().find_map(|a| a.strip_prefix("INTC0_UNMASK=")) {
