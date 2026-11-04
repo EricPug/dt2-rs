@@ -198,6 +198,19 @@ impl PitController {
         }
     }
 
+    /// Instructions that can retire before the next event without changing visible state.
+    pub fn idle_headroom(&self) -> u64 {
+        if self.eager {
+            return 0;
+        }
+        self.deadline.saturating_sub(self.lag).saturating_sub(1)
+    }
+
+    /// Retire `count` instructions that `idle_headroom` proved event-free.
+    pub fn skip_idle(&mut self, count: u64) {
+        self.lag += count;
+    }
+
     /// Apply all pending ticks so timer state is current.
     pub fn sync(&mut self) {
         if self.lag > 0 {

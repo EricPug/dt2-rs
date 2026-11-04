@@ -88,6 +88,12 @@ pub trait Bus {
         0
     }
 
+    /// The CPU sits on a branch-to-self. Retire up to `max` iterations that cannot change any
+    /// visible state or raise an event, advancing every counter exactly as stepping would.
+    fn idle_skip(&mut self, _max: usize) -> usize {
+        0
+    }
+
     /// Return the highest currently eligible peripheral interrupt request.
     fn pending_interrupt(&mut self) -> Option<InterruptRequest> {
         None
