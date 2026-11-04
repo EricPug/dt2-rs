@@ -16,6 +16,9 @@ use dt2_fw::{aplib, container, syx};
 
 use dt2_core::display;
 
+#[cfg_attr(not(feature = "window"), allow(dead_code))]
+mod panel_ui;
+
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
@@ -933,8 +936,10 @@ fn run_binary(args: &[String]) {
     if loop_detect {
         bus.enable_loop_detection();
     }
+    let live_panel = args[6..].iter().any(|a| a == "LIVE_PANEL");
+    let panel_image = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_IMAGE=")).map(str::to_owned);
     let live_window = args[6..].iter().find_map(|a| {
-        if a == "LIVE_WINDOW" {
+        if a == "LIVE_WINDOW" || a == "LIVE_PANEL" {
             Some(4)
         } else {
             a.strip_prefix("LIVE_WINDOW=").and_then(|s| s.parse::<usize>().ok())
@@ -1015,6 +1020,8 @@ fn run_binary(args: &[String]) {
             || assignment == "ESDHC_TRACE"
             || assignment.starts_with("UART8_TX_FILE=")
             || assignment == "LIVE_WINDOW"
+            || assignment == "LIVE_PANEL"
+            || assignment.starts_with("PANEL_IMAGE=")
             || assignment.starts_with("LIVE_WINDOW=")
             || assignment.starts_with("LIVE_PNG=")
             || assignment.starts_with("UART8_RX_PERIODIC=")
@@ -1276,7 +1283,7 @@ fn run_binary(args: &[String]) {
     );
     println!("{fast_path_status}");
     let report = if let Some(scale) = live_window {
-        run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale)
+        run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale, live_panel.then_some(panel_image))
     } else {
         cpu.run_with_interrupt(&mut bus, instruction_limit, interrupt_injection)
     };
@@ -1674,8 +1681,9 @@ fn run_live(
     instruction_limit: usize,
     mut injection: Option<InterruptInjection>,
     scale: usize,
+    panel: Option<Option<String>>,
 ) -> dt2_core::coldfire::RunReport {
-    let mut window = live_window::open(scale);
+    let mut window = live_window::open(scale, panel);
     if let Some(display) = &bus.display {
         let (width, height, pixels) = display.render_upright(scale);
         window.present(width, height, &pixels);
@@ -1776,19 +1784,41 @@ impl PanelInput {
 
 #[cfg(feature = "window")]
 mod live_window {
-    pub struct Window(minifb::Window, super::PanelInput);
+    pub struct Window(minifb::Window, super::PanelInput, Option<super::panel_ui::PanelUi>);
 
-    pub fn open(scale: usize) -> Window {
-        let (width, height) = (super::display::FB_HEIGHT * scale, super::display::FB_WIDTH * scale);
+    /// `panel` opens the clickable faceplate (with an optional panel photo as the backdrop) instead of the bare display.
+    pub fn open(scale: usize, panel: Option<Option<String>>) -> Window {
+        let (width, height) = match &panel {
+            Some(_) => (super::panel_ui::PANEL_WIDTH, super::panel_ui::PANEL_HEIGHT),
+            None => (super::display::FB_HEIGHT * scale, super::display::FB_WIDTH * scale),
+        };
+        let ui = panel.map(|image| {
+            let backdrop = image.and_then(|path| match super::panel_ui::load_backdrop(&path) {
+                Ok(pixels) => Some(pixels),
+                Err(error) => {
+                    eprintln!("PANEL_IMAGE ignored, drawing the plain panel: {error}");
+                    None
+                }
+            });
+            super::panel_ui::PanelUi::new(backdrop)
+        });
         Window(minifb::Window::new("dt2-rs panel display (synthetic boot)", width, height, minifb::WindowOptions::default()).unwrap_or_else(|error| {
             eprintln!("cannot open LIVE_WINDOW: {error}");
             std::process::exit(2)
-        }), super::PanelInput::default())
+        }), super::PanelInput::default(), ui)
     }
 
     impl Window {
         pub fn present(&mut self, width: usize, height: usize, pixels: &[u32]) {
-            let _ = self.0.update_with_buffer(pixels, width, height);
+            match &self.2 {
+                Some(ui) => {
+                    let frame = ui.render(Some((width, height, pixels)));
+                    let _ = self.0.update_with_buffer(&frame, super::panel_ui::PANEL_WIDTH, super::panel_ui::PANEL_HEIGHT);
+                }
+                None => {
+                    let _ = self.0.update_with_buffer(pixels, width, height);
+                }
+            }
         }
         pub fn is_open(&self) -> bool {
             self.0.is_open()
@@ -1871,6 +1901,27 @@ mod live_window {
             };
             let delta = if self.0.is_key_down(Key::LeftShift) || self.0.is_key_down(Key::RightShift) { -1 } else { 1 };
             self.1.begin_slice();
+            if let Some(ui) = self.2.as_mut() {
+                use super::panel_ui::Action;
+                let position = self.0.get_mouse_pos(minifb::MouseMode::Discard);
+                let wheel = self.0.get_scroll_wheel().map_or(0.0, |(_, y)| y);
+                let mut actions = ui.handle_mouse(
+                    position,
+                    self.0.get_mouse_down(minifb::MouseButton::Left),
+                    self.0.get_mouse_down(minifb::MouseButton::Right),
+                    wheel,
+                );
+                if self.0.is_key_pressed(Key::Escape, KeyRepeat::No) {
+                    actions.extend(ui.release_all());
+                }
+                for action in actions {
+                    match action {
+                        Action::Press(code) => self.1.press(code),
+                        Action::Release(code) => self.1.release(code),
+                        Action::Turn(encoder, delta) => self.1.turn(encoder, delta),
+                    }
+                }
+            }
             for key in self.0.get_keys_pressed(KeyRepeat::Yes) {
                 if let Some(index) = encoder(key) {
                     self.1.turn(index, delta);
@@ -1895,7 +1946,7 @@ mod live_window {
 mod live_window {
     pub struct Window;
 
-    pub fn open(_scale: usize) -> Window {
+    pub fn open(_scale: usize, _panel: Option<Option<String>>) -> Window {
         eprintln!("LIVE_WINDOW needs the window feature: cargo build --release -p dt2-cli --features window");
         std::process::exit(2)
     }
