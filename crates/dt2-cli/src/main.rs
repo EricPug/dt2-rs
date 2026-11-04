@@ -1,5 +1,5 @@
 use dt2_core::{
-    bus::{Bus, BusError, FlatRam, InterruptRequest, LoopContext, Mcf5441xSram},
+    bus::{Bus, BusError, FlatRam, InterruptRequest, LoopContext, Mcf5441xSram, TstOperand},
     coldfire::{Cpu, CpuError, InterruptInjection, RunStop},
     ddr::DdrController,
     dspi::Dspi,
@@ -2477,7 +2477,7 @@ struct LoopReport {
 
 struct TstDiagnostic {
     pc: u32,
-    operand: String,
+    operand: TstOperand,
     value: u32,
     size_bytes: u8,
     sr: u16,
@@ -5420,10 +5420,10 @@ impl Bus for ProbeBus {
         self.instruction_fetch = false;
     }
 
-    fn report_tst(&mut self, pc: u32, operand: &str, value: u32, size_bytes: u8, sr: u16) {
+    fn report_tst(&mut self, pc: u32, operand: TstOperand, value: u32, size_bytes: u8, sr: u16) {
         self.last_tst = Some(TstDiagnostic {
             pc,
-            operand: operand.to_string(),
+            operand,
             value,
             size_bytes,
             sr,
@@ -5828,6 +5828,17 @@ impl Bus for ProbeBus {
             .dtim3
             .as_ref()
             .is_some_and(DmaTimer1::interrupt_pending);
+        // Nothing asserted and nothing forced: skip the per-source INTC scans.
+        if pending_sources == 0
+            && !timer1_pending
+            && !timer3_pending
+            && !self.ssi_audio_irq_pending
+            && !self.intc0.as_ref().is_some_and(Intc0::has_forced)
+            && !self.intc1.as_ref().is_some_and(Intc0::has_forced)
+            && !self.intc2.as_ref().is_some_and(Intc2::has_forced)
+        {
+            return None;
+        }
         let intc0_request = self.intc0.as_ref().and_then(|intc0| {
             intc0.pending_interrupt_with(
                 (u64::from(timer1_pending) << DTIM1_SOURCE) | (u64::from(timer3_pending) << DTIM3_SOURCE),

@@ -3,7 +3,7 @@
 //! Only a subset of the instruction set is decoded so far; anything else returns
 //! [`CpuError::Illegal`], which at this stage means "not implemented" as much as "illegal".
 
-use crate::bus::{Bus, BusError, LoopContext};
+use crate::bus::{Bus, BusError, LoopContext, TstOperand};
 use crate::emac::Emac;
 
 pub const CCR_C: u16 = 0x01;
@@ -868,12 +868,12 @@ impl Cpu {
                         let v = self.read(bus, o, size)?;
                         self.flags_move(v, size);
                         let operand = match o {
-                            Operand::Dn(register) => format!("D{register}"),
-                            Operand::An(register) => format!("A{register}"),
-                            Operand::Mem(address) => format!("memory[{address:#010x}]"),
-                            Operand::Imm(value) => format!("immediate[{value:#010x}]"),
+                            Operand::Dn(register) => TstOperand::Dn(register),
+                            Operand::An(register) => TstOperand::An(register),
+                            Operand::Mem(address) => TstOperand::Mem(address),
+                            Operand::Imm(value) => TstOperand::Imm(value),
                         };
-                        bus.report_tst(pc0, &operand, v, size.bytes() as u8, self.sr);
+                        bus.report_tst(pc0, operand, v, size.bytes() as u8, self.sr);
                     }
                 } else {
                     return Err(ill);

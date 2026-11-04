@@ -864,3 +864,15 @@ Findings (snapshot `out/panel-1p5b.snap`, tpi=16, `SSI_AUDIO_IRQ=100000`):
 - After the fix the timer keeps counting at every rate, but latency does not improve above tpi=16 (message-to-first-tile: tpi=16 3.4M instr, tpi=64 20.6M, tpi=320/3200 none within 40M). Roughly 3.3M instructions of firmware work separate frame ends (~12 ticks at tpi=16), and each tick handler costs far more than a 13.7k-instruction period, so a high tick rate just saturates the CPU with tick handling (tick storm).
 - Interpretation: one frame is ~3M instructions, ~30 ms on real hardware at ~100M instr/s. Latency is bounded by emulator throughput (~10M instr/s), not by the timer rate. The `0xaa/0xbf/0xcd` ISRs seen near `0x40053d1c` are the SSI/eDMA completion interrupts landing in the hottest loop, not per-instruction exceptions.
 - Next: raise instruction throughput (`coldfire.rs` fast path / native hooks for the `0x40053d00` call chain).
+
+### Throughput round 1 (behavior-exact)
+
+Baseline ~10.3M instr/s on the panel snapshot (tpi=16).
+- `pending_interrupt` ran the full INTC scans on every instruction; it now returns early when no source is asserted and nothing is forced (`Intc0/Intc2::has_forced`): ~11.6M/s.
+- `report_tst` built a `String` (heap allocation) on every TST; it now passes a `Copy` `TstOperand` formatted only when printed: ~12.2M/s.
+- Skipping the interrupt poll entirely only gets ~13.5M/s, so polling is not the remaining limit.
+- No effect: fat LTO / `panic=abort` / `target-cpu=native`.
+- Slow (non-fast-RAM) accesses are only ~3% of instructions (code executing from the `0x8000xxxx` SRAM overlay).
+- A 40M-instruction run with encoder traffic produced a byte-identical UART8 TX stream and `.times` file before and after.
+- gdb line sampling is flat: `step_with_loop_budget` ~38%, `run_with_interrupt` ~14%, ProbeBus helpers ~30%. The hot firmware code (`0x40053cf2`, `0x4003f2d0`) is generic C++ virtual-call parameter-object walking (16 × 0x6a5-byte objects, `jsr (a0)` through `$28(vtable)`), not a clean loop to hook natively.
+- Conclusion: a further ~10x needs a structural CPU change (pre-decoded instruction/block cache), not micro-tuning.

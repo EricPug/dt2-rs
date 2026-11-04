@@ -42,6 +42,10 @@ impl Intc2 {
         (BASE..END).contains(&address)
     }
 
+    pub fn has_forced(&self) -> bool {
+        self.intfrch | self.intfrcl != 0
+    }
+
     pub fn pending_interrupt(&self, pending_sources: u64) -> Option<InterruptRequest> {
         let forced = (u64::from(self.intfrch) << 32) | u64::from(self.intfrcl);
         let pending = pending_sources | forced;
