@@ -6083,6 +6083,12 @@ impl Bus for ProbeBus {
     }
 
     fn idle_skip(&mut self, max: usize) -> usize {
+        // Executing idle spins for real gives the instruction-exact baseline the Unicorn tier
+        // (which cannot fast-forward) is compared against.
+        static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DISABLED.get_or_init(|| std::env::var_os("DT2_NO_IDLE_SKIP").is_some()) {
+            return 0;
+        }
         if self.instruction_hooks || !self.dump_calls.is_empty() || self.loop_detection {
             return 0;
         }

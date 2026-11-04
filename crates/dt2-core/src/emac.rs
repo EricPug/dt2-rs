@@ -39,6 +39,15 @@ impl Emac {
         (self.acc, self.ext_pair(false), self.ext_pair(true), self.macsr, self.read_mask())
     }
 
+    /// Replaces the register file from an engine's raw state (see [`Emac::raw48`]).
+    pub fn load_raw(&mut self, macc: [u64; 4], macsr: u32, mask: u32) {
+        self.macsr = macsr;
+        self.mask = mask & 0xFFFF;
+        for (n, bits) in macc.into_iter().enumerate() {
+            self.store_raw48(n, bits & 0xFFFF_FFFF_FFFF);
+        }
+    }
+
     pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
@@ -52,7 +61,7 @@ impl Emac {
     }
 
     /// The 48-bit accumulator as the manual defines it for the current mode.
-    fn raw48(&self, n: usize) -> u64 {
+    pub fn raw48(&self, n: usize) -> u64 {
         let acc = u64::from(self.acc[n]);
         let ext = u64::from(self.ext[n]);
         if self.fractional() {
