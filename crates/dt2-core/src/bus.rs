@@ -1,3 +1,4 @@
+use crate::icache::CodeMap;
 /// A memory access that no device answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BusError {
@@ -103,6 +104,17 @@ pub trait Bus {
     /// This is not a substitute for instruction-cycle or bus-clock timing.
     fn advance_instruction(&mut self) {}
 
+    /// Changes whenever memory holding cached instruction words may have been written.
+    fn code_epoch(&self) -> u32 {
+        0
+    }
+
+    /// True if the instruction words in `bytes` bytes at `pc` may be cached. The bus must then
+    /// bump `code_epoch` before any of those bytes change.
+    fn cacheable_code(&mut self, _pc: u32, _bytes: u32) -> bool {
+        false
+    }
+
     /// Called after the CPU enters an interrupt handler, for diagnostics.
     fn interrupt_taken(&mut self, _level: u8, _vector: u8) {}
 }
@@ -111,6 +123,7 @@ pub trait Bus {
 pub struct FlatRam {
     base: u32,
     data: Vec<u8>,
+    code: CodeMap,
 }
 
 impl FlatRam {
@@ -118,10 +131,16 @@ impl FlatRam {
         Self {
             base,
             data: vec![0; size],
+            code: {
+                let mut code = CodeMap::default();
+                code.enable(base, size as u32);
+                code
+            },
         }
     }
 
     pub fn load(&mut self, addr: u32, bytes: &[u8]) {
+        self.code.flush();
         let o = (addr - self.base) as usize;
         self.data[o..o + bytes.len()].copy_from_slice(bytes);
     }
@@ -150,18 +169,27 @@ impl Bus for FlatRam {
     }
     fn write8(&mut self, a: u32, v: u8) -> Result<(), BusError> {
         let o = self.range(a, 1, true)?;
+        self.code.note_write(a, 1);
         self.data[o] = v;
         Ok(())
     }
     fn write16(&mut self, a: u32, v: u16) -> Result<(), BusError> {
         let o = self.range(a, 2, true)?;
+        self.code.note_write(a, 2);
         self.data[o..o + 2].copy_from_slice(&v.to_be_bytes());
         Ok(())
     }
     fn write32(&mut self, a: u32, v: u32) -> Result<(), BusError> {
         let o = self.range(a, 4, true)?;
+        self.code.note_write(a, 4);
         self.data[o..o + 4].copy_from_slice(&v.to_be_bytes());
         Ok(())
+    }
+    fn code_epoch(&self) -> u32 {
+        self.code.epoch()
+    }
+    fn cacheable_code(&mut self, pc: u32, bytes: u32) -> bool {
+        self.code.mark(pc, bytes)
     }
 }
 

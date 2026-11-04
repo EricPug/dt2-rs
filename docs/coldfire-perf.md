@@ -192,3 +192,21 @@ End-state structure for a later reader:
 
 ### Checkpoint — stop and report before slice 2
 Slice 1 landed under estimate (12.7M effective vs 15–17M), and the same reasoning puts the later estimates in doubt. From the host-side sampling in this note: decode+execute ≈43%, fetch+RAM ≈15%, interrupt poll/timers ≈10%, slow-path bus ≈10%, run loop/hooks ≈9%. A decode cache removes mostly the fetch share and part of decode; a block driver removes most of the poll/hook/run-loop share. Even if both were free that leaves the ≈43% execute core plus slow-path bus, i.e. roughly 2× (~25M), not 50–65M. Reaching 50M+ needs the execute work itself to shrink (a JIT/IR or closure-compiled blocks), which is the slice 6 decision gate pulled forward. Slice 2 (splitting the ~800-line `step` into `Inst` decode + exec) is also the largest and riskiest piece, so it should be decided on purpose, not by momentum.
+
+### Slices 2–3 — instruction-word cache (done; measured gain ≈ 0)
+- `core/src/icache.rs`: `ICache` (64K-entry direct-mapped, entries tagged with an epoch) and `CodeMap` (256-byte page bitmap + epoch). `Bus::code_epoch`/`Bus::cacheable_code` let the RAM owner promise to bump the epoch before cached code changes. `FlatRam` and `ProbeBus` (fast RAM only, all six RAM-write sites) implement it.
+- `Cpu::step` is split into `step_cached` (record or replay the instruction's words) and `execute(bus, pc0, op, ..)`. Extension-word fetches replay from the entry; `DECODE_CACHE=off` keeps the plain bus-fetch path as the reference.
+- Pages are marked *before* the instruction executes and an entry is stored only if the epoch is unchanged afterwards, so self-modifying instructions are never cached stale.
+- Gate: PASS with cache on and with `DECODE_CACHE=off`. Unit tests added: cached vs uncached equality, and invalidation after a code rewrite. On the gate workload: 34.68M hits, 51K misses, 0 flushes.
+- **Result: ~+3% (10.6 → 11.0M).** Far under the 28–35M estimate. Fetching was never the bottleneck (a micro-benchmark on `FlatRam`, `crates/dt2-core/examples/bench.rs`, runs ~34M instr/s with or without the cache). The estimate assumed decode cost sat in fetch; it sits in `execute`, the bus run loop and the slow bus path.
+- The cache stays: it is the invalidation foundation any pre-decoded tier needs.
+
+### Re-measurement (steady-state gdb sampling, 150 samples)
+- Slow-path bus accesses: ~36–39% of samples. 3.9M slow accesses in 35M instructions, all at `0x8000xxxx` (SRAM overlay: stack/data). Each took the whole device-probe chain (`source_for_access` ×4 bytes, `read8_inner`/`write8_inner` ~20 checks, BTreeMap lookups).
+- Per-instruction run loop (poll, hooks, timer lag, `begin_instruction`): ~30%.
+- `execute` + `ea`/`read`/`write`: ~29%.
+- (The earlier "direct SRAM path gives no speedup" note was wrong; that experiment must have left part of the chain in place.)
+
+### Slice 3b — direct SRAM-overlay path (done)
+- `ProbeBus::in_fast_sram`: accesses in `0x8000_0000..0x8001_0000` go straight to `Mcf5441xSram` when the same conditions that enable fast RAM hold and nothing (seeded MMIO, eDMA TCD bytes, RGPIO) lives in that window.
+- Gate PASS. **11.0 → 14.7M instr/s.**

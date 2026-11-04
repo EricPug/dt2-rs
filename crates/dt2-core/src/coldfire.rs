@@ -5,6 +5,7 @@
 
 use crate::bus::{Bus, BusError, LoopContext, TstOperand};
 use crate::emac::Emac;
+use crate::icache::{ICache, MAX_WORDS};
 
 pub const CCR_C: u16 = 0x01;
 pub const CCR_V: u16 = 0x02;
@@ -116,6 +117,15 @@ enum Operand {
     Imm(u32),
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FetchMode {
+    Bus,
+    /// Take extension words from `iw` instead of the bus.
+    Replay,
+    /// Fetch from the bus and remember the words in `iw`.
+    Record,
+}
+
 #[derive(Clone)]
 pub struct Cpu {
     pub d: [u32; 8],
@@ -133,6 +143,13 @@ pub struct Cpu {
     fast_forwarded_in_step: usize,
     /// PC of the last executed `bra` to itself, if it was the previous instruction.
     idle_branch_pc: Option<u32>,
+    icache: Option<Box<ICache>>,
+    fetch_mode: FetchMode,
+    /// Words of the current instruction: replay source or record target.
+    iw: [u16; MAX_WORDS],
+    iw_len: usize,
+    iw_pos: usize,
+    icache_stats: [u64; 2],
 }
 
 impl Default for Cpu {
@@ -152,6 +169,12 @@ impl Default for Cpu {
             emac: Emac::default(),
             fast_forwarded_in_step: 0,
             idle_branch_pc: None,
+            icache: Some(Box::default()),
+            fetch_mode: FetchMode::Bus,
+            iw: [0; MAX_WORDS],
+            iw_len: 0,
+            iw_pos: 0,
+            icache_stats: [0; 2],
         }
     }
 }
@@ -161,21 +184,57 @@ impl Cpu {
         Self::default()
     }
 
+    /// Enables or disables the instruction-word cache (the uncached path stays the reference).
+    pub fn set_icache(&mut self, enabled: bool) {
+        self.icache = enabled.then(Box::default);
+    }
+
+    /// (hits, misses) since creation.
+    pub fn icache_stats(&self) -> (u64, u64) {
+        (self.icache_stats[0], self.icache_stats[1])
+    }
+
+    fn record_word(&mut self, word: u16) {
+        if self.iw_len < MAX_WORDS {
+            self.iw[self.iw_len] = word;
+        }
+        self.iw_len += 1;
+    }
+
     fn fetch16<B: Bus>(&mut self, bus: &mut B) -> Result<u16, CpuError> {
+        if self.fetch_mode == FetchMode::Replay && self.iw_pos < self.iw_len {
+            let v = self.iw[self.iw_pos];
+            self.iw_pos += 1;
+            self.pc = self.pc.wrapping_add(2);
+            return Ok(v);
+        }
         bus.begin_instruction_fetch();
         let value = bus.read16(self.pc);
         bus.end_instruction_fetch();
         let v = value?;
         self.pc = self.pc.wrapping_add(2);
+        if self.fetch_mode == FetchMode::Record {
+            self.record_word(v);
+        }
         Ok(v)
     }
 
     fn fetch32<B: Bus>(&mut self, bus: &mut B) -> Result<u32, CpuError> {
+        if self.fetch_mode == FetchMode::Replay && self.iw_pos + 2 <= self.iw_len {
+            let v = (u32::from(self.iw[self.iw_pos]) << 16) | u32::from(self.iw[self.iw_pos + 1]);
+            self.iw_pos += 2;
+            self.pc = self.pc.wrapping_add(4);
+            return Ok(v);
+        }
         bus.begin_instruction_fetch();
         let value = bus.read32(self.pc);
         bus.end_instruction_fetch();
         let v = value?;
         self.pc = self.pc.wrapping_add(4);
+        if self.fetch_mode == FetchMode::Record {
+            self.record_word((v >> 16) as u16);
+            self.record_word(v as u16);
+        }
         Ok(v)
     }
 
@@ -518,7 +577,63 @@ impl Cpu {
         let pc0 = self.pc;
         bus.begin_instruction(pc0);
         bus.report_instruction_state(pc0, &self.d, &self.a, self.sr);
+        if self.icache.is_some() {
+            return self.step_cached(bus, pc0, loop_budget);
+        }
         let op = self.fetch16(bus)?;
+        self.execute(bus, pc0, op, loop_budget)
+    }
+
+    /// Runs the instruction at `pc0`, replaying its words from the cache when possible.
+    fn step_cached<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        pc0: u32,
+        loop_budget: Option<(usize, usize)>,
+    ) -> Result<(), CpuError> {
+        let epoch = bus.code_epoch();
+        let hit = self
+            .icache
+            .as_deref()
+            .and_then(|cache| cache.lookup(pc0, epoch))
+            .map(|entry| (entry.words, entry.len as usize));
+        if let Some((words, len)) = hit {
+            self.icache_stats[0] += 1;
+            self.iw = words;
+            self.iw_len = len;
+            self.iw_pos = 1;
+            self.pc = pc0.wrapping_add(2);
+            self.fetch_mode = FetchMode::Replay;
+            let result = self.execute(bus, pc0, words[0], loop_budget);
+            self.fetch_mode = FetchMode::Bus;
+            return result;
+        }
+        self.icache_stats[1] += 1;
+        // Mark the pages before executing so an instruction that overwrites itself is not cached.
+        let cacheable = bus.cacheable_code(pc0, (MAX_WORDS * 2) as u32);
+        self.iw_len = 0;
+        self.fetch_mode = if cacheable { FetchMode::Record } else { FetchMode::Bus };
+        let result = match self.fetch16(bus) {
+            Ok(op) => self.execute(bus, pc0, op, loop_budget),
+            Err(error) => Err(error),
+        };
+        self.fetch_mode = FetchMode::Bus;
+        if cacheable && result.is_ok() && self.iw_len <= MAX_WORDS && bus.code_epoch() == epoch {
+            let words = self.iw;
+            if let Some(cache) = self.icache.as_deref_mut() {
+                cache.insert(pc0, epoch, &words[..self.iw_len]);
+            }
+        }
+        result
+    }
+
+    fn execute<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        pc0: u32,
+        op: u16,
+        loop_budget: Option<(usize, usize)>,
+    ) -> Result<(), CpuError> {
         let ill = CpuError::Illegal { pc: pc0, op };
         let (mode, reg) = ((op >> 3) & 7, (op & 7) as usize);
         match op >> 12 {
@@ -1479,6 +1594,38 @@ mod tests {
         run(&mut c, &mut r, 7);
         assert_eq!(c.d[0], 0);
         assert_eq!(c.pc, 0x1006);
+    }
+
+    fn cached_and_uncached(code: &[u16], steps: &[usize], patch: Option<(u32, u16)>) -> (Cpu, Cpu, u64) {
+        let (mut cached, mut ram_a) = machine(code);
+        let (mut plain, mut ram_b) = machine(code);
+        plain.set_icache(false);
+        for &n in steps {
+            run(&mut cached, &mut ram_a, n);
+            run(&mut plain, &mut ram_b, n);
+            if let Some((address, word)) = patch {
+                ram_a.write16(address, word).unwrap();
+                ram_b.write16(address, word).unwrap();
+            }
+        }
+        let (hits, _) = cached.icache_stats();
+        (cached, plain, hits)
+    }
+
+    #[test]
+    fn instruction_cache_matches_the_uncached_interpreter() {
+        let (cached, plain, hits) = cached_and_uncached(&[0x7003, 0x5380, 0x66FC, 0x4E71], &[7], None);
+        assert!(hits > 0);
+        assert_eq!((cached.d, cached.pc, cached.sr), (plain.d, plain.pc, plain.sr));
+    }
+
+    #[test]
+    fn instruction_cache_sees_rewritten_code() {
+        // addq.l #1,d0 / bra.b back; the addq is patched to #2 after it has been cached.
+        let (cached, plain, hits) = cached_and_uncached(&[0x5280, 0x60FC], &[10, 10], Some((0x1000, 0x5480)));
+        assert!(hits > 0);
+        assert_eq!(cached.d[0], 15);
+        assert_eq!((cached.d, cached.pc, cached.sr), (plain.d, plain.pc, plain.sr));
     }
 
     #[test]
