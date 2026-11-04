@@ -831,3 +831,15 @@ Encoder turns only reach the screen on the next UI tick (receiver type 5, DTIM3 
 
 - Dragging a knob already turned it wherever the pointer went inside the window (the turn is tied to the pressed knob, not the hover). The remaining gap was the pointer leaving the window: minifb's `Discard` mode drops those samples, so `LIVE_PANEL` now reads positions with `Pass` while the left button is held and the turn continues off-window.
 - Sensitivity (revised): measured with `UART8_RX_PERIODIC` encoder messages (`3<enc> <delta>`): the delta is a signed byte of raw counts, and the firmware scales it finely (8 messages of +1 / +4 / +16 moved Tune by about 0.0 / 0.03 / 0.75; one count is about 0.006 of a displayed unit). So the earlier 3 px per count made a full 350 px turn only about 0.7 of a unit. The drag is now 1 pixel = 1 degree (a 360 degree turn is about 350 px, measured by the user) at `PANEL_COUNTS_PER_DEGREE` (default 4) counts per pixel; one wheel notch is 15 degrees. Larger drags are split into several messages of at most 127. For fine adjustment latch FUNC with a right click (not verified against firmware).
+
+## Encoder lag, second look: it is firmware latency, not the input path or the tick
+
+`PANEL_PERF=1` (environment variable, with `LIVE_PANEL`) prints wall-time split every 2 s. Measured live: ~9M instr/s, ~22 slices/s, cpu 85% / draw 15% / input 0%, so input is polled about every 45 ms and drawing is cheap.
+
+UART8 TX timestamps against `UART8_RX_PERIODIC` encoder messages show the firmware takes **~2.0-3.4M instructions** from the RX DMA to the first changed tile (messages at +8.0M and +16.0M: first tile at +3.4M and +2.0M). At ~10M instr/s that is 0.2-0.35 s, roughly 15x the same pipeline on hardware.
+
+- The latency in instructions is unchanged by `DTIM3_TICKS_PER_INSTRUCTION` (16/32/320) and by `SSI_AUDIO_IRQ` (100000 / 400000 / 2000000; only throughput changes: 10.7 -> 15.8 M instr/s).
+- Scaling PIT/DTIM1/DTIM3 (tried n=2,4,8 after snapshot load) makes it worse or stalls the UI (timer ISRs eat the CPU); not kept.
+- Encoder messages are clamped per message: deltas 0x20, 0x40 and 0x7f give the same Tune change. Splitting a drag into several messages is what carries large moves; the change per count rises with message rate (firmware acceleration).
+
+Lead for the next step: profile which PCs the CPU runs between the RX DMA and the first tile, to find out whether it is busy work (audio/DSP) or waiting on something that could be shortened.
