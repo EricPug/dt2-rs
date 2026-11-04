@@ -927,3 +927,19 @@ Root and directory blocks around `0x5eff80..0x5f0140` hold `.`, `..`, `factory` 
 `incoming` entries. The DT2 ekFS base is therefore sector `0x5d8000`, past the
 `0x450001` limit the cold boot reads. Layout details (inodes, bitmaps, checksum) still
 need confirming against the documented MK1 format before writing a sample.
+
+## DT2 ekFS geometry and the +DRIVE browser (in progress)
+
+ekFS on the DT2 (base sector `0x5d8000`, superblock checksum verified with digiemu's lookup3 as an external oracle) differs from MK1 only in geometry:
+allocation block = 64 sectors (32 KB, `data_off` `0x16180`), 256 inodes per chunk, directory index extents at logical `0x10000..0x10002`
+(MK1: 32 sectors, `0x20000`). Root is inode 2 (`factory` = RAM inode `0x01000000`, `incoming` = inode 3). Running digiemu's `emu/ekfsformat.py`
+with those constants patched in (not copied into this repo) parses the firmware-formatted card and adds samples to `/incoming`
+(`out/dt2-card-ekfs.img`: clap and kick). The cold boot does not read the ekFS region.
+
+Opening the browser: FUNC held + panel message `2601` opens SAMPLES (+DRIVE / PROJECT RAM). `tools/panel-keys.sh` takes `+hex` to send a
+message without releasing it (`+2201 +2601 +2600 +2200` is FUNC+that key). `FULL_LOG=path` keeps the unfiltered run output.
+
+Open problem: YES on +DRIVE halts the firmware at `0x4013abc2` (`bra.b` to itself), called from `0x401862d2` after an
+inflate-style routine (`0x40185120`, wrapper `0x401869d0`) returns an error. It happens on any card, including one with no ekFS, so it is not the
+sample content. It is timing dependent: with `DT2_UNICORN` unset plus `ESDHC_TRACE` (Rust fallback inside the tier) the same key sequence does not halt
+but never opens the browser either. The input of that decode and why it fails are still unknown. DSPI0 does no NOR reads in that window.
