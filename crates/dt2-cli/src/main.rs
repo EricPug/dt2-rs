@@ -5925,6 +5925,47 @@ impl Bus for ProbeBus {
         Some(request)
     }
 
+    fn idle_skip(&mut self, max: usize) -> usize {
+        if self.instruction_hooks || !self.dump_calls.is_empty() || self.loop_detection {
+            return 0;
+        }
+        let count = self.current_instruction_count;
+        let mut cap = max;
+        if let Some((_, _, next, _)) = self.uart8_rx_periodic.as_ref() {
+            if *next == 0 {
+                return 0;
+            }
+            cap = cap.min(next.saturating_sub(count).saturating_sub(1));
+        }
+        if let Some(at) = self.ssi_audio_rearm_at {
+            cap = cap.min(at.saturating_sub(count).saturating_sub(1));
+        }
+        let mut headroom = cap as u64;
+        if let Some(pit) = &self.pit {
+            headroom = headroom.min(pit.idle_headroom());
+        }
+        if let Some(dtim1) = &self.dtim1 {
+            headroom = headroom.min(dtim1.idle_headroom());
+        }
+        if let Some(dtim3) = &self.dtim3 {
+            headroom = headroom.min(dtim3.idle_headroom());
+        }
+        if headroom == 0 {
+            return 0;
+        }
+        if let Some(pit) = &mut self.pit {
+            pit.skip_idle(headroom);
+        }
+        if let Some(dtim1) = &mut self.dtim1 {
+            dtim1.skip_idle(headroom);
+        }
+        if let Some(dtim3) = &mut self.dtim3 {
+            dtim3.skip_idle(headroom);
+        }
+        self.current_instruction_count = count.saturating_add(headroom as usize);
+        headroom as usize
+    }
+
     fn advance_instruction(&mut self) {
         if let Some(pit) = &mut self.pit {
             pit.advance_instruction();

@@ -131,6 +131,8 @@ pub struct Cpu {
     pub debug_csr: u32,
     pub emac: Emac,
     fast_forwarded_in_step: usize,
+    /// PC of the last executed `bra` to itself, if it was the previous instruction.
+    idle_branch_pc: Option<u32>,
 }
 
 impl Default for Cpu {
@@ -149,6 +151,7 @@ impl Default for Cpu {
             debug_csr: 0,
             emac: Emac::default(),
             fast_forwarded_in_step: 0,
+            idle_branch_pc: None,
         }
     }
 }
@@ -511,6 +514,7 @@ impl Cpu {
         loop_budget: Option<(usize, usize)>,
     ) -> Result<(), CpuError> {
         self.fast_forwarded_in_step = 0;
+        self.idle_branch_pc = None;
         let pc0 = self.pc;
         bus.begin_instruction(pc0);
         bus.report_instruction_state(pc0, &self.d, &self.a, self.sr);
@@ -951,6 +955,9 @@ impl Cpu {
                     let target = base.wrapping_add(disp);
                     if taken {
                         self.pc = target;
+                        if c == 0 && target == pc0 {
+                            self.idle_branch_pc = Some(pc0);
+                        }
                         if target <= pc0 {
                             if let Some((instructions, remaining)) = loop_budget {
                                 self.fast_forwarded_in_step = bus.fast_forward_loop(LoopContext {
@@ -1373,6 +1380,18 @@ impl Cpu {
                         });
                     }
                     continue;
+                }
+            }
+            if self.idle_branch_pc == Some(self.pc) {
+                let mut max = instruction_limit - budget_used;
+                if let Some(event) = injection {
+                    max = max.min(event.instruction_count.saturating_sub(budget_used + 1));
+                }
+                let skipped = bus.idle_skip(max);
+                budget_used += skipped;
+                fast_forwarded_instructions += skipped;
+                if budget_used >= instruction_limit {
+                    break RunStop::InstructionLimit;
                 }
             }
             let logical_instruction_count = budget_used + 1;

@@ -183,3 +183,9 @@ End-state structure for a later reader:
 - `STATE_HASH=n1,n2,...` (dt2-cli) prints an FNV-1a64 hash of the full snapshot bytes (CPU, RAM, devices) at each instruction count.
 - `tools/perf-gate.sh [binary]` checks the TX stream and `.times` sha1s plus state hashes at 1M/8M/20M/40M against golden values, and prints throughput. Needs `out/panel-1p5b.snap`.
 - Baseline (`b86c3d7` + STATE_HASH): GATE PASS, 12.1M instr/s. Hash runs are deterministic across runs and chunking does not change the TX stream.
+
+### Slice 1 — idle `bra self` skip (done; under estimate)
+- `Bus::idle_skip(max)`: when the previous instruction was a taken `bra` to itself, the run loop asks the bus to retire up to `max` iterations at once. `ProbeBus` caps it by the headroom to the next PIT/DTIM1/DTIM3 event (`idle_headroom`/`skip_idle`), the next `UART8_RX_PERIODIC` firing, the SSI re-arm, the injection point and the instruction limit, and refuses when instruction hooks, call dumps or loop detection are on. Counted as fast-forwarded instructions.
+- Gate: PASS (TX, `.times`, all four state hashes identical). Tests green.
+- Result: 5.27M of 40M instructions skipped; wall time 3.30 s → 3.15 s (~12.7M instr/s effective, vs 15–17M estimated). Idle instructions were already the cheapest ones, so the win is small.
+- Dropped from slice 1: event-driven interrupt poll (<=10% ceiling, many assertion sources, high risk for the gain) and the `hooks_active` collapse (the per-instruction hook calls are already a few loads). The real gain is in slices 2–4 (decode/block cache); proceeding.
