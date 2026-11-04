@@ -1890,15 +1890,16 @@ struct PanelInput {
     pressed_this_slice: Vec<u8>,
     deferred_releases: Vec<u8>,
     out: Vec<[u8; 2]>,
-    /// Encoder counts not yet sent; see `TURN_MESSAGES_PER_SLICE`.
+    /// Encoder counts not yet sent; see `TURN_MAX_DELTA`.
     pending_turns: [i32; 9],
 }
 
-/// Measured on OS 1.17 with `UART8_RX_PERIODIC`: the firmware applies only the first two encoder messages
-/// of a burst (4 give the same result as 2), and a delta above 0x40 counts the same as 0x40. A drag is
-/// therefore sent as at most two capped messages per encoder per slice, the rest carried to later slices.
-const TURN_MESSAGES_PER_SLICE: usize = 2;
-const TURN_MAX_DELTA: i32 = 0x40;
+/// The firmware accumulates encoder deltas and flushes at most 30 counts per UI tick (digiemu's panelin.py
+/// notes the same; here two 0x10 messages in a burst count the same as four). One message of up to 30 counts
+/// per encoder per slice therefore uses all it will take, and counts beyond a short backlog are dropped so a
+/// released knob stops within a couple of slices instead of draining a queue for seconds.
+const TURN_MAX_DELTA: i32 = 30;
+const TURN_BACKLOG: i32 = 2 * TURN_MAX_DELTA;
 
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 impl PanelInput {
@@ -1937,17 +1938,15 @@ impl PanelInput {
 
     fn turn(&mut self, encoder: u8, delta: i8) {
         if encoder < 9 {
-            self.pending_turns[usize::from(encoder)] += i32::from(delta);
+            let pending = &mut self.pending_turns[usize::from(encoder)];
+            *pending = (*pending + i32::from(delta)).clamp(-TURN_BACKLOG, TURN_BACKLOG);
         }
     }
 
     fn take(&mut self) -> Vec<[u8; 2]> {
         for (encoder, pending) in self.pending_turns.iter_mut().enumerate() {
-            for _ in 0..TURN_MESSAGES_PER_SLICE {
-                let step = (*pending).clamp(-TURN_MAX_DELTA, TURN_MAX_DELTA);
-                if step == 0 {
-                    break;
-                }
+            let step = (*pending).clamp(-TURN_MAX_DELTA, TURN_MAX_DELTA);
+            if step != 0 {
                 *pending -= step;
                 self.out.push([0x30 | encoder as u8, step as i8 as u8]);
             }
@@ -6301,17 +6300,16 @@ mod tests {
     }
 
     #[test]
-    fn panel_input_paces_large_turns() {
+    fn panel_input_caps_turns_and_backlog() {
         let mut input = super::PanelInput::default();
-        for _ in 0..3 {
+        for _ in 0..50 {
             input.turn(4, 127);
         }
-        input.turn(4, 20);
-        assert_eq!(input.take(), vec![[0x34, 0x40], [0x34, 0x40]]);
-        assert_eq!(input.take(), vec![[0x34, 0x40], [0x34, 0x40]]);
-        assert_eq!(input.take(), vec![[0x34, 0x40], [0x34, 0x40]]);
-        assert_eq!(input.take(), vec![[0x34, 0x11]]);
+        assert_eq!(input.take(), vec![[0x34, 30]]);
+        assert_eq!(input.take(), vec![[0x34, 30]]);
         assert!(input.take().is_empty());
+        input.turn(4, -5);
+        assert_eq!(input.take(), vec![[0x34, 0xFB]]);
     }
 
     use super::*;
