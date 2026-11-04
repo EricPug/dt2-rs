@@ -553,7 +553,7 @@ impl Cpu {
         Ok(())
     }
 
-    fn take_interrupt<B: Bus>(
+    pub fn take_interrupt<B: Bus>(
         &mut self,
         bus: &mut B,
         level: u8,

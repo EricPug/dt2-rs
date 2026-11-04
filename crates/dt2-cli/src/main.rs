@@ -18,6 +18,8 @@ use dt2_core::display;
 
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 mod panel_ui;
+#[cfg(feature = "unicorn")]
+mod unicorn_tier;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
@@ -996,7 +998,7 @@ fn run_binary(args: &[String]) {
         std::process::exit(2)
     });
     let mut cpu = Cpu::new();
-    cpu.set_icache(!args[6..].iter().any(|a| a == "DECODE_CACHE=off"));
+    cpu.set_icache(!args[6..].iter().any(|a| a == "DECODE_CACHE=off") && !unicorn_enabled());
     let mut cpu_overrides = Vec::new();
     let mut ram_dumps = Vec::new();
     let mut ram_file_dumps = Vec::new();
@@ -1311,8 +1313,10 @@ fn run_binary(args: &[String]) {
     } else if let Some(scale) = live_window {
         run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale, live_panel.then_some(panel_image))
     } else {
-        cpu.run_with_interrupt(&mut bus, instruction_limit, interrupt_injection)
+        run_engine(&mut cpu, &mut bus, instruction_limit, interrupt_injection)
     };
+    #[cfg(feature = "unicorn")]
+    unicorn_tier::print_stats();
     if let (Some(path), Some(display)) = (live_png, &bus.display) {
         let (width, height, pixels) = display.render_upright(4);
         std::fs::write(path, display::encode_gray_png(width, height, &pixels)).unwrap_or_else(|error| {
@@ -1732,6 +1736,27 @@ fn run_pc_sampled(cpu: &mut Cpu, bus: &mut ProbeBus, instruction_limit: usize, s
 
 /// `STATE_HASH=n1,n2,...` prints an FNV-1a hash of the full snapshot (CPU, RAM, devices) after each instruction count
 /// (counted from this run's start). It is the regression gate for CPU-core changes: equal hashes mean equal machine state.
+fn unicorn_enabled() -> bool {
+    #[cfg(feature = "unicorn")]
+    return unicorn_tier::enabled();
+    #[cfg(not(feature = "unicorn"))]
+    false
+}
+
+/// Runs the CPU on the selected engine: the Rust interpreter, or the Unicorn tier when enabled.
+fn run_engine(
+    cpu: &mut Cpu,
+    bus: &mut ProbeBus,
+    limit: usize,
+    injection: Option<InterruptInjection>,
+) -> dt2_core::coldfire::RunReport {
+    #[cfg(feature = "unicorn")]
+    if unicorn_tier::enabled() {
+        return unicorn_tier::run(cpu, bus, limit, injection);
+    }
+    cpu.run_with_interrupt(bus, limit, injection)
+}
+
 fn run_state_hashed(
     cpu: &mut Cpu,
     bus: &mut ProbeBus,
@@ -1756,7 +1781,7 @@ fn run_state_hashed(
     for point in points {
         let target = point.min(instruction_limit);
         if target > done {
-            report = cpu.run_with_interrupt(bus, target - done, None);
+            report = run_engine(cpu, bus, target - done, None);
             done += report.instructions + report.fast_forwarded_instructions;
         }
         let snapshot = bus.save_snapshot(cpu, ram_base, ram_size).unwrap_or_else(|error| {
@@ -3091,6 +3116,14 @@ impl ProbeBus {
             n = n.min((at.saturating_sub(self.current_instruction_count) as u64).max(1));
         }
         n
+    }
+
+    /// Retirements by an external engine: `count` advances the instruction count, `timers` the
+    /// timers' lag and the poll countdown (they differ by the instruction currently executing).
+    fn retire_external(&mut self, count: usize, timers: usize) {
+        self.current_instruction_count += count;
+        self.poll_countdown = self.poll_countdown.saturating_sub(timers as u64);
+        self.timer_pending += timers as u64;
     }
 
     /// Adds batched retirements to every timer.
@@ -6127,6 +6160,24 @@ impl Bus for ProbeBus {
     fn end_run(&mut self) {
         self.flush_timers();
     }
+
+    fn host_memory(&mut self) -> Vec<(u32, *mut u8, usize)> {
+        let mut regions = Vec::new();
+        if self.fast_ram.is_some() {
+            regions.extend(self.ram.host_memory());
+        }
+        if self.sram_fast {
+            if let Some(sram) = self.sram_overlay.as_mut() {
+                regions.extend(sram.host_memory());
+            }
+        }
+        regions
+    }
+
+    fn retire_batch(&mut self, n: usize) {
+        self.retire_external(n, n);
+    }
+
 
     fn advance_instruction(&mut self) {
         self.poll_countdown = self.poll_countdown.saturating_sub(1);
