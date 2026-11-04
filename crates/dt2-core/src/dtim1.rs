@@ -22,7 +22,10 @@ const DTXMR_EN1588: u8 = 1 << 5;
 const DTER_REF: u8 = 1 << 1;
 const DTER_CAP: u8 = 1;
 
+pub const DTIM3_BASE: u32 = 0xFC07_C000;
+
 pub struct DmaTimer1 {
+    base: u32,
     mode: u16,
     extended_mode: u8,
     event: u8,
@@ -38,8 +41,14 @@ pub struct DmaTimer1 {
 
 impl DmaTimer1 {
     pub fn new(ticks_per_instruction: u32) -> Self {
+        Self::at(DTIM1_BASE, ticks_per_instruction)
+    }
+
+    /// Another DMA timer with the same register layout (DTIM3 is at 0xFC07C000).
+    pub fn at(base: u32, ticks_per_instruction: u32) -> Self {
         assert!(ticks_per_instruction > 0);
         Self {
+            base,
             mode: 0,
             extended_mode: 0,
             event: 0,
@@ -61,6 +70,10 @@ impl DmaTimer1 {
 
     pub fn contains(address: u32) -> bool {
         (DTIM1_BASE..DTIM1_END).contains(&address)
+    }
+
+    pub fn covers(&self, address: u32) -> bool {
+        (self.base..self.base + 0x4000).contains(&address)
     }
 
     pub fn interrupt_pending(&self) -> bool {
@@ -180,7 +193,7 @@ impl DmaTimer1 {
         if address & 1 != 0 {
             return Err(Self::error(address, false));
         }
-        match address - DTIM1_BASE {
+        match address - self.base {
             DTMR => Ok(self.mode),
             DTXMR => Ok(u16::from(self.extended_mode) << 8),
             DTER => Ok(u16::from(self.event) << 8),
@@ -189,7 +202,7 @@ impl DmaTimer1 {
     }
 
     fn read_long(&self, address: u32) -> Result<u32, BusError> {
-        match address - DTIM1_BASE {
+        match address - self.base {
             DTRR => Ok(self.reference),
             DTCR => Ok(self.capture),
             DTCN => Ok(self.counter),
@@ -201,16 +214,16 @@ impl DmaTimer1 {
 impl Bus for DmaTimer1 {
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         self.sync();
-        if !Self::contains(address) {
+        if !self.covers(address) {
             return Err(Self::error(address, false));
         }
-        match address - DTIM1_BASE {
+        match address - self.base {
             0 | 1 => Ok(self.mode_byte(address)),
             DTXMR => Ok(self.extended_mode),
             DTER => Ok(self.event),
-            4..=7 => Ok(self.reference.to_be_bytes()[(address - DTIM1_BASE - 4) as usize]),
-            8..=11 => Ok(self.capture.to_be_bytes()[(address - DTIM1_BASE - 8) as usize]),
-            12..=15 => Ok(self.counter.to_be_bytes()[(address - DTIM1_BASE - 12) as usize]),
+            4..=7 => Ok(self.reference.to_be_bytes()[(address - self.base - 4) as usize]),
+            8..=11 => Ok(self.capture.to_be_bytes()[(address - self.base - 8) as usize]),
+            12..=15 => Ok(self.counter.to_be_bytes()[(address - self.base - 12) as usize]),
             _ => Err(Self::error(address, false)),
         }
     }
@@ -234,7 +247,7 @@ impl Bus for DmaTimer1 {
 
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         self.sync();
-        if address != DTIM1_BASE {
+        if address != self.base {
             return Err(Self::error(address, true));
         }
         self.write_mode(value);
@@ -244,10 +257,14 @@ impl Bus for DmaTimer1 {
 
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         self.sync();
-        if address != DTIM1_BASE + DTRR {
-            return Err(Self::error(address, true));
+        match address - self.base {
+            DTRR => self.reference = value,
+            DTCN => {
+                self.counter = value;
+                self.prescaler = 0;
+            }
+            _ => return Err(Self::error(address, true)),
         }
-        self.reference = value;
         self.recompute_deadline();
         Ok(())
     }
@@ -259,10 +276,10 @@ impl Bus for DmaTimer1 {
 
 impl DmaTimer1 {
     fn write8_synced(&mut self, address: u32, value: u8) -> Result<(), BusError> {
-        if !Self::contains(address) {
+        if !self.covers(address) {
             return Err(Self::error(address, true));
         }
-        match address - DTIM1_BASE {
+        match address - self.base {
             0 | 1 => {
                 let old = self.mode;
                 let mode = if address & 1 == 0 {

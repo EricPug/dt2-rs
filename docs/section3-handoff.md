@@ -768,3 +768,14 @@ Rendering the 1.1B capture with the repo tool and rotating the portrait frame 90
 - Root cause: the emulator has no DTIM3 model (only DTIM1, `crates/dt2-core/src/dtim1.rs`). The type-5 tick never arrives. No callbacks run, the bus `+0x21` layout step is skipped, and there is no redraw.
 - Not yet verified: the INTC1 source and level for DTIM3, and the singleton list at `0x44f371c8` containing host `0x44f5fe60`. The "with encoder traffic" run was not repeated, because the ISR cannot fire without a timer.
 - Suggested next step: add a DTIM3 model, or a `DTIM3_BOOTSTRAP` diagnostic like DTIM1, that raises vector 99.
+
+## DTIM3 model (`DTIM3_BOOTSTRAP`) and the redraw result
+
+- `DmaTimer1` in `crates/dt2-core/src/dtim1.rs` now takes a base address (`DmaTimer1::at`). `DTIM3_BASE` is `0xFC07C000`. Writing the counter register (DTCN, the firmware's `clr.l` at `0xFC07C00C`) is now accepted.
+- `DTIM3_BOOTSTRAP` (with optional `DTIM3_TICKS_PER_INSTRUCTION=n`, default 1) attaches DTIM3 and, if absent, INTC0. DTIM3 is INTC0 source 35, so vector 99; INTC0 now merges the DTIM1 and DTIM3 pending bits.
+- Snapshots: a DTIM3 section is appended after the EMAC slot in the optional tail. Snapshots saved without DTIM3 are unchanged. Loading a snapshot taken without `DTIM3_BOOTSTRAP` requires re-saving the snapshot with the flag; the new one is `out/blank-factory-1p5b-dtim3.snap`.
+- The firmware programs TRR=0x43238 (275000) with /16 and FRR, giving a tick every 4.4M instructions (about 30 Hz at 133 MHz).
+- Result from reset (1.5B, `DTIM3_BOOTSTRAP`): ISR `0x400c0b40` hits (91 retained, cap 192), and `0x4003117c` hits 91 times. The caller is the tick iterator `0x4013811c`, which is the type-5 path. Present `0x40032992` runs on every tick (100 hits retained), where before it ran only at startup. The 1.5B boot still ends normally.
+- Without input, render `0x4011bc96` has only the first-frame hits at 1094.8M to 1095.1M. The dirty flag is never set afterwards, so the ticks present nothing new.
+- Encoder traffic (`UART8_RX_PERIODIC=3000000:3005,3000`, 100M from the new snapshot): `0x4003117c` 23 hits, present `0x40032992` 23 hits (every tick, called from `0x4013811c`), `0x4011b126` (set dirty) 94 hits from `0x400f47ac` and `0x40062a82`, and render `0x4011bc96` 17 hits, all from `0x40032b40` inside present. The dirty flag at bus `+0x20` is now consumed by a present that renders. This closes the redraw gap.
+- Unit test: `dtim3_reference_match_delivers_intc0_vector_99_with_firmware_setup`. `cargo test` passes.
