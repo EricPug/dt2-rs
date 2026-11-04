@@ -257,3 +257,10 @@ Plan (each step measured, gates green, reference `execute` kept as fallback):
 - Result: ~27 -> 29.3-30.8M instr/s. Gate green with the cache on and off (off = old path, 22.7M); `opsweep` hash unchanged; new core test `quiet_batch_matches_the_normal_loop`.
 - Remaining budget on the gate workload (est.): execute ~35%, bus ~20%, icache lookup + dispatch ~15%, hooks inside `execute` (`report_branch`/`report_tst` Option writes) ~5%.
 - Next: pre-decoded handler tier (hot families with `opsweep` as differential gate) or the patched-Unicorn evaluation; neither is a small change, so this is the point to re-decide.
+
+### Slice 8 status: handler tier (MOVE.L), second family neutral
+
+- `ICache` entries carry a handler id classified once at insert; `step_cached` dispatches on a hit. Family 1 = MOVE.L/MOVEA.L (source modes 0-5, destination modes 0-5), mirroring `execute` step for step. Result: ~30 -> ~33.2M (+10%), clear gain, so the tier continued.
+- Gate: `tools/opsweep-gate.sh`. The sweep now keeps persistent RAM/CPU per seed; the cached (second, hit) run must hash identically to an uncached double run (`8d3864fdf474ed28`). Found and fixed a harness bug (restored RAM lost the code-page mark, replaying stale entries). Known artifact: MAC opcodes A1C0/A3C0/A5C0/A7C0 differ single vs double run (accumulator persists); cached == double run, so not a handler issue.
+- Family 2 (ADDQ/SUBQ.L, MOVEQ, Bcc/BRA) passed both gates but measured ~32.6M vs ~33.2M: no gain. Reverted per the stop rule; not kept as dead complexity.
+- Conclusion: handler tier tops out at ~33M on this workload. Short of 50M by a wide margin; remaining cost is bus/ProbeBus and dispatch, which per-opcode handlers do not remove. Next: patched-Unicorn evaluation (oracle first, then execution tier); pure-Rust interpreter stays as fallback.
