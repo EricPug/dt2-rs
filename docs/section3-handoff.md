@@ -697,3 +697,56 @@ In the snapshot the list holds one listener at `0x450cb250`, whose callback is `
 - The draw path works and is not gated by a flag that is still clear. The one initial present happened. After it the display is static until some view invalidates itself (`0x4011b126`) and a bus update follows.
 - The logo task `0x400d1a12` (priority 7, TCB `0x4314d558`) is the boot-logo animation task. It picks one of the scripts at `0x402a1b64`..`0x402a1ba4`, steps them with `0x400d18f0`, then blocks forever on semaphore `0x43149548`. This corrects the earlier "engine helper" note.
 - **Open:** what the 1095.7M frame actually contains, and which events (for example a real key press the views claim, or a sequencer / audio tick) are meant to invalidate views. Check the UART8 bytes sent at 1095.7M.
+
+## First present contents, why views never redraw, logo-task check
+
+Captured with `UART8_TX_FILE=<path>` (writes the TX stream plus `<path>.times`, one u64 retired-instruction number per byte), 1.5B from reset. Key and encoder experiments resumed `out/blank-factory-1p5b.snap` for 100M instructions with `UART8_RX_PERIODIC=3000000:...` (33 frames).
+
+### 1. What the UART8 stream contains (timeline)
+| instructions | traffic |
+|---|---|
+| 202M-801M | logo animation. One diff burst about every 4.4M, growing from 21 to about 600 bytes and shrinking again. Each burst is a run of `1t xx <8 bytes>` tile records. Last burst at 800.8M. |
+| 805M-814M | three `b8` (empty diff) |
+| 818M | one full-frame send (1281 bytes, `0x40133b6c`, logo task `0x400d19ea`) |
+| 822M | `0x40133c86` blank (1282 bytes), then the factory-install bar: a 51-byte tile burst every 8.8M until 1086.3M (so the earlier note "tile records end by ~826M" was wrong: the install bar keeps drawing to 1086M) |
+| 1091.56M | receiver startup: blank frame (128 records, `0x40133c86` from `0x40033968`), then a `b5 xx ..` LED burst (415 bytes) |
+| 1094.87M | `b8` (empty diff) |
+| 1094.89M-1095.09M | **127 tile records in three bursts** (381 + 420 + 471 bytes): the first real UI frame |
+| 1095.19M, .30M, .41M, .52M, .63M, **.77M** | `b8` only: an empty diff each time |
+
+- So the "first present" at 1095.724M (the diff inside `0x40032992`, return `0x40032b42`) sends **only the `b8` terminator**: the framebuffer was identical to the previous one. The UI frame was already sent by the earlier presents (the 8 subscribe-time bus updates) at 1094.9M-1095.1M.
+- The picture is not blank. Applying the records as page/column tiles gives a non-empty 128x64 image. I have not decoded it into text, and the tile byte layout (page versus row) is still unverified.
+- After 1095.77M nothing more is sent (0 bytes in the last 400M instructions).
+
+### 2. Why no view invalidates
+Hit counts in the snapshot (100M instructions each):
+| input | `0x4011b126` (invalidate) | `0x4011bc96` (render) | `0x4011bfa6` (bus update) | `0x40032992` (present) |
+|---|---|---|---|---|
+| none | 0 | 0 | 0 | 0 |
+| key frames YES `2102/2100` | 0 | n/a | 0 | n/a |
+| PLAY `2208/2200` | 0 (and `0x4011bc6a` 0) | n/a | n/a | n/a |
+| SAMPLING + YES `2601,2102,2100,2600` | 0 | n/a | n/a | n/a |
+| **encoder frames** `3005,3000` | **70** | **0** | **0** | **0** |
+
+- **Key path reaches the view handlers.** Key frames drive `0x4011c79c` (33 hits) and the primary slot `+8` handlers of SamplerLedView `0x40016b3a` (33 hits, called from `0x4011c48e`) and TransportView `0x400786ae` (33 hits). Both are called with the event object (`+0xc` key code, `+0x10` flags; accessors `0x40114984`, `0x40114a28`) and both just change state:
+  - SamplerLedView only does something when key `0x32` (SAMPLING, held-state query `0x4011e150`) is down together with YES (`0x0a`) or NO (`0x0c`) on the press edge. It then calls `0x40015f6c(...)` for the mode and one of `0x40015f9c`, `0x40015fda`, `0x400162c0` or `0x40015ff8`, which store a field at `ctx+0xa4` (`0x4004d9e0`) and the global `0x402a19d0` (`0x4002f47a`). It returns 1 (claims the key) in that case, otherwise `0`. It never calls the invalidate helper.
+  - TransportView dispatches on key code `0x0d`-`0x15` (jump table `0x40078700`; RECORD `0x13`, PLAY `0x14` -> `0x40078756`, STOP `0x15`) and goes on to `0x40078906` (17 hits with PLAY frames), updating the transport object at `this+0x6c`. No invalidate.
+  - MainScreenView's own handler `0x40065f08` still has 0 hits.
+- So key handlers do not invalidate. They change state and rely on something else to refresh.
+- **Encoder frames do invalidate.** `0x4011b126` is called 70 times, from `0x400f47ac` (42 times, an indirect observer-call loop), `0x40061914` (14, a `view->invalidate` wrapper) and `0x40018718` (14). The dirty flag at bus `0x44f5fe80+0x20` goes from 0 (snapshot) to 1 after the 100M run.
+
+### 3. Why the dirty flag never leads to a redraw
+- **Nothing runs the render after an invalidate.** Render `0x4011bc96` has 0 hits even with the flag set.
+- `0x40032992` (present) has exactly three callers (abs and PC-relative scans, plus no pointer references to it): `0x4003398a` (receiver startup), `0x4011c070` (tail of `0x4011bfa6`) and `0x40123a12` (screenshot).
+- `0x4011bfa6` has six callers, all PC-relative (`0x4011c1b8`, `0x4011c280`, `0x4011c354`, `0x4011c3fa`, `0x4011ca50`, `0x4011cb66`). `0x4011c3fa` is the tail of the signal iterator: after iterating, `if (d3) busUpdate(bus)` where `d3` is set only when a listener was removed or replaced during the iteration; then it clears `bus+0x22`. Encoder frames iterate without removing anything, so it is not called (0 hits).
+- The receiver loop (`0x40033d00`: `0x40001928` blocking queue get on `0x40966f3c`, then the type jump table at `0x40033d22`) has no post-message refresh and no timeout.
+- There is no timer or tick that calls present. This is event-driven by list mutation only, so a view that only sets its dirty flag is not drawn until some other mutation (subscribe / unsubscribe / push or pop of a view) happens.
+- A second flag, bus `+0x21` (set by `0x4011b15e` through `0x4011bc80`), is read only by `0x4011bc76` at `0x4003118c`, inside `0x4003117c(ctx)` (reached from `0x400a1b86` and the wrapper `0x400311c4`). It runs the layout step `0x4011bd1e` / `0x4003098e` / `0x400309b6`. I have not traced what calls `0x400a1b86`.
+- **Conclusion:** the emulator reaches the same state as the firmware expects up to the dirty flag. What is still missing (or not found statically) is the caller that should run `0x40032992` after the dirty flag is set. The best candidate is whatever calls `0x400a1b86` -> `0x4003117c`, because it consumes the other bus flag; a runtime check that it is hit with encoder frames would settle it. If the firmware really only redraws on list mutation, then the dirty flag may instead be flushed by a view push / pop from page-mode code (the code that calls the LED setter and never runs, see the earlier rounds).
+
+### 4. Logo task `0x400d1a12` (confirmed, with one correction)
+- Confirmed: it is the boot-logo animation task (priority 7, TCB `0x4314d558`), not an engine task.
+- It picks a script from `0x402a1b64`-`0x402a1ba4` by comparing `0x401524a0`, initialises with `0x400d1832`, then loops `step = 0x400d18f0(); if (step) pend(0x43149548)` (`0x400d1a86`-`0x400d1a96`).
+- The semaphore `0x43149548` is posted by the timer ISR `0x400d07d0` (sets bit 2 of `0xFC08C000`, then `0x4000148c`). Both `0x43149548` and `0x43149550` are created at `0x400d1450`.
+- When the animation finishes (`0x400d1a98`) it clears `0xFC08C000` and writes `0x10` to `0xFC05001C` (timer off), pends once on `0x43149550` (`0x4000155c`), then loops forever on `pend(0x43149548)` at `0x400d1abc` (return address `0x400d1ac4`, matching the saved-state wait table). With the timer disabled nothing posts it again, so it parks. Correction to the earlier wording: the final wait is on `0x43149548` after a one-time `0x43149550` handshake, not on `0x43149550` alone.
+- The animation bursts in the TX timeline above (202M-801M, final full frame at 818M) are this task's output.
