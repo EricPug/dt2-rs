@@ -1273,3 +1273,7 @@ RX/TX channels, since DSPI1 sees PUSHR groups `0x2002a268/0x2002a00f/0x2002a113`
 ### Emulated SSI output with the correct region
 
 User confirmed `out/kick-48k.wav` sounded like a kick. Rerun with `SYNTH_VOICE=0x4060d776:0x8020` (log `out/syn2.log`, capture `out/syn2.raw`): voice starts at instruction 9406038797 after TRIG, 16,399 nonzero frames (peak 32512) are de-framed from the SSI TX capture into `out/emulated-kick.wav` and played with `paplay`. Still a diagnostic stand-in, not firmware-driven playback.
+
+### DSP stream carries no sample address
+
+Scanning every 50th block of `out/dsp-c.log` for halfwords `0x4060`, `0x5770`, `0xd776`, `0x8020`, `0x4020`, `0x4011` (masked to 15 bits) finds nothing. Between idle (block 100) and after-TRIG (block 300) only indices 4, 13, 14, 16, 29, 38, 39, 41 (values `0x3c00`/`0x2b00`/`0x6400`/`0x7f00`, per-track-looking level fields) and counter 259 change. So the sample location/length is not in the per-block DSPI2 stream; the DSP must read sample memory some other way (DDR-shared) or got a descriptor earlier (e.g. at sample load). Next: watch for the one-time descriptor around LOAD TO TRK 01 (large DSPI2/eDMA transfer or writes of `0x4060d776`-ish addresses into shared SRAM `0x80000000+`).
