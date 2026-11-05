@@ -88,6 +88,11 @@ impl Dspi {
         self.devices[pcs] = Some(device);
     }
 
+    /// Diagnostic: marks the queue as finished, as a completed EOQ transfer would.
+    pub fn set_eoq_flag(&mut self) {
+        self.flags |= SR_EOQF;
+    }
+
     pub fn contains(&self, address: u32) -> bool {
         address.wrapping_sub(self.base) < BLOCK_SIZE
     }

@@ -980,3 +980,296 @@ but every captured byte was zero. A dump of that source buffer was also zero, wh
 sample payload remained present at `0x40605770`. Thus the card/sample-load path is working, but
 the firmware is not filling its SSI TX buffer during this trig + PLAY test; no playable audio or
 WAV-format claim is established yet. `SSI_TX_RAW` is diagnostic-only and disabled unless requested.
+
+### Update: buffer-service pointer remains null
+
+The follow-up trace separates the null global at `0x4031b264` from the per-track table. In the
+post-load trig + PLAY replay (`SSI_AUDIO_IRQ=100000`), the table at `0x44f37bd0` contains all 16
+default pointers (`0x41776cb8`), but `0x4031b264` remains zero and the SSI TX source at `0x4fe58900`
+is still zero. The buffer service clears the TX block, reads `0x4031b264` at `0x40003420`, and
+skips the processing path while that pointer is null.
+
+`TRACE_REGS=0x40002f46` records no hits in either a 60M-instruction cold boot or the 60M-instruction
+post-load replay. The cold-boot write watch sees only the startup zeroing at `0x400004d2`; during
+the post-load replay the service writes zero to `0x4031b264` 599 times at `0x400035de` with `A2=0`.
+The conditional store of `A0` to `0x4031b264` at `0x40002f46` is therefore a candidate initializer,
+not an observed one. Do not equate it with the separate per-track table or infer that the SHARC frame
+path is its source.
+
+Update: resuming `out/shots/diag-object-service-700m.snap` for another 500M instructions did not
+reach the configuration branch at `0x400065de` (zero register snapshots) or write the service
+pointer (zero watched writes). The restored PC was already in the `0x400cc912` idle loop, so this
+run does not reveal the branch input or select either path.
+
+An active-state stack trace from `out/shots/main-after-load.snap` captured 192 visits to
+`0x400035de`; each returns to `0x4002dedc`, immediately after the caller's `JSR $40003376` at
+`0x4002ded6`. At `0x40003420`, that service loads `0x4031b264` into `A2` and branches to its
+clear/return path when `A2` is null; the observed store at `0x400035de` writes that same null
+`A2` back. This confirms the SSI buffer-service caller repeatedly reaches the service, but does not
+show that the internal sample-mix path is active.
+
+Correction: `0x400065de` is in the USB OTG event dispatcher, not evidence of SSI/audio initialization.
+The surrounding handler reads and writes `0xFC0B01CC`; when `D1 == 2`, it calls `0x400030e6` to clear
+the list if `D0 == 0`, or `0x400030b0` to build it otherwise. `0x400030b0` invokes the allocator at
+`0x40002eac` 16 times; its class-2 allocation stores the list head/tail at `0x4031b264` and
+`0x4031b260` (`0x40002f46`/`0x40002f4c`). Static references in the section image show this is the
+only direct setup/clear callsite. The USB controller's broader event/driver path is documented
+above.
+
+Thus the active SSI caller does read a list whose observed initializer belongs to the USB event
+path, but the current run has no USB event and does not establish whether SSI playback intentionally
+depends on USB stream setup or shares a generic buffer service. Do not spend more boot tracing on
+`0x400065de` as an audio-init candidate.
+
+A 120M-instruction post-load replay with `SSI_AUDIO_IRQ=100000` and
+`TRACE_REGS=0x40003376` (`out/diag-ssi-args-trace.log`) captured 11 entries from the active SSI
+worker. The first stack argument alternates between the two ping-pong buffers `0x4fe58100` and
+`0x4fe58900`; the fourth argument is `0x20`, so the service's `<< 6` block size is 0x800 (2 KiB).
+`0x4fe58900` is the channel-50 SSI TX source. At `0x40003414`, the service clears that block through
+`0x40135db4` before loading `0x4031b264` at `0x40003420`; the null pointer then skips its list-driven
+processing path. This rules out a missing SSI service call, but does not rule out a missing sample
+trigger or mix activation.
+
+The list is a USB endpoint-transfer list, not a generic per-track context. Allocator
+`0x40002eac` assigns callback `0x40002db6` at node `+0x24`, a USB buffer at `+0x8`, and links nodes
+through `+0x34`; the setup helper `0x40005a86` then sets `+0x2c` to `0xFC0B014C` and `+0x30` to
+that USB buffer. Callback `0x40002db6` reads the USB frame state at `0x47DB41C8`. Thus the SSI
+service's list-driven path is USB-stream handling.
+
+A separate 30M-instruction resume from the same active playback snapshot recorded zero visits to
+`0x4002de8a`, the internal buffer-population loop in the SSI worker, despite reaching
+`0x40003376` in the longer replay. A trace at `0x4002de20` captured `D0=2`; the code sets `D4=5`,
+calls the getter at `0x40006c4a` (which returns `0x40965a60`), then branches to `0x4002debe` when
+the values differ. That branch bypasses the internal mix loop and calls the USB-stream service.
+Consequently, `0x4002de50` and `0x4002de8a` are not reached in this run; the latter's zero-hit trace
+is expected. The mode mismatch routes into the USB-stream service; with its list null, no data is
+copied back after the service clears its 2 KiB TX block, leaving the TX source zero.
+
+`WATCH_WRITE=0x40965a60` during another 120M-instruction trig + PLAY replay recorded no writes; the
+value remained 2. The state-transition routine at `0x40006c16` has a USB-message caller
+(`0x400f2d0e`, detailed below) and a separate wrapper group: `0x4010331a` queries `0x400c118a(0)`
+then sets mode 2, `0x40103330` queries it with 1 then sets mode 6, and `0x40103348` queries it with
+2 then sets mode 5. The wrapper group's dispatcher is not yet identified. None of these transitions
+was observed during the replay.
+
+The receiver-side handler at `0x40034644` is inside receiver message type `0x26` (jump-table entry
+`0x400345ee`), not a front-panel event. Type `0x26` is posted by the USB driver: `0x400055ce`
+constructs such a record and queues it through `0x40001896`; its other identified posters are also
+in the USB-driver path. The handler calls `0x400f2ce0`, which can set mode 2 or 5, but a
+120M-instruction trig + PLAY replay recorded zero hits there. This rules out the panel-trigger path
+as the source of the mode change and makes this particular state-5 transition USB-event-driven.
+It does **not** establish that the SSI worker's mode-5 internal mix path is itself USB-only or that
+normal sample playback should require a USB event. Keep that relationship unresolved and do not
+inject a synthetic USB event. A further 120M-instruction replay from the post-load snapshot, sending
+TRIG 1 (`2301`) then PLAY (`2208`), traced `0x40103348` with zero hits
+(`out/diag-wrapper-mode5.log`). The wrapper group's dispatcher/caller is still unidentified; next,
+locate that indirect dispatch and determine what runtime condition reaches its mode-5 request.
+
+### Post-load TRIG 1 + PLAY: sequencer and SSI output
+
+From `out/shots/main-after-load.snap`, replaying TRIG 1 and PLAY for 120M
+instructions did not identify a verified musical step counter. The observed
+`0x44e08670` change from 0 to 2 is an internal modulo-16 event-queue index,
+not evidence of sequencer advancement; the note/event arrays at `0x44e086ec`
+and `0x44e08b78` remain zero.
+
+The loaded sample payload is present at `0x40605770`; its record/WAV PCM length
+is `0x9c00` (39,936 bytes). This is the payload address and declared length,
+not a confirmed active-voice pointer. The per-track engine pointer table at
+`0x44f37bd0` still contains `0x41776cb8` entries.
+
+The valid mixer instruction entry nearest the requested `0x4017fa70` address
+is `0x4017fa6e` (`0x4017fa70` is inside its immediate operand); it had 0 hits.
+With `WATCH_WRITE` disabling the fast path, the TX zero-fill loop at
+`0x40135dc0` had 153,472 hits. The write watch counted 613,888 writes across
+`0x4fe58100..0x4fe59100` (four 32-bit stores per loop iteration); all were
+zero-to-zero stores. Both 2-KiB halves ended with 0 nonzero bytes, and all
+1,199 SSI TX DMA blocks (2,455,552 captured bytes) were zero. Thus sample data
+is loaded, but this replay did not reach the mixer or demonstrate active voice
+consumption.
+
+Receiver type `0x26` is internal USB-driver queue metadata, not a panel byte;
+front-panel UART input uses receiver type 0. No USB events were injected.
+
+### TRIG voice-state follow-up
+
+A fast-path-disabled TRIG 1 + PLAY replay reached `0x40139b54` on the direct
+panel path. Its descriptor is passed on the stack; the first hit used pointer
+`0x4098f394`, with the per-track offset `0x1950` and note value `0x3c`.
+`0x40139b54` writes a 0x6c-byte record at `0x47de5a1c`. The observed press-side
+fields include `+0x14 = 2`, descriptor value `+0x0c = 1` copied to
+record `+0x04`, note/velocity bytes `+0x26 = 0x3c` and `+0x27 = 0x64`, and
+`+0x38 = 0x00010781`. These fields still do not identify a sample pointer or
+PCM length; do not interpret `0x00010781` as an address.
+
+The call to `0x4013a806` at `0x40139c76` successfully returned pool object
+`0x44e67e88`. The following `0x40136388` call copies 0x6c bytes into the
+track-relative record at `0x47de5a1c`, after which `0x4013aa66` posts deferred
+work through the list headed at `0x44e6b488`. A write at `0x4013aabe` changed
+that head from `0x44e6799c` to `0x44e67988`. This establishes record creation
+and queue insertion, not audio consumption: the queue-drain routine at
+`0x4013aad0` had zero hits in a separate, equivalent 60M-instruction replay.
+The identified direct callsite is `0x4002d54a`; its scheduling/activation
+remains open.
+
+A separate TRIG 1 replay captured 599 SSI DMA blocks (1,226,752 bytes), all
+zero. The trace and record evidence are in
+`out/diag-voice-descriptor-fields.log`,
+`out/diag-voice-record-fields.log`,
+`out/diag-voice-allocation-return.log`, `out/diag-voice-queue-consumer.log`, and
+`out/diag-trigger-held-state.log`. Continue by identifying how the deferred
+work consumer is activated and where the loaded sample descriptor is resolved;
+keep the mode-2/mode-5 gate unresolved and do not inject USB events.
+
+### Forced mode-5 experiment and the empty audio source list
+
+New diagnostic `POST_LOAD_RAM32@addr=value` applies RAM seeds *after* `SNAPSHOT_LOAD`
+(plain `RAM32@` is overwritten by the snapshot). With `0x40965a60=5` and
+`0x40965a5c=0x4029f048` (the table entry `0x4029ef80 + 40*5`), the SSI worker takes the
+internal path: `0x4002de50` and the buffer loop `0x4002de8a` are hit 599 times. The SSI TX
+output is still all zero (599 blocks, 1,226,752 bytes), because the stereo-bus fill helper
+`0x40003ede` finds no sources and the `0x47db4358`/`0x47db435c` bus buffers stay zero.
+So mode 5 is necessary but not sufficient. This forced mode does not mean the firmware normally
+reaches mode 5 without a USB message.
+
+The deferred voice queue drain `0x4013aad0` is only called from `0x4002d546`, whose callers
+(`0x400d6784`, `0x400d74aa`, `0x400d7a1a`) all had 0 hits after TRIG + PLAY, so queued voice
+records are never registered with the audio source list. `0x400d6722` is called from
+`0x40139f36`, inside the handler at `0x40139e54`, which the SSI worker's USB branch calls at
+`0x4002df24` (it appears to be an external clock/transport event handler, not the internal
+PLAY path). Other callers of the flush path: `0x40078a9c`, `0x4011f4c2`; `0x400d79fa` has no direct
+caller. Next: identify which of these the real sequencer start reaches.
+
+### Transport handler runs every block but with a null message
+
+`0x40139e54` is called from the SSI worker at `0x4002df24` on every audio block (599 hits per 60M
+instructions). Each call has a2 = 0 and d2 = 0 on the stack, so it takes only the countdown branch
+(`0x44e678dc`); the message branch (byte `1(a2) & 0x20`, then the state switch that reaches
+`0x400d6722` and the drain) is never entered. The message pair comes from the reader `0x40003376`
+(`0x4002ded6`), which is gated on `0x4031b294` / the queue head `0x4031b264`; both are zero for the
+whole TRIG + PLAY run with no writes to `0x4031b294`. Handlers in the table at `0x4021e5d8..0x4021e614`
+(`0x4011f2d0`, `0x4011f34e`, `0x4011f3f4`, `0x4011f48a`) and the caller `0x40078a9c` also have 0 hits.
+Next: find the writer of `0x4031b294` / `0x4031b264` (the producer feeding the SSI worker's source queue).
+
+### Writers of the SSI source queue are USB-driven
+
+The only writers of the SSI worker's source-queue flags (`0x4031b294`, `0x4031b264` via
+`0x40002c28`/`0x40002c48`) and of the mode-5 mixer list/flags (`0x40965698`, `0x40965684`, set by
+`0x40003c38`) sit in the USB audio-stream code. `0x40003c38` is called at `0x4000659c` from a large
+command dispatcher in `0x40006300..` that reads the mailbox bytes `0x47db419a`/`0x47db419c`, and
+`0x47db41c8` is the USB frame state (written at `0x400059dc`, `0x4000707a`). The whole mailbox page
+`0x47db4190..0x47db41d0` is zero for the entire TRIG + PLAY run with 0 writes to `0x47db419a` and
+`0x40965684`; `0x4000659c` and `0x40003c38` have 0 hits. So mode 5 plus the mixer list are the USB
+host-audio path, and forcing mode 5 can never produce internal sample playback. The internal voice
+renderer that consumes the deferred queue (`0x4013aad0`, callback `0x4002d41c`) is still not
+identified; the drain's three callers and the transport message path were also unreached.
+
+### The deferred list is a sequencer event scheduler, and its run call is gated
+
+`0x44e6b488` is not a plain work queue. Nodes are either keyed by time (`+4`, inserted by `0x4013a98c`,
+chained through `+0x68`) or unkeyed (`(node) == 1`, appended by `0x4013aa66`, which is what TRIG posts). The
+consumers are the walkers `0x4013a8d2` (run items whose key equals d0), `0x4013a92c` (run items whose
+key is at or before d0) and the full drain `0x4013aad0`. In a TRIG + PLAY replay (60M instructions,
+`WATCH_WRITE` on, so the fast path is off):
+
+| PC | role | hits |
+|---|---|---|
+| `0x400d81c2` | sequencer step loop body | 736 |
+| `0x400d6982` | event generator (call) | 32 |
+| `0x400d8254` | reaches the run-events section | 32 |
+| `0x4013a98c` | keyed insert | 28 |
+| `0x4013a8d2` | run-at-key (return `0x400d82ca`) | 6 |
+| `0x4013a92c` | run-until-key call at `0x400d8284` | 0 |
+| `0x400d6e88`, `0x400d8286`, `0x400d893c`, drain | alternate generator and other run calls | 0 |
+
+So the sequencer steps and generates events. The keyed events are inserted and a few are run, but the
+step that would run the unkeyed TRIG voice node (`0x400d8284` after the test of `(a3)` at `0x400d8254`) is
+not taken. The flag bytes are near `0x431650a8..` and the pointers at `0x4316501c..0x43165030` (at the end
+of the run `0x4316501c = 0x41776cb8`, `0x43165024 = 0`). Next: capture what `(a3)` is at `0x400d8254` and
+what sets it (a mute / "voice busy" / play-state flag), then check whether the PLAY key sets the play
+state that clears it.
+
+### Per-track step flags and long-run audio check
+
+`0x431650a8..0x431650b7` is a per-track step countdown (16 tracks): the tick block at `0x400d8be6` reads
+each byte, decrements it when it is not negative, and fires the track when it reaches 0 (negative `0xff`
+means idle). It iterates 12 times per 60M instructions. All 16 bytes are 0 at the snapshot and are set to
+`0xff` once, by `0x400d6492` (`st.b d6` in the reset block around `0x400d6358`), as soon as the first PLAY
+key is processed; this happens with PLAY alone, with `PLAY PLAY`, and with TRIG + PLAY, and no later write
+to track 1's byte occurs. `PLAY` also sets `0x43165010 = 1` (run state). The tick ISR (vector 121) runs
+about 436 times per 400M instructions; the step divider is `0x18` (idx `[0x4293685e] = 2` into the table at
+`0x4020e278`), so the step event (type 4, `0x400d8c78`) fires roughly every 24 ticks.
+
+Long runs with the fast path (SSI TX captured with `SSI_TX_RAW`): 400M instructions with TRIG + PLAY; 800M
+with a 100M-instruction gap (TRIG, PLAY, wait); 800M with six TRIG taps spaced 20M apart. All produced 0
+nonzero SSI bytes (8.2 MB / 16.4 MB / 16.4 MB captured). More emulated time does not by itself produce
+audio. Possible reading: Track 01 has no trigs, so the step counter has nothing to fire, and the live
+TRIG voice is a node consumed by a path (`0x4013a92c` run-until-key at `0x400d8284`, gated by
+`tst.b (a3)`) that never executes. Not yet verified: the step data of the pattern, and which node type
+`0x4013aa66` creates versus what the keyed walkers' callback `0x400d59c4` accepts.
+
+### Corrections: TRIG takes the local-engine path; the drain is a flush
+
+- `0x40139b54` (what TRIG reaches) and `0x4012d4ce` are alternative voice-start paths. Callers at
+  `0x40120374/0x40120382` and `0x401205be/0x401205d6` pick between them using a per-track bit in the
+  halfword at `0x800047c0` (read by `0x4002dcee` = NOT bit, and `0x4002f3b0` = bit). That halfword is 0
+  at the snapshot and is only written by `0x4002da22`/`0x4002da72` (0 hits; copied from a
+  parameter block at `+0x552e`). With 0, every track takes the local engine `0x40139b54`, so that choice is
+  correct, not the bug. `0x4012d4ce` (posts type-1 voice messages from `0x4012d56c` to the task queue
+  `0x44e25220`) has 0 hits and is not expected here.
+- The voice task `0x4012c590` is alive (17 messages per 60M instructions) but only sees type-3 items, the
+  per-block SSI posts from `0x4002df68`. Type-3 scheduled nodes (`0x4012d096`) are never created.
+- The `0x6c`-byte local voice records live at `0x47de3cb8 + track*? + 0x414` and are referenced
+  statically only inside `0x40139944..0x40139b7e`. The node TRIG posts has type 0 (`clr.l (a3)` at
+  `0x40139bd8`); the drain callback `0x4002d41c` accepts only type 3, so the drain `0x4013aad0` is a
+  flush/cancel path (callers at the transport state change), not the play path. The earlier "drain never runs"
+  conclusion is therefore not the cause of the silence.
+- The block-rate hook `0x40139e54` is fed by the SSI worker with the USB-stream list head, which is null in
+  this run, so it only runs its countdown.
+Open: where local voice records are rendered into the stereo bus. No static reference to the voice array
+outside the `0x401399xx..0x40139bxx` cluster exists, so the renderer must reach it through a pointer
+stored in the per-track context (`0x3c14(a4)`, `+0xe85*4(a4)`), via `0x4002daa4` (called with a track).
+
+### Hardware reality check: the sample engine is probably on the SHARC DSP
+
+`research/digitakt-ii-1.17.md` records an Analog Devices ADSP-21569 (SHARC+) with its own DRAM on the board
+beside the MCF54415. A watch on the local voice record (`0x47de5a1c..0x47de5a88`) shows only the setup writes
+of `0x40139b54` (TRIG and PLAY each call it once); nothing in the ColdFire code reads that record again before
+the deferred list is flushed, and no ColdFire code outside the USB-stream path writes the SSI mixer source
+lists. That matches the voice engine living on the DSP: the ColdFire sends voice/sequencer commands and the
+DSP renders audio. The ColdFire-side mix path (`0x40003ede`, mode 5) only mixes USB streams and returns.
+Consequence: with no SHARC model, the SSI TX buffer from the ColdFire side stays zero even when the sequencer runs
+correctly. Next steps would be (a) find the CF-to-DSP link (the candidates are DSPI1/DSPI2 and the SSI
+RX/TX channels, since DSPI1 sees PUSHR groups `0x2002a268/0x2002a00f/0x2002a113`) and log what a TRIG sends, or
+(b) accept a synthetic playback stage. Not yet verified.
+
+### The CF-to-DSP link: DSPI2 + eDMA ch28/29 (found, gated off in the emulator)
+
+- `0x400cd420` (called once per SSI block, 599 calls per 100M instructions; args: source words, byte count) builds a command stream in shared SRAM `0x80001bc0` (`0x8001` control halfword + one data halfword per entry, `0x8001`-padded, last entry gets bit 11 set) from the caller's buffer, copies/limits to `0xbc0` bytes, and programs two eDMA channels: TCD `0xfc0453a0` (ch29, source `0x80001bc0` -> DSPI2 PUSHR `0xec038034`) and TCD `0xfc045380` (ch28, DSPI2 POPR `0xec03803a` -> `0x80001000`). It then sets DSPI2 MCR bits 11/10 (`0xec038000`), writes SR (EOQF, bit 28), and starts the channels (SERQ `0xfc044018/19` = 28/29). This is the voice/parameter exchange with the SHARC DSP, once per audio block; the reply lands at `0x80001000`.
+- Gate: `0x400cd452` reads DSPI2 SR (`0xec03802c`) and returns unless EOQF (bit 28) is set. The emulator answers `0x42000000` (synthetic) so EOQF is never set and the exchange never starts: 0 PUSHR, no eDMA TCD28/29 writes, and no DSP reply. DSPI1 PUSHR groups seen earlier are unrelated to this path.
+- `MMIO32@0xec03802c=...`, `DSPI2_BOOTSTRAP` and a seeded EOQF PUSHR did not change the read: the replay still logs `read32 0xec03802c -> 0x42000000 [synthetic]` (the synthetic-MMIO path wins over the DSPI2 model in the replay, or the seed is lost on snapshot restore). Logs: `out/dsp-a.log`, `out/dsp-b.log`.
+- Next: make DSPI2 SR reads reach the `Dspi` model during replay, complete ch28/29 as memory-to-peripheral/peripheral-to-memory moves (like the UART8 eDMA model), and dump the `0x80001bc0` stream after TRIG + PLAY to see what voice parameters the firmware sends. Then decide on a synthetic DSP stage that mixes the sample into SSI TX.
+
+### DSP link traced (`DSP_LINK` diagnostic)
+
+- `0x400cd452` reads DSPI2 SR; the `Dspi` model *does* answer (`0x42000000` = TXRXS|TFFF), it just never has EOQF because no transfer ever completes (the first exchange needs EOQF already set). New diagnostic option `DSP_LINK` (needs `DSPI2_BOOTSTRAP` or a snapshot with DSPI2): seeds EOQF after load, and treats SERQ for eDMA channels 28/29 as: ch29 = capture/print the outgoing block (`DSP_LINK block N len=... <halfwords>`) and set EOQF, ch28 = fill the reply buffer with `0xffff`. No DSP model; replies are placeholders.
+- Replay: `GAP=6000000 EXTRA="ESDHC_FILE=out/run-card.img DSPI2_BOOTSTRAP DSP_LINK SSI_TX_RAW=out/dsp-c.raw" FULL_LOG=out/dsp-c.log tools/panel-keys.sh out/shots/main-after-load.snap out/shots/dsp-c 100000000 2301 2208` (log `out/dsp-c.log`, 999 blocks, 100M instructions).
+- Every block is 5496 bytes: 2748 `0x8001`-tagged halfwords, i.e. 1374 data halfwords. Only two fields ramp every block (data indices 270 and 462: free-running phase/meter counters); everything else is stable until a key event. Key presses change blocks at 64, 193, 448 and 634: fields such as `0x3c00` (half-float 1.0, or 15360), `0x6400`, `0x7f00`, plus one-shot flags (indices 17/19 = 1 or a pending value for one block, then back to 0) and a second counter at index 759. This is a parameter/mixer-state mirror (levels, one-shot triggers), not a sample upload.
+- Still silent: SSI TX has 0 nonzero bytes. The placeholders mean no reply data. The sample payload (0x9c00 bytes at `0x40605770`) is not in this stream, so the sample must reach the DSP some other way (or the DSP reads shared DDR itself).
+
+### Synthetic voice stage: first nonzero SSI output (diagnostic, NOT firmware behavior)
+
+- The DSP firmware is ELE3 section 7 (SHARC loader records), so a real SHARC+ model is out of scope. The DSPI2 stream (`DSP_LINK`) is a per-block parameter mirror, not a sample upload.
+- `SYNTH_VOICE=<addr>:<len>` is a stand-in voice engine: when the CPU begins the voice-record builder `0x40139b54` (TRIG), each following SSI TX eDMA block (ch50, `0xfc0bc000`) has 32 frames x 64 bytes written with the next 16-bit big-endian mono sample (`<<16`) in slots 0 and 1, 1 sample per frame (48 kHz assumed). It turns the fast path off (the PC hook needs it).
+- Run: `GAP=6000000 EXTRA="ESDHC_FILE=out/run-card.img SYNTH_VOICE=0x40605770:0x9c00 SSI_TX_RAW=out/syn.raw" FULL_LOG=out/syn.log tools/panel-keys.sh out/shots/main-after-load.snap out/shots/syn 100000000 2301 2208`.
+- Result: starts at instruction 9406038797, finishes after 19,968 frames; `out/syn.raw` has 26,396 nonzero bytes, peak 32512, and de-framing slot 0 gives exactly 19,968 samples -> `out/synth-voice.wav` (mono, 48 kHz, played with `aplay` without error). Sample rate, slot assignment and pitch/level are assumptions.
+
+### Correction: the audible sample region is not `0x40605770..+0x9c00`
+
+- The first `SYNTH_VOICE` clip (`out/synth-voice.wav`) used `0x40605770:0x9c00` and was mostly a quiet tail, a long run of zeros (frames 3538..16387), then part of a loud section. The user played it through the analog sink and did not hear it; a 440 Hz test tone on the same sink was heard.
+- A RAM dump of `0x405f0000..+0x30000` (`out/samp-region.bin`, from `main-after-load.snap`) shows zeros before `0x40605000`, a quiet block at `0x40605000..0x40607fff`, and the loud block from `0x4060d776` to about `0x40615796` (peak 32512, 16,400 16-bit BE samples). The earlier "payload at `0x40605770`, length `0x9c00`" claim should not be relied on.
+- Extracting `0x4060d776..0x40615796`, normalising and playing it (`out/kick-48k.wav`, stereo, 48 kHz) was audible to the user. Whether it sounds like the kick is not confirmed; the block-to-block RMS (4k-14k) looks noisy, so the sample may not be plain 16-bit BE mono.
+
+### Emulated SSI output with the correct region
+
+User confirmed `out/kick-48k.wav` sounded like a kick. Rerun with `SYNTH_VOICE=0x4060d776:0x8020` (log `out/syn2.log`, capture `out/syn2.raw`): voice starts at instruction 9406038797 after TRIG, 16,399 nonzero frames (peak 32512) are de-framed from the SSI TX capture into `out/emulated-kick.wav` and played with `paplay`. Still a diagnostic stand-in, not firmware-driven playback.
