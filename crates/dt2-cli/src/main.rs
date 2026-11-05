@@ -1021,10 +1021,13 @@ fn run_binary(args: &[String]) {
             || assignment == "DTIM3_BOOTSTRAP"
             || assignment == "DSPI1_BOOTSTRAP"
             || assignment == "DSPI2_BOOTSTRAP"
+            || assignment == "DSP_LINK"
+            || assignment.starts_with("SYNTH_VOICE=")
             || assignment == "PIT0_ONESHOT"
             || assignment == "PIT2_PERIODIC"
             || assignment.starts_with("SNAPSHOT_SAVE=")
             || assignment.starts_with("SNAPSHOT_LOAD=")
+            || assignment.starts_with("POST_LOAD_RAM32@")
             || assignment.starts_with("INTC0_UNMASK=")
             || assignment.starts_with("UART8_RX_LATE=")
             || assignment.starts_with("RGPIO_INPUT_HIGH=")
@@ -1196,6 +1199,32 @@ fn run_binary(args: &[String]) {
             }
         }
         println!("restored snapshot {path}: PC={:#010x}", cpu.pc);
+    }
+    if let Some(spec) = args[6..].iter().find_map(|a| a.strip_prefix("SYNTH_VOICE=")) {
+        let parsed = spec.split_once(':').and_then(|(a, l)| Some((parse_address(a).ok()?, parse_address(l).ok()?)));
+        let Some((address, length)) = parsed else {
+            eprintln!("invalid SYNTH_VOICE, expected address:length");
+            std::process::exit(2)
+        };
+        bus.synth_voice = Some((address, length));
+        println!("diagnostic: SYNTH_VOICE plays {length:#x} bytes of 16-bit BE mono from {address:#010x} into SSI TX on voice start (not firmware behavior)");
+    }
+    if args[6..].iter().any(|a| a == "DSP_LINK") {
+        let Some(dspi2) = bus.dspi2.as_mut() else {
+            eprintln!("DSP_LINK needs DSPI2_BOOTSTRAP or a snapshot with DSPI2");
+            std::process::exit(2)
+        };
+        // The firmware only starts a DSP exchange once the previous one reported EOQF.
+        dspi2.set_eoq_flag();
+        bus.dsp_link = true;
+        println!("diagnostic: DSP link (DSPI2 + eDMA 28/29) enabled");
+    }
+    for seed in args[6..].iter().filter_map(|a| a.strip_prefix("POST_LOAD_RAM32@")) {
+        bus.seed_ram32(seed).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            std::process::exit(2)
+        });
+        println!("diagnostic: post-load RAM32 seed {seed}");
     }
     if let Some(list) = args[6..].iter().find_map(|a| a.strip_prefix("INTC0_UNMASK=")) {
         let Some(intc0) = bus.intc0.as_mut() else {
@@ -2389,6 +2418,7 @@ struct ProbeBus {
     watched_initial_bytes: Option<Vec<u8>>,
     watched_completion_tail: Option<(usize, Vec<u8>)>,
     trace_register_pc: Option<u32>,
+    register_trace_count: usize,
     register_trace: VecDeque<RegisterTrace>,
     register_trace_stack: VecDeque<Vec<u32>>,
     instruction_trace_tail_limit: usize,
@@ -2405,6 +2435,10 @@ struct ProbeBus {
     first_a0_range_trace: Option<RegisterTrace>,
     trace_pc_range: Option<(u32, u32)>,
     synthetic_mcf_mmio: bool,
+    dsp_link: bool,
+    synth_voice: Option<(u32, u32)>,
+    synth_pos: Option<u32>,
+    dsp_link_blocks: u32,
     access_events: Vec<AccessEvent>,
     section3_mmio_events: Vec<(usize, u32, AccessEvent)>,
     section3_mmio_count: usize,
@@ -2480,6 +2514,7 @@ const SSI_AUDIO_INTC1_SOURCE: u32 = 42;
 const DTIM1_SOURCE: u32 = 33;
 const DTIM3_SOURCE: u32 = 35;
 const SSI_AUDIO_RX_BUFFER: u32 = 0x4FE5_7100;
+const VOICE_RECORD_BUILDER: u32 = 0x4013_9B54;
 const SSI_AUDIO_TX_DATA: u32 = 0xFC0B_C000;
 const UART8_DMA_RING_MASK: u32 = 0x3FF;
 const PANEL_STUB_QUERY: [u8; 4] = [0x60, 0x02, 0x70, 0x00];
@@ -2499,6 +2534,7 @@ const MAX_LOOP_HISTORY: usize = 4096;
 const MAX_RTE_HISTORY: usize = 16;
 const MAX_WATCHED_WRITES: usize = 16_384;
 const MAX_REGISTER_TRACE: usize = 192;
+const REGISTER_TRACE_STACK_WORDS: usize = 12;
 const MAX_SCHED_TRACE_EVENTS: usize = 1024;
 const MAX_CONVERSION_TRACE_EVENTS: usize = 4096;
 const PIT1_PCSR: u32 = 0xFC08_4000;
@@ -2826,6 +2862,7 @@ impl ProbeBus {
             watched_initial_bytes: None,
             watched_completion_tail: None,
             trace_register_pc: None,
+            register_trace_count: 0,
             register_trace: VecDeque::new(),
             register_trace_stack: VecDeque::new(),
             instruction_trace_tail_limit: 0,
@@ -2842,6 +2879,10 @@ impl ProbeBus {
             first_a0_range_trace: None,
             trace_pc_range: None,
             synthetic_mcf_mmio: false,
+            dsp_link: false,
+            synth_voice: None,
+            synth_pos: None,
+            dsp_link_blocks: 0,
             access_events: Vec::new(),
             section3_mmio_events: Vec::new(),
             section3_mmio_count: 0,
@@ -3147,6 +3188,8 @@ impl ProbeBus {
             Some("RAM_SNAPSHOT active")
         } else if self.watch_write_range.is_some() {
             Some("WATCH_WRITE active")
+        } else if self.synth_voice.is_some() {
+            Some("SYNTH_VOICE active")
         } else if self.loop_detection {
             Some("LOOP_DETECT active")
         } else if self.mmio.keys().any(|&a| overlaps(a, a.saturating_add(1))) {
@@ -3179,7 +3222,8 @@ impl ProbeBus {
             || self.conversion_trace_enabled
             || self.trace_a0_range.is_some()
             || !self.trace_a1_checkpoints.is_empty()
-            || self.trace_register_pc.is_some();
+            || self.trace_register_pc.is_some()
+            || self.synth_voice.is_some();
         if self.instruction_hooks {
             "full"
         } else {
@@ -3645,7 +3689,8 @@ impl ProbeBus {
     fn print_register_trace(&self) {
         if let Some(pc) = self.trace_register_pc {
             println!(
-                "register trace at PC={pc:#010x}: {} snapshots (showing most recent)",
+                "register trace at PC={pc:#010x}: {} hit(s), {} snapshots retained (showing most recent)",
+                self.register_trace_count,
                 self.register_trace.len()
             );
             for (trace, stack) in self.register_trace.iter().zip(&self.register_trace_stack) {
@@ -3666,7 +3711,10 @@ impl ProbeBus {
                     trace.a[6],
                     trace.a[7]
                 );
-                println!("    instruction={} stack(A7)={:08x?}", trace.instruction_count, stack);
+                println!(
+                    "    instruction={} stack(A7)={:08x?}",
+                    trace.instruction_count, stack
+                );
             }
         }
         if let (Some((start, end)), Some(trace)) = (self.trace_a0_range, &self.first_a0_range_trace)
@@ -4235,6 +4283,10 @@ impl ProbeBus {
             self.record_esdhc_dma_event(channel, "TCD_WRITE", address, u32::from(value), 0);
             return Ok(());
         }
+        if address == EDMA_SERQ && self.dsp_link && matches!(value & 0x3F, 28 | 29) {
+            self.run_dsp_link_channel(value & 0x3F)?;
+            return Ok(());
+        }
         if address == EDMA_SERQ && self.uart8.is_some() {
             let channel = value & 0x3F;
             self.record_esdhc_dma_event(channel, "SERQ_START", address, u32::from(channel), 0);
@@ -4628,6 +4680,59 @@ impl ProbeBus {
         Ok(())
     }
 
+    // Diagnostic DSP link: ch29 feeds DSPI2 PUSHR, ch28 drains POPR. Each block is traced and then
+    // completes with EOQF set and 0xffff replies (no DSP model).
+    fn run_dsp_link_channel(&mut self, channel: u8) -> Result<(), BusError> {
+        let base = 0xFC04_5000 + 0x20 * u32::from(channel);
+        let source = self.tcd_value(base, 4);
+        let destination = self.tcd_value(base + 0x10, 4);
+        let total = self.tcd_value(base + 0x14, 2) * self.tcd_value(base + 0x08, 4).max(1);
+        if channel == 29 {
+            let mut words = Vec::new();
+            for offset in (0..total).step_by(2) {
+                words.push(self.read16_inner(source.wrapping_add(offset))?);
+            }
+            if self.dsp_link_blocks < 4000 {
+                let data: Vec<String> = words
+                    .iter()
+                    .map(|w| format!("{w:04x}"))
+                    .collect();
+                println!("DSP_LINK block {} len={} {}", self.dsp_link_blocks, total, data.join(" "));
+            }
+            self.dsp_link_blocks += 1;
+            if let Some(dspi) = self.dspi2.as_mut() {
+                dspi.set_eoq_flag();
+            }
+        } else {
+            for offset in (0..total).step_by(2) {
+                self.write16_inner(destination.wrapping_add(offset), 0xFFFF)?;
+            }
+        }
+        Ok(())
+    }
+
+    // Diagnostic stand-in for the SHARC voice engine: 32 frames of 16 slots (64 bytes each) per block.
+    fn synthesize_voice_block(&mut self, block: u32) -> Result<(), BusError> {
+        let (Some((address, length)), Some(mut pos)) = (self.synth_voice, self.synth_pos) else {
+            return Ok(());
+        };
+        for frame in 0..32u32 {
+            if pos + 2 > length {
+                self.synth_pos = None;
+                println!("SYNTH_VOICE finished");
+                return Ok(());
+            }
+            let hi = self.read8_inner(address + pos)?;
+            let lo = self.read8_inner(address + pos + 1)?;
+            let word = u32::from(u16::from_be_bytes([hi, lo])) << 16;
+            self.write32_inner(block + frame * 64, word)?;
+            self.write32_inner(block + frame * 64 + 4, word)?;
+            pos += 2;
+        }
+        self.synth_pos = Some(pos);
+        Ok(())
+    }
+
     fn tcd_value(&self, address: u32, width: u32) -> u32 {
         (0..width).fold(0, |value, offset| {
             value << 8 | u32::from(self.edma_tcd.get(&(address + offset)).copied().unwrap_or(0))
@@ -4673,6 +4778,9 @@ impl ProbeBus {
         let capture_ssi_tx = channel == SSI_AUDIO_DMA_CHANNEL
             && destination == SSI_AUDIO_TX_DATA
             && self.ssi_tx_raw.is_some();
+        if channel == SSI_AUDIO_DMA_CHANNEL && destination == SSI_AUDIO_TX_DATA {
+            self.synthesize_voice_block(source)?;
+        }
         if capture_ssi_tx {
             self.ssi_tx_dma_blocks = self.ssi_tx_dma_blocks.saturating_add(1);
             self.ssi_tx_first_source.get_or_insert(source);
@@ -5594,6 +5702,10 @@ impl Bus for ProbeBus {
             self.current_d = *d;
             self.current_a = *a;
         }
+        if self.synth_voice.is_some() && pc == VOICE_RECORD_BUILDER && self.synth_pos.is_none() {
+            self.synth_pos = Some(0);
+            println!("SYNTH_VOICE start at instruction {}", self.current_instruction_count);
+        }
         if !self.instruction_hooks {
             return;
         }
@@ -5666,11 +5778,12 @@ impl Bus for ProbeBus {
         if self.trace_register_pc != Some(pc) {
             return;
         }
+        self.register_trace_count = self.register_trace_count.saturating_add(1);
         if self.register_trace.len() == MAX_REGISTER_TRACE {
             self.register_trace.pop_front();
             self.register_trace_stack.pop_front();
         }
-        let stack = self.peek_ram_words(a[7], 4);
+        let stack = self.peek_ram_words(a[7], REGISTER_TRACE_STACK_WORDS);
         self.register_trace_stack.push_back(stack);
         self.register_trace.push_back(RegisterTrace {
             instruction_count,
@@ -7221,7 +7334,7 @@ mod tests {
 
     #[test]
     fn register_trace_keeps_most_recent_selected_pc_snapshots() {
-        let mut bus = ProbeBus::new(FlatRam::new(0, 16));
+        let mut bus = ProbeBus::new(FlatRam::new(0, 48));
         bus.trace_registers_at(0x1000);
         let mut data_registers = [0; 8];
         let address_registers = [0; 8];
@@ -7231,10 +7344,15 @@ mod tests {
         }
 
         assert_eq!(bus.register_trace.len(), MAX_REGISTER_TRACE);
+        assert_eq!(bus.register_trace_count, MAX_REGISTER_TRACE + 1);
         assert_eq!(bus.register_trace.front().unwrap().d[0], 1);
         assert_eq!(
             bus.register_trace.back().unwrap().d[0],
             MAX_REGISTER_TRACE as u32
+        );
+        assert_eq!(
+            bus.register_trace_stack.front().unwrap().len(),
+            REGISTER_TRACE_STACK_WORDS
         );
     }
 
