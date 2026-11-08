@@ -29,7 +29,8 @@ and must point here rather than maintain competing status reports.
 2. **Complete:** establish a deterministic boot-to-SAMPLE-page smoke gate, with
    sample-loaded encoder and page-change frame hashes, before changing
    DMA/shared-memory behavior.
-3. Trace the real sample-to-DSP handoff, recording evidence and ruled-out paths.
+3. **In progress:** trace the real sample-to-DSP handoff, recording evidence
+   and ruled-out paths in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
 4. Implement one firmware-driven playback slice and retain its SSI capture.
 5. Retire synthetic startup assumptions individually when evidence replaces them.
 
@@ -1293,19 +1294,17 @@ stored in the per-track context (`0x3c14(a4)`, `+0xe85*4(a4)`), via `0x4002daa4`
 beside the MCF54415. A watch on the local voice record (`0x47de5a1c..0x47de5a88`) shows only the setup writes
 of `0x40139b54` (TRIG and PLAY each call it once); nothing in the ColdFire code reads that record again before
 the deferred list is flushed, and no ColdFire code outside the USB-stream path writes the SSI mixer source
-lists. That matches the voice engine living on the DSP: the ColdFire sends voice/sequencer commands and the
-DSP renders audio. The ColdFire-side mix path (`0x40003ede`, mode 5) only mixes USB streams and returns.
-Consequence: with no SHARC model, the SSI TX buffer from the ColdFire side stays zero even when the sequencer runs
-correctly. Next steps would be (a) find the CF-to-DSP link (the candidates are DSPI1/DSPI2 and the SSI
-RX/TX channels, since DSPI1 sees PUSHR groups `0x2002a268/0x2002a00f/0x2002a113`) and log what a TRIG sends, or
-(b) accept a synthetic playback stage. Not yet verified.
+lists. This raised an external voice-engine hypothesis, but does not establish where the record is consumed.
+The ColdFire-side mix path (`0x40003ede`, mode 5) only mixes USB streams and returns. Do not treat this as
+evidence for a SHARC+ model or use a synthetic playback stage as milestone progress. The CF-to-DSP link is
+traced below; its sample descriptor/reader path remains unresolved.
 
-### The CF-to-DSP link: DSPI2 + eDMA ch28/29 (found, gated off in the emulator)
+### The per-block DSPI2 + eDMA ch28/29 path
 
-- `0x400cd420` (called once per SSI block, 599 calls per 100M instructions; args: source words, byte count) builds a command stream in shared SRAM `0x80001bc0` (`0x8001` control halfword + one data halfword per entry, `0x8001`-padded, last entry gets bit 11 set) from the caller's buffer, copies/limits to `0xbc0` bytes, and programs two eDMA channels: TCD `0xfc0453a0` (ch29, source `0x80001bc0` -> DSPI2 PUSHR `0xec038034`) and TCD `0xfc045380` (ch28, DSPI2 POPR `0xec03803a` -> `0x80001000`). It then sets DSPI2 MCR bits 11/10 (`0xec038000`), writes SR (EOQF, bit 28), and starts the channels (SERQ `0xfc044018/19` = 28/29). This is the voice/parameter exchange with the SHARC DSP, once per audio block; the reply lands at `0x80001000`.
+- `0x400cd420` (called once per SSI block, 599 calls per 100M instructions; args: source words, byte count) builds a command stream in shared SRAM `0x80001bc0` (`0x8001` control halfword + one data halfword per entry, `0x8001`-padded, last entry gets bit 11 set) from the caller's buffer, copies/limits to `0xbc0` bytes, and programs two eDMA channels: TCD `0xfc0453a0` (ch29, source `0x80001bc0` -> DSPI2 PUSHR `0xec038034`) and TCD `0xfc045380` (ch28, DSPI2 POPR `0xec03803a` -> `0x80001000`). It then sets DSPI2 MCR bits 11/10 (`0xec038000`), writes SR (EOQF, bit 28), and starts the channels (SERQ `0xfc044018/19` = 28/29). This establishes a per-block parameter exchange on the DSPI2 path; its receiver and sample-rendering role remain unverified.
 - Gate: `0x400cd452` reads DSPI2 SR (`0xec03802c`) and returns unless EOQF (bit 28) is set. The emulator answers `0x42000000` (synthetic) so EOQF is never set and the exchange never starts: 0 PUSHR, no eDMA TCD28/29 writes, and no DSP reply. DSPI1 PUSHR groups seen earlier are unrelated to this path.
-- `MMIO32@0xec03802c=...`, `DSPI2_BOOTSTRAP` and a seeded EOQF PUSHR did not change the read: the replay still logs `read32 0xec03802c -> 0x42000000 [synthetic]` (the synthetic-MMIO path wins over the DSPI2 model in the replay, or the seed is lost on snapshot restore). Logs: `out/dsp-a.log`, `out/dsp-b.log`.
-- Next: make DSPI2 SR reads reach the `Dspi` model during replay, complete ch28/29 as memory-to-peripheral/peripheral-to-memory moves (like the UART8 eDMA model), and dump the `0x80001bc0` stream after TRIG + PLAY to see what voice parameters the firmware sends. Then decide on a synthetic DSP stage that mixes the sample into SSI TX.
+- `MMIO32@0xec03802c=...`, `DSPI2_BOOTSTRAP` and a seeded EOQF PUSHR did not change the read in the initial attempts: the replay still logs `read32 0xec03802c -> 0x42000000 [synthetic]` (the synthetic-MMIO path wins over the DSPI2 model in the replay, or the seed is lost on snapshot restore). Logs: `out/dsp-a.log`, `out/dsp-b.log`. These attempts were superseded by the opt-in `DSP_LINK` diagnostic below, which opens the gate but supplies placeholder replies.
+- `DSP_LINK` captures the outgoing stream and confirms its block contents. It does not resolve the sample reader, and a synthetic playback stage is not the next milestone; see the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
 
 ### DSP link traced (`DSP_LINK` diagnostic)
 
@@ -1333,11 +1332,11 @@ User confirmed `out/kick-48k.wav` sounded like a kick. Rerun with `SYNTH_VOICE=0
 
 ### DSP stream carries no sample address
 
-Scanning every 50th block of `out/dsp-c.log` for halfwords `0x4060`, `0x5770`, `0xd776`, `0x8020`, `0x4020`, `0x4011` (masked to 15 bits) finds nothing. Between idle (block 100) and after-TRIG (block 300) only indices 4, 13, 14, 16, 29, 38, 39, 41 (values `0x3c00`/`0x2b00`/`0x6400`/`0x7f00`, per-track-looking level fields) and counter 259 change. So the sample location/length is not in the per-block DSPI2 stream; the DSP must read sample memory some other way (DDR-shared) or got a descriptor earlier (e.g. at sample load). Next: watch for the one-time descriptor around LOAD TO TRK 01 (large DSPI2/eDMA transfer or writes of `0x4060d776`-ish addresses into shared SRAM `0x80000000+`).
+Scanning every 50th block of `out/dsp-c.log` for halfwords `0x4060`, `0x5770`, `0xd776`, `0x8020`, `0x4020`, `0x4011` (masked to 15 bits) finds nothing. Between idle (block 100) and after-TRIG (block 300) only indices 4, 13, 14, 16, 29, 38, 39, 41 (values `0x3c00`/`0x2b00`/`0x6400`/`0x7f00`, per-track-looking level fields) and counter 259 change. So the sample location/length is not in the per-block DSPI2 stream; the sample must reach the renderer another way or have been described earlier. The sample-load probe below finds a small DSPI1 command but no PCM transfer, leaving the descriptor/shared-memory path open.
 
-### Sample load does not touch the DSP link; where the loud region comes from
+### Sample load and the per-block DSPI2 stream
 
 - Load replay (from `out/shots/action-down.snap`, cursor on RENAME in the `incoming` action menu): `UP UP UP UP YES wait wait YES` with `ESDHC_FILE=out/run-card.img DSPI2_BOOTSTRAP DSP_LINK ESDHC_TRACE`, 200M instructions, log `out/dsp-load.log`. The browser shows `008 kick verb` with `C044` afterwards, so the load happened. (`UP` x4 then one `YES` alone leaves the Destination dialog open; a second `YES` confirms.)
 - Two CMD18 reads, each 64 sectors (32 KiB) on eDMA ch59 (TCD DADDR/value `0x4060d770` then `0x40605770`), CMDARG last `0x5f0200`; the first read (sector `0x5f01c0`) lands at `0x4060d770`, the second (`0x5f0200`) at `0x40605770`. That explains the loud block at `0x4060d776` (first read, 6 bytes in) and the quieter data at `0x40605770`.
 - Across the whole load (1999 DSP blocks) only the two free-running counters (indices 270, 462) and a UI-animation field (112/113/114) change. No descriptor, address or sample data reaches the DSPI2 block stream at load. A 3-halfword n-gram search of the TRIG+PLAY blocks (`out/dsp-c.log`) for kick samples also finds no sample data.
-- So sample memory is not delivered to the DSP over DSPI2 eDMA 28/29. Remaining candidates: another bus/DMA channel (look for large eDMA transfers that are not ch28/29/50/59 after TRIG), FlexBus/shared memory, or a different "DSP" path altogether. Unresolved.
+- So sample memory is not delivered to the DSP over the per-block DSPI2 eDMA 28/29 stream. The follow-up `EDMA_TRACE` also found a one-time DSPI1 eDMA 15/14 exchange after the two eMMC reads. Its 8-byte wire sequence is built from a 4-byte request (`0001 012c`) by the helper at `0x40012562`; the first word is set there, and the second is copied from a caller argument. Stack tracing resolves the direct caller to a routine reached from an object-processing loop, but does not identify its relation to sample data. The helper requests a `0x300`-byte response, but the observed channel-14 transfer reads only two halfwords; the response contents and relation to sample handoff remain unresolved. The 100M trigger/play replay found no other firmware SERQ channel besides DSPI2 28/29 and synthetic panel RX 35. Direct shared-DDR/FlexBus reads and the purpose of the DSPI1 exchange remain open; see the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
