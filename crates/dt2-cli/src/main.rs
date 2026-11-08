@@ -570,6 +570,29 @@ fn run_binary(args: &[String]) {
             (start, end)
         })
     });
+    let sample_access_trace_range = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("SAMPLE_ACCESS_TRACE=").map(|spec| {
+            let (start, end) = spec.split_once(':').unwrap_or_else(|| {
+                eprintln!("invalid SAMPLE_ACCESS_TRACE range: expected start:end");
+                std::process::exit(2)
+            });
+            let start = parse_address(start).unwrap_or_else(|error| {
+                eprintln!("invalid SAMPLE_ACCESS_TRACE start: {error}");
+                std::process::exit(2)
+            });
+            let end = parse_address(end).unwrap_or_else(|error| {
+                eprintln!("invalid SAMPLE_ACCESS_TRACE end: {error}");
+                std::process::exit(2)
+            });
+            if start >= end {
+                eprintln!(
+                    "invalid SAMPLE_ACCESS_TRACE range: start must be less than exclusive end"
+                );
+                std::process::exit(2)
+            }
+            (start, end)
+        })
+    });
     let trace_register_pc = args[6..].iter().find_map(|assignment| {
         assignment.strip_prefix("TRACE_REGS=").map(|pc| {
             parse_address(pc).unwrap_or_else(|error| {
@@ -950,6 +973,9 @@ fn run_binary(args: &[String]) {
     if let Some(range) = watch_read_range {
         bus.watch_read_range(range);
     }
+    if let Some(range) = sample_access_trace_range {
+        bus.sample_access_trace_range = Some(range);
+    }
     if let Some(pc) = trace_register_pc {
         bus.trace_registers_at(pc);
     }
@@ -1094,6 +1120,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("STOP_PC=")
             || assignment.starts_with("WATCH_WRITE=")
             || assignment.starts_with("WATCH_READ=")
+            || assignment.starts_with("SAMPLE_ACCESS_TRACE=")
             || assignment.starts_with("TRACE_REGS=")
             || assignment.starts_with("STATE_HASH=")
             || assignment == "DECODE_CACHE=off"
@@ -1657,6 +1684,7 @@ fn run_binary(args: &[String]) {
     }
     bus.print_watched_writes();
     bus.print_watched_reads();
+    bus.print_sample_access_trace();
     bus.print_register_trace();
     bus.print_instruction_trace_tail();
     bus.print_scheduler_trace();
@@ -2601,6 +2629,8 @@ struct ProbeBus {
     watch_read_range: Option<(u32, u32)>,
     watched_read_count: usize,
     watched_reads: VecDeque<WatchedRead>,
+    sample_access_trace_range: Option<(u32, u32)>,
+    sample_access_trace: Vec<SampleAccessTrace>,
     trace_register_pc: Option<u32>,
     register_trace_count: usize,
     register_trace: VecDeque<RegisterTrace>,
@@ -2915,6 +2945,22 @@ struct WatchedRead {
     value: u32,
 }
 
+#[derive(Clone, Copy)]
+enum SampleAccessActor {
+    Cpu,
+    Dma { channel: u8, peer: u32 },
+}
+
+struct SampleAccessTrace {
+    instruction_count: usize,
+    pc: u32,
+    actor: SampleAccessActor,
+    write: bool,
+    address: u32,
+    width_bits: u8,
+    value: u32,
+}
+
 struct RegisterTrace {
     instruction_count: usize,
     pc: u32,
@@ -3058,6 +3104,8 @@ impl ProbeBus {
             watch_read_range: None,
             watched_read_count: 0,
             watched_reads: VecDeque::new(),
+            sample_access_trace_range: None,
+            sample_access_trace: Vec::new(),
             trace_register_pc: None,
             register_trace_count: 0,
             register_trace: VecDeque::new(),
@@ -3361,6 +3409,32 @@ impl ProbeBus {
         });
     }
 
+    fn record_sample_access(
+        &mut self,
+        actor: SampleAccessActor,
+        address: u32,
+        width_bytes: u8,
+        write: bool,
+        value: u32,
+    ) {
+        let Some((start, end)) = self.sample_access_trace_range else {
+            return;
+        };
+        let access_end = address.saturating_add(u32::from(width_bytes));
+        if address >= end || access_end <= start {
+            return;
+        }
+        self.sample_access_trace.push(SampleAccessTrace {
+            instruction_count: self.current_instruction_count,
+            pc: self.current_pc,
+            actor,
+            write,
+            address,
+            width_bits: width_bytes * 8,
+            value,
+        });
+    }
+
     fn enable_synthetic_mcf_mmio(&mut self) {
         self.synthetic_mcf_mmio = true;
     }
@@ -3417,6 +3491,8 @@ impl ProbeBus {
             Some("WATCH_WRITE active")
         } else if self.watch_read_range.is_some() {
             Some("WATCH_READ active")
+        } else if self.sample_access_trace_range.is_some() {
+            Some("SAMPLE_ACCESS_TRACE active")
         } else if self.synth_voice.is_some() {
             Some("SYNTH_VOICE active")
         } else if self.loop_detection {
@@ -3928,6 +4004,39 @@ impl ProbeBus {
                 "  read{} instruction={} PC={:#010x} address={:#010x} value={:#010x}",
                 read.width_bits, read.instruction_count, read.pc, read.address, read.value
             );
+        }
+    }
+
+    fn print_sample_access_trace(&self) {
+        let Some((start, end)) = self.sample_access_trace_range else {
+            return;
+        };
+        println!(
+            "sample access trace {start:#010x}..{end:#010x}: {} access(es)",
+            self.sample_access_trace.len()
+        );
+        for (index, access) in self.sample_access_trace.iter().enumerate() {
+            let operation = if access.write { "WRITE" } else { "READ" };
+            match access.actor {
+                SampleAccessActor::Cpu => println!(
+                    "  SAMPLE_ACCESS #{:06} instruction={} PC={:#010x} CPU {operation}{} address={:#010x} value={:#010x}",
+                    index + 1,
+                    access.instruction_count,
+                    access.pc,
+                    access.width_bits,
+                    access.address,
+                    access.value
+                ),
+                SampleAccessActor::Dma { channel, peer } => println!(
+                    "  SAMPLE_ACCESS #{:06} instruction={} PC={:#010x} DMA channel={channel} {operation}{} address={:#010x} value={:#010x} peer={peer:#010x}",
+                    index + 1,
+                    access.instruction_count,
+                    access.pc,
+                    access.width_bits,
+                    access.address,
+                    access.value
+                ),
+            }
         }
     }
 
@@ -4959,7 +5068,19 @@ impl ProbeBus {
         if channel == 29 {
             let mut words = Vec::new();
             for offset in (0..total).step_by(2) {
-                words.push(self.read16_inner(source.wrapping_add(offset))?);
+                let address = source.wrapping_add(offset);
+                let value = self.read16_inner(address)?;
+                self.record_sample_access(
+                    SampleAccessActor::Dma {
+                        channel,
+                        peer: destination,
+                    },
+                    address,
+                    2,
+                    false,
+                    u32::from(value),
+                );
+                words.push(value);
             }
             if self.dsp_link_blocks < 4000 {
                 let data: Vec<String> = words.iter().map(|w| format!("{w:04x}")).collect();
@@ -4976,7 +5097,18 @@ impl ProbeBus {
             }
         } else {
             for offset in (0..total).step_by(2) {
-                self.write16_inner(destination.wrapping_add(offset), 0xFFFF)?;
+                let address = destination.wrapping_add(offset);
+                self.write16_inner(address, 0xFFFF)?;
+                self.record_sample_access(
+                    SampleAccessActor::Dma {
+                        channel,
+                        peer: source,
+                    },
+                    address,
+                    2,
+                    true,
+                    0xFFFF,
+                );
             }
         }
         Ok(())
@@ -5066,7 +5198,27 @@ impl ProbeBus {
                 )
                 .wrapping_add(index % destination_size);
             let byte = self.read8_inner(from)?;
+            self.record_sample_access(
+                SampleAccessActor::Dma {
+                    channel,
+                    peer: destination,
+                },
+                from,
+                1,
+                false,
+                u32::from(byte),
+            );
             self.write8_inner(to, byte)?;
+            self.record_sample_access(
+                SampleAccessActor::Dma {
+                    channel,
+                    peer: source,
+                },
+                to,
+                1,
+                true,
+                u32::from(byte),
+            );
             if capture_ssi_tx {
                 if let Some(capture) = &mut self.ssi_tx_raw {
                     capture.push(byte);
@@ -6339,6 +6491,13 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
+                self.record_sample_access(
+                    SampleAccessActor::Cpu,
+                    address,
+                    1,
+                    false,
+                    u32::from(value),
+                );
                 self.record_watched_read(address, 1, u32::from(value));
                 if Uart8::contains(address) {
                     self.record_uart8_event(address, value, false, false, 0);
@@ -6370,6 +6529,13 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 2);
         match self.read16_inner(address) {
             Ok(value) => {
+                self.record_sample_access(
+                    SampleAccessActor::Cpu,
+                    address,
+                    2,
+                    false,
+                    u32::from(value),
+                );
                 self.record_watched_read(address, 2, u32::from(value));
                 self.record_dspi_pop(address, 16, u32::from(value));
                 self.record_loop_access(address, false);
@@ -6398,6 +6564,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 4);
         match self.read32_inner(address) {
             Ok(value) => {
+                self.record_sample_access(SampleAccessActor::Cpu, address, 4, false, value);
                 self.record_watched_read(address, 4, value);
                 self.record_dspi_pop(address, 32, value);
                 self.record_loop_access(address, false);
@@ -6427,6 +6594,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 1);
         let old = self.watched_old_bytes(address, 1)?;
         self.write8_inner(address, value)?;
+        self.record_sample_access(SampleAccessActor::Cpu, address, 1, true, u32::from(value));
         if Uart8::contains(address) {
             self.record_uart8_event(address, value, true, false, 0);
         }
@@ -6456,6 +6624,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 2);
         let old = self.watched_old_bytes(address, 2)?;
         self.write16_inner(address, value)?;
+        self.record_sample_access(SampleAccessActor::Cpu, address, 2, true, u32::from(value));
         self.snapshot_source_on_write(address, 2)?;
         self.record_watched_write(address, 2, u32::from(value), old);
         self.record_loop_access(address, true);
@@ -6482,6 +6651,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 4);
         let old = self.watched_old_bytes(address, 4)?;
         self.write32_inner(address, value)?;
+        self.record_sample_access(SampleAccessActor::Cpu, address, 4, true, value);
         self.record_dspi_push(address, value);
         self.snapshot_source_on_write(address, 4)?;
         self.record_watched_write(address, 4, value, old);
@@ -6865,6 +7035,61 @@ mod tests {
 
     use super::*;
     use dt2_core::uart::UART8_BASE;
+
+    #[test]
+    fn sample_access_trace_orders_cpu_and_dma_accesses() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x10000, 0x100));
+        bus.sample_access_trace_range = Some((0x10000, 0x10020));
+        bus.ram.write16(0x10000, 0xA1B2).unwrap();
+        bus.begin_instruction(0x2000);
+        assert_eq!(bus.read8(0x10000).unwrap(), 0xA1);
+
+        let tcd = 0xFC04_5000 + 0x20 * 2;
+        for (offset, value, width) in [
+            (0x00_u32, 0x10000_u32, 4_u32),
+            (0x04, 0, 2),
+            (0x06, 1, 2),
+            (0x08, 2, 4),
+            (0x10, 0x10010, 4),
+            (0x14, 1, 2),
+            (0x16, 1, 2),
+        ] {
+            let bytes = value.to_be_bytes();
+            for index in 0..width {
+                bus.edma_tcd
+                    .insert(tcd + offset + index, bytes[(4 - width + index) as usize]);
+            }
+        }
+        bus.begin_instruction(0x2010);
+        bus.run_edma_memory_to_peripheral(2).unwrap();
+
+        assert_eq!(bus.sample_access_trace.len(), 5);
+        assert!(matches!(
+            bus.sample_access_trace[0].actor,
+            SampleAccessActor::Cpu
+        ));
+        assert_eq!(bus.sample_access_trace[0].pc, 0x2000);
+        assert_eq!(bus.sample_access_trace[0].address, 0x10000);
+        for (index, address, write, value) in [
+            (1, 0x10000, false, 0xA1),
+            (2, 0x10010, true, 0xA1),
+            (3, 0x10001, false, 0xB2),
+            (4, 0x10011, true, 0xB2),
+        ] {
+            let event = &bus.sample_access_trace[index];
+            assert!(matches!(
+                event.actor,
+                SampleAccessActor::Dma {
+                    channel: 2,
+                    peer: 0x10000 | 0x10010
+                }
+            ));
+            assert_eq!(event.pc, 0x2010);
+            assert_eq!(event.address, address);
+            assert_eq!(event.write, write);
+            assert_eq!(event.value, value);
+        }
+    }
 
     #[test]
     fn nor_image_places_container_in_erased_flash_and_checks_bounds() {
