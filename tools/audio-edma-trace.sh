@@ -39,7 +39,7 @@ run_trace() {
     SNAPSHOT_LOAD="$snapshot" SNAPSHOT_SAVE="$OUT/$name.snap"
     LIVE_PNG="$OUT/$name.png" UART8_RX_ONCE
     "UART8_RX_PERIODIC=6000000:$messages"
-    DSP_LINK EDMA_TRACE ESDHC_TRACE
+    DSP_LINK EDMA_TRACE NONRAM_BULK_TRACE ESDHC_TRACE
   )
   if [[ -n "$raw_capture" ]]; then
     options+=("SSI_TX_RAW=$raw_capture")
@@ -72,6 +72,24 @@ check_requests() {
   echo "PASS $name channel $channel requests=$actual"
 }
 
+check_bulk_actor() {
+  local name=$1 actor=$2 expected=$3 actual
+  actual=$(grep -c "^  BULK_IO actor=$actor" "$OUT/$name.log" || true)
+  if [[ "$actual" -ne "$expected" ]]; then
+    echo "$name: expected $expected $actor bulk transfers, got $actual" >&2
+    exit 1
+  fi
+}
+
+check_no_cpu_bulk() {
+  local name=$1
+  if grep -q '^  BULK_IO actor=CPU ' "$OUT/$name.log"; then
+    echo "$name: unexpected qualifying CPU bulk write" >&2
+    exit 1
+  fi
+  echo "PASS $name non-RAM bulk DMA counts verified; CPU bulk writes=0"
+}
+
 echo "Sample-load probe uses synthetic DSP_LINK replies; no DSP or audio is modeled."
 run_trace sample-load out/shots/action-down.snap 200000000 \
   2104,2100,2104,2100,2104,2100,2104,2100,2102,2100,-,-,-,-,2102,2100 \
@@ -82,6 +100,9 @@ check_requests sample-load 28 1999
 check_requests sample-load 29 1999
 check_requests sample-load 35 991
 check_requests sample-load 59 2
+check_bulk_actor sample-load DMA29 1999
+check_bulk_actor sample-load DMA50 1999
+check_no_cpu_bulk sample-load
 grep -q 'DADDR=0x4060d770' "$OUT/sample-load.log"
 grep -q 'DADDR=0x40605770' "$OUT/sample-load.log"
 grep -q '^EDMA_TRACE request channel=29 .*NBYTES=0x00000004 .*DADDR=0xec038034 .*CITER=0x055e ' \
@@ -105,22 +126,27 @@ grep -q '^register trace at PC=0x4003314e: [1-9][0-9]* hit(s)' \
 grep -q 'stack(A7)=\[4019fc7e, 0000012c, 4525722c' \
   "$OUT/sample-load.log"
 
-run_trace sample-load-buffer out/shots/action-down.snap 200000000 \
-  2104,2100,2104,2100,2104,2100,2104,2100,2102,2100,-,-,-,-,2102,2100 \
-  "" 0x4fe79340:0x4fe79640 "" 0x4fe79340:0x4fe79640
-check_requests sample-load-buffer 14 1
-check_requests sample-load-buffer 15 1
-grep -q '^write watch at 0x4fe79340..0x4fe79640: 0 matching writes' \
-  "$OUT/sample-load-buffer.log"
-grep -q '^read watch at 0x4fe79340..0x4fe79640: 0 matching reads' \
-  "$OUT/sample-load-buffer.log"
-grep -Eq '^  initial=0+$' "$OUT/sample-load-buffer.log"
+if [[ ${SKIP_SAMPLE_BUFFER_PROBE:-0} != 1 ]]; then
+  run_trace sample-load-buffer out/shots/action-down.snap 200000000 \
+    2104,2100,2104,2100,2104,2100,2104,2100,2102,2100,-,-,-,-,2102,2100 \
+    "" 0x4fe79340:0x4fe79640 "" 0x4fe79340:0x4fe79640
+  check_requests sample-load-buffer 14 1
+  check_requests sample-load-buffer 15 1
+  grep -q '^write watch at 0x4fe79340..0x4fe79640: 0 matching writes' \
+    "$OUT/sample-load-buffer.log"
+  grep -q '^read watch at 0x4fe79340..0x4fe79640: 0 matching reads' \
+    "$OUT/sample-load-buffer.log"
+  grep -Eq '^  initial=0+$' "$OUT/sample-load-buffer.log"
+fi
 
 run_trace trig-play out/shots/main-after-load.snap 100000000 \
   2301,2300,2208,2200 "$OUT/trig-play.ssi.raw"
 check_requests trig-play 28 999
 check_requests trig-play 29 999
 check_requests trig-play 35 1775
+check_bulk_actor trig-play DMA29 999
+check_bulk_actor trig-play DMA50 999
+check_no_cpu_bulk trig-play
 grep -q 'SSI TX raw capture: 999 DMA block(s), 2045952 byte(s), 0 nonzero' \
   "$OUT/trig-play.log"
 

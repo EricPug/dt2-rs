@@ -167,11 +167,50 @@ requests; no DSPI1 SERQ is observed. SSI TX captures 999 blocks / 2,045,952
 bytes, all zero. The emulator's synthetic SSI channel-50 servicing is outside
 the firmware SERQ trace.
 
-## Next trace
+## Non-RAM bulk transfer experiment
+
+`NONRAM_BULK_TRACE` records every CPU write run or completed eDMA transfer of at
+least 1 KiB to a non-RAM destination, including PC, destination, size, and the
+first 16 bytes. The classification uses the configured RAM window even when a
+watch disables the RAM fast path. The exact per-transfer records are in
+`out/audio-edma-trace/sample-load.log` and `out/audio-edma-trace/trig-play.log`;
+the runner now checks the counts and absence of qualifying CPU writes.
+
+| Phase | Actor | Count | PC | Destination / size | Source | First 16 bytes |
+|---|---|---:|---|---|---|---|
+| Sample load | DMA29, synthetic `DSP_LINK` | 1,999 | `0x400cd5d2` | `0xec038034` / 5,496 B | `0x80001bc0` | `80010003800100008001000080010000` |
+| Sample load | DMA50, modeled SSI servicing | 1,000 | Per-event PC in log (289 distinct PCs) | `0xfc0bc000` / 2,048 B | `0x4fe58900` | all zero |
+| Sample load | DMA50, modeled SSI servicing | 999 | Per-event PC in log (294 distinct PCs) | `0xfc0bc000` / 2,048 B | `0x4fe58100` | all zero |
+| TRIG/PLAY | DMA29, synthetic `DSP_LINK` | 64 | Per-event PC in log | `0xec038034` / 5,496 B | `0x80001bc0` | `80010003800100008001000080010000` |
+| TRIG/PLAY | DMA29, synthetic `DSP_LINK` | 570 | Per-event PC in log | `0xec038034` / 5,496 B | `0x80001bc0` | `8001000380013c008001000080010000` |
+| TRIG/PLAY | DMA29, synthetic `DSP_LINK` | 365 | Per-event PC in log | `0xec038034` / 5,496 B | `0x80001bc0` | `8001000380013c008001000080012d00` |
+| TRIG/PLAY | DMA50, modeled SSI servicing | 500 | Per-event PC in log (6 distinct PCs) | `0xfc0bc000` / 2,048 B | `0x4fe58900` | all zero |
+| TRIG/PLAY | DMA50, modeled SSI servicing | 499 | Per-event PC in log (7 distinct PCs) | `0xfc0bc000` / 2,048 B | `0x4fe58100` | all zero |
+
+No qualifying CPU bulk-write run or other non-RAM DMA destination was observed.
+DMA29 is the diagnostic DSPI2/PUSHR path, not physical DSP evidence. DMA50 is
+the emulator's timer-scheduled SSI service, not a firmware-triggered hardware
+transfer. The sample-load channel-59 writes go to DDR and are correctly excluded
+as RAM destinations. The transfer records are evidence about this emulator run
+only; they do not establish a physical DSP sample-delivery mechanism.
+
+## Digiemu mk1 cross-check
+
+Digiemu's [Digitakt mk1 audio notes](https://github.com/irpina/digiemu/blob/master/docs/mk1/11-audio.md)
+place the sample engine on the ColdFire and describe SSI1 as its audio output;
+they do not show a separate DSP sample-upload path. Its
+[`emu/samples.py`](https://github.com/irpina/digiemu/blob/master/emu/samples.py)
+handles sample files on the +Drive, not delivery to a DSP. The
+[`emu/dsplink.py`](https://github.com/irpina/digiemu/blob/master/emu/dsplink.py)
+code is for Digitone mk1's second ColdFire / DSPI2 link and is not evidence for
+Digitakt mk1 or Digitakt II sample delivery. This comparison provides no
+transfer mechanism to reuse for the current Digitakt II handoff.
+
+## Next step
 
 No second exact sample signature or active trigger-time eDMA transfer to the
 sample was observed. The only sample-address TCD is channel 59's completed
 eMMC-load descriptor, retained in the snapshot. Further firmware-side tracing
-should wait for a deliberate decision about the unresolved DSP-visible/shared
-memory path; do not model an unverified peripheral or count synthetic audio as
-playback progress.
+has reached the CPU-visible limit: decide whether to build a minimal DSP
+stand-in around the unresolved DSP-visible/shared-memory path. Do not model an
+unverified peripheral or count synthetic audio as playback progress.

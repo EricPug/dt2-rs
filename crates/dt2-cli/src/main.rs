@@ -1126,6 +1126,7 @@ fn run_binary(args: &[String]) {
             || assignment == "DSP_LINK"
             || assignment.starts_with("DSP_LINK_REPLY=")
             || assignment == "EDMA_TRACE"
+            || assignment == "NONRAM_BULK_TRACE"
             || assignment.starts_with("SYNTH_VOICE=")
             || assignment == "PIT0_ONESHOT"
             || assignment == "PIT2_PERIODIC"
@@ -1345,6 +1346,10 @@ fn run_binary(args: &[String]) {
     if args[6..].iter().any(|a| a == "EDMA_TRACE") {
         bus.edma_trace_enabled = true;
         println!("diagnostic: eDMA request trace enabled");
+    }
+    if args[6..].iter().any(|a| a == "NONRAM_BULK_TRACE") {
+        bus.nonram_bulk_trace_enabled = true;
+        println!("diagnostic: non-RAM bulk I/O trace enabled (minimum 1024 bytes)");
     }
     for seed in args[6..]
         .iter()
@@ -1733,6 +1738,7 @@ fn run_binary(args: &[String]) {
     bus.print_watched_writes();
     bus.print_watched_reads();
     bus.print_firmware_write_trace();
+    bus.print_nonram_bulk_trace();
     bus.print_sample_access_trace();
     bus.print_register_trace();
     bus.print_instruction_trace_tail();
@@ -2644,6 +2650,7 @@ struct ProbeBus {
     )>,
     display: Option<display::Display>,
     fast_ram: Option<(u32, u32)>,
+    mapped_ram_window: Option<(u32, u64)>,
     /// SRAM overlay accesses within its first 64 KiB go straight to the model.
     sram_fast: bool,
     /// Poll interrupts only when something may have changed (see `poll_due`).
@@ -2704,6 +2711,9 @@ struct ProbeBus {
     dsp_link: bool,
     dsp_link_reply: u16,
     edma_trace_enabled: bool,
+    nonram_bulk_trace_enabled: bool,
+    nonram_bulk_transfers: Vec<NonRamBulkTransfer>,
+    cpu_nonram_write_run: Option<CpuNonRamWriteRun>,
     synth_voice: Option<(u32, u32)>,
     synth_pos: Option<u32>,
     dsp_link_blocks: u32,
@@ -2807,6 +2817,8 @@ const REGISTER_TRACE_STACK_WORDS: usize = 12;
 const MAX_SCHED_TRACE_EVENTS: usize = 1024;
 const MAX_CONVERSION_TRACE_EVENTS: usize = 4096;
 const PIT1_PCSR: u32 = 0xFC08_4000;
+const NONRAM_BULK_TRACE_MIN_BYTES: u64 = 1024;
+const NONRAM_BULK_TRACE_PREFIX_BYTES: usize = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AccessSource {
@@ -3008,6 +3020,33 @@ struct FirmwareWriteTrace {
 }
 
 #[derive(Clone, Copy)]
+enum NonRamBulkActor {
+    Cpu,
+    Dma { channel: u8, synthetic: bool },
+}
+
+struct NonRamBulkTransfer {
+    instruction_count: usize,
+    pc: u32,
+    last_pc: u32,
+    actor: NonRamBulkActor,
+    source: Option<u32>,
+    destination: u32,
+    size: u64,
+    prefix: Vec<u8>,
+}
+
+struct CpuNonRamWriteRun {
+    instruction_count: usize,
+    pc: u32,
+    last_pc: u32,
+    destination: u32,
+    next_address: u32,
+    size: u64,
+    prefix: Vec<u8>,
+}
+
+#[derive(Clone, Copy)]
 enum FirmwareWriteActor {
     Cpu,
     Dma(u8),
@@ -3143,6 +3182,7 @@ impl ProbeBus {
             uart8_tx_file: None,
             display: None,
             fast_ram: None,
+            mapped_ram_window: None,
             sram_fast: false,
             lazy_poll: false,
             timer_pending: 0,
@@ -3198,6 +3238,9 @@ impl ProbeBus {
             dsp_link: false,
             dsp_link_reply: 0xFFFF,
             edma_trace_enabled: false,
+            nonram_bulk_trace_enabled: false,
+            nonram_bulk_transfers: Vec::new(),
+            cpu_nonram_write_run: None,
             synth_voice: None,
             synth_pos: None,
             dsp_link_blocks: 0,
@@ -3506,6 +3549,112 @@ impl ProbeBus {
         });
     }
 
+    fn is_ram_destination(&self, address: u32, length: u64) -> bool {
+        let Some(end) = u64::from(address).checked_add(length) else {
+            return false;
+        };
+        let in_flat_ram = self
+            .mapped_ram_window
+            .is_some_and(|(start, stop)| address >= start && end <= stop);
+        let in_sram_overlay = self.sram_overlay.is_some()
+            && ((u64::from(MCF_SRAM_ALIAS_WINDOW.0)..=u64::from(MCF_SRAM_ALIAS_WINDOW.1))
+                .contains(&u64::from(address))
+                && end <= u64::from(MCF_SRAM_ALIAS_WINDOW.1))
+            || (self.sram_overlay_sbf_alias && address < 0x1_0000 && end <= 0x1_0000);
+        in_flat_ram || in_sram_overlay
+    }
+
+    fn finish_cpu_nonram_write_run(&mut self) {
+        let Some(run) = self.cpu_nonram_write_run.take() else {
+            return;
+        };
+        if run.size < NONRAM_BULK_TRACE_MIN_BYTES {
+            return;
+        }
+        self.nonram_bulk_transfers.push(NonRamBulkTransfer {
+            instruction_count: run.instruction_count,
+            pc: run.pc,
+            last_pc: run.last_pc,
+            actor: NonRamBulkActor::Cpu,
+            source: None,
+            destination: run.destination,
+            size: run.size,
+            prefix: run.prefix,
+        });
+    }
+
+    fn record_nonram_cpu_write(&mut self, address: u32, width_bytes: u8, value: u32) {
+        if !self.nonram_bulk_trace_enabled {
+            return;
+        }
+        if self.is_ram_destination(address, u64::from(width_bytes)) {
+            self.finish_cpu_nonram_write_run();
+            return;
+        }
+        let Some(next_address) = address.checked_add(u32::from(width_bytes)) else {
+            self.finish_cpu_nonram_write_run();
+            return;
+        };
+        if !self
+            .cpu_nonram_write_run
+            .as_ref()
+            .is_some_and(|run| run.next_address == address || run.destination == address)
+        {
+            self.finish_cpu_nonram_write_run();
+            self.cpu_nonram_write_run = Some(CpuNonRamWriteRun {
+                instruction_count: self.current_instruction_count,
+                pc: self.current_pc,
+                last_pc: self.current_pc,
+                destination: address,
+                next_address,
+                size: u64::from(width_bytes),
+                prefix: Vec::with_capacity(NONRAM_BULK_TRACE_PREFIX_BYTES),
+            });
+        } else if let Some(run) = &mut self.cpu_nonram_write_run {
+            run.last_pc = self.current_pc;
+            run.next_address = next_address;
+            run.size += u64::from(width_bytes);
+        }
+        if let Some(run) = &mut self.cpu_nonram_write_run {
+            let bytes = value.to_be_bytes();
+            let start = 4 - usize::from(width_bytes);
+            let needed = NONRAM_BULK_TRACE_PREFIX_BYTES.saturating_sub(run.prefix.len());
+            run.prefix
+                .extend_from_slice(&bytes[start..start + needed.min(usize::from(width_bytes))]);
+        }
+    }
+
+    fn record_nonram_dma_transfer(
+        &mut self,
+        channel: u8,
+        synthetic: bool,
+        source: u32,
+        destination: u32,
+        size: u64,
+        prefix: Vec<u8>,
+    ) {
+        if !self.nonram_bulk_trace_enabled {
+            return;
+        }
+        self.finish_cpu_nonram_write_run();
+        if size < NONRAM_BULK_TRACE_MIN_BYTES || self.is_ram_destination(destination, 1) {
+            return;
+        }
+        self.nonram_bulk_transfers.push(NonRamBulkTransfer {
+            instruction_count: self.current_instruction_count,
+            pc: self.current_pc,
+            last_pc: self.current_pc,
+            actor: NonRamBulkActor::Dma { channel, synthetic },
+            source: Some(source),
+            destination,
+            size,
+            prefix: prefix
+                .into_iter()
+                .take(NONRAM_BULK_TRACE_PREFIX_BYTES)
+                .collect(),
+        });
+    }
+
     fn record_sample_access(
         &mut self,
         actor: SampleAccessActor,
@@ -3569,6 +3718,7 @@ impl ProbeBus {
     /// Returns why the fast path stayed off, or None when it is on.
     fn enable_fast_ram(&mut self, base: u32, size: u32) -> Option<&'static str> {
         let end = u64::from(base) + u64::from(size);
+        self.mapped_ram_window = Some((base, end));
         let overlaps =
             |start: u32, stop: u32| u64::from(base) < u64::from(stop) && u64::from(start) < end;
         let peripheral = MCF_PERIPHERAL_WINDOWS.iter().any(|&(s, e)| overlaps(s, e))
@@ -4111,6 +4261,56 @@ impl ProbeBus {
                 write.width_bits,
                 write.address,
                 write.value
+            );
+        }
+    }
+
+    fn print_nonram_bulk_trace(&mut self) {
+        if !self.nonram_bulk_trace_enabled {
+            return;
+        }
+        self.finish_cpu_nonram_write_run();
+        self.nonram_bulk_transfers
+            .sort_by_key(|transfer| transfer.instruction_count);
+        println!(
+            "non-RAM bulk I/O trace: {} transfer(s) >= {NONRAM_BULK_TRACE_MIN_BYTES} bytes",
+            self.nonram_bulk_transfers.len()
+        );
+        for transfer in &self.nonram_bulk_transfers {
+            let actor = match transfer.actor {
+                NonRamBulkActor::Cpu => "CPU".to_owned(),
+                NonRamBulkActor::Dma {
+                    channel: 29,
+                    synthetic: true,
+                } => "DMA29 (synthetic DSP_LINK)".to_owned(),
+                NonRamBulkActor::Dma {
+                    channel: SSI_AUDIO_DMA_CHANNEL,
+                    synthetic: true,
+                } => format!("DMA{SSI_AUDIO_DMA_CHANNEL} (modeled SSI servicing)"),
+                NonRamBulkActor::Dma {
+                    channel,
+                    synthetic: false,
+                } => format!("DMA{channel}"),
+                NonRamBulkActor::Dma {
+                    channel,
+                    synthetic: true,
+                } => format!("DMA{channel} (synthetic)"),
+            };
+            let pc = if transfer.pc == transfer.last_pc {
+                format!("{:#010x}", transfer.pc)
+            } else {
+                format!("{:#010x}..{:#010x}", transfer.pc, transfer.last_pc)
+            };
+            let source = transfer
+                .source
+                .map_or_else(String::new, |address| format!(" source={address:#010x}"));
+            println!(
+                "  BULK_IO actor={actor} instruction={} PC={pc} destination={:#010x} size={}{} first16={}",
+                transfer.instruction_count,
+                transfer.destination,
+                transfer.size,
+                source,
+                hex_bytes(&transfer.prefix)
             );
         }
     }
@@ -5207,6 +5407,19 @@ impl ProbeBus {
                 );
                 words.push(value);
             }
+            let prefix: Vec<u8> = words
+                .iter()
+                .flat_map(|word| word.to_be_bytes())
+                .take(NONRAM_BULK_TRACE_PREFIX_BYTES)
+                .collect();
+            self.record_nonram_dma_transfer(
+                channel,
+                true,
+                source,
+                destination,
+                u64::from(total),
+                prefix,
+            );
             if self.dsp_link_blocks < 4000 {
                 let data: Vec<String> = words.iter().map(|w| format!("{w:04x}")).collect();
                 println!(
@@ -5309,6 +5522,7 @@ impl ProbeBus {
             _ => 1,
         };
         let (source_size, destination_size) = (transfer_size(attr >> 8), transfer_size(attr));
+        let total_bytes = iterations.saturating_mul(minor_bytes);
         let capture_ssi_tx = channel == SSI_AUDIO_DMA_CHANNEL
             && destination == SSI_AUDIO_TX_DATA
             && self.ssi_tx_raw.is_some();
@@ -5319,6 +5533,7 @@ impl ProbeBus {
             self.ssi_tx_dma_blocks = self.ssi_tx_dma_blocks.saturating_add(1);
             self.ssi_tx_first_source.get_or_insert(source);
         }
+        let mut prefix = Vec::with_capacity(NONRAM_BULK_TRACE_PREFIX_BYTES);
         for index in 0..iterations * minor_bytes {
             let from = source
                 .wrapping_add(((index / source_size) as i32).wrapping_mul(source_offset) as u32)
@@ -5329,6 +5544,9 @@ impl ProbeBus {
                 )
                 .wrapping_add(index % destination_size);
             let byte = self.read8_inner(from)?;
+            if prefix.len() < NONRAM_BULK_TRACE_PREFIX_BYTES {
+                prefix.push(byte);
+            }
             self.record_sample_access(
                 SampleAccessActor::Dma {
                     channel,
@@ -5357,6 +5575,14 @@ impl ProbeBus {
                 }
             }
         }
+        self.record_nonram_dma_transfer(
+            channel,
+            channel == SSI_AUDIO_DMA_CHANNEL,
+            source,
+            destination,
+            u64::from(total_bytes),
+            prefix,
+        );
         for (offset, byte) in (reload as u16).to_be_bytes().into_iter().enumerate() {
             self.edma_tcd.insert(base + 0x14 + offset as u32, byte);
         }
@@ -6737,11 +6963,13 @@ impl Bus for ProbeBus {
             self.code_map.note_write(address, 1);
             self.ram.write8(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
+            self.record_nonram_cpu_write(address, 1, u32::from(value));
             return Ok(());
         }
         if self.in_fast_sram(address, 1) {
             self.sram_overlay.as_mut().unwrap().write8(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
+            self.record_nonram_cpu_write(address, 1, u32::from(value));
             return Ok(());
         }
         self.irq_dirty = true;
@@ -6750,6 +6978,7 @@ impl Bus for ProbeBus {
         let old = self.watched_old_bytes(address, 1)?;
         self.write8_inner(address, value)?;
         self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
+        self.record_nonram_cpu_write(address, 1, u32::from(value));
         self.record_sample_access(SampleAccessActor::Cpu, address, 1, true, u32::from(value));
         if Uart8::contains(address) {
             self.record_uart8_event(address, value, true, false, 0);
@@ -6772,6 +7001,7 @@ impl Bus for ProbeBus {
             self.code_map.note_write(address, 2);
             self.ram.write16(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
+            self.record_nonram_cpu_write(address, 2, u32::from(value));
             return Ok(());
         }
         if self.in_fast_sram(address, 2) {
@@ -6780,6 +7010,7 @@ impl Bus for ProbeBus {
                 .unwrap()
                 .write16(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
+            self.record_nonram_cpu_write(address, 2, u32::from(value));
             return Ok(());
         }
         self.irq_dirty = true;
@@ -6788,6 +7019,7 @@ impl Bus for ProbeBus {
         let old = self.watched_old_bytes(address, 2)?;
         self.write16_inner(address, value)?;
         self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
+        self.record_nonram_cpu_write(address, 2, u32::from(value));
         self.record_sample_access(SampleAccessActor::Cpu, address, 2, true, u32::from(value));
         self.snapshot_source_on_write(address, 2)?;
         self.record_watched_write(address, 2, u32::from(value), old);
@@ -6807,6 +7039,7 @@ impl Bus for ProbeBus {
             self.code_map.note_write(address, 4);
             self.ram.write32(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
+            self.record_nonram_cpu_write(address, 4, value);
             return Ok(());
         }
         if self.in_fast_sram(address, 4) {
@@ -6815,6 +7048,7 @@ impl Bus for ProbeBus {
                 .unwrap()
                 .write32(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
+            self.record_nonram_cpu_write(address, 4, value);
             return Ok(());
         }
         self.irq_dirty = true;
@@ -6823,6 +7057,7 @@ impl Bus for ProbeBus {
         let old = self.watched_old_bytes(address, 4)?;
         self.write32_inner(address, value)?;
         self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
+        self.record_nonram_cpu_write(address, 4, value);
         self.record_sample_access(SampleAccessActor::Cpu, address, 4, true, value);
         self.record_dspi_push(address, value);
         self.snapshot_source_on_write(address, 4)?;

@@ -18,6 +18,10 @@ and must point here rather than maintain competing status reports.
 - Firmware-driven audio playback is not working: SSI TX remains silent in the
   documented trigger/play trace. `SYNTH_VOICE` output is diagnostic-only and does
   not count as emulated playback. The actual sample-to-DSP handoff remains unknown.
+- The latest sample-load and trigger/play trace found no qualifying CPU bulk
+  write to non-RAM. Its only >=1 KiB transfers are the synthetic DSPI2 `DSP_LINK`
+  path and the emulator's timer-scheduled SSI service, not evidence of physical
+  sample delivery; see the [hypothesis log](./audio-trace-hypotheses.md).
 - Current quality gates pass: `cargo fmt --check`, warning-free
   `cargo clippy --workspace --all-targets -- -D warnings`, and
   `cargo test --workspace` (317 passed, 1 ignored).
@@ -29,8 +33,9 @@ and must point here rather than maintain competing status reports.
 2. **Complete:** establish a deterministic boot-to-SAMPLE-page smoke gate, with
    sample-loaded encoder and page-change frame hashes, before changing
    DMA/shared-memory behavior.
-3. **In progress:** trace the real sample-to-DSP handoff, recording evidence
-   and ruled-out paths in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
+3. **In progress; CPU-visible trace limit reached:** record the remaining
+   evidence and ruled-out paths in the [audio handoff hypothesis log](./audio-trace-hypotheses.md),
+   then decide on a minimal DSP stand-in before further probes.
 4. Implement one firmware-driven playback slice and retain its SSI capture.
 5. Retire synthetic startup assumptions individually when evidence replaces them.
 
