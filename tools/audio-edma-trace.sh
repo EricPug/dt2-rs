@@ -39,7 +39,7 @@ run_trace() {
     SNAPSHOT_LOAD="$snapshot" SNAPSHOT_SAVE="$OUT/$name.snap"
     LIVE_PNG="$OUT/$name.png" UART8_RX_ONCE
     "UART8_RX_PERIODIC=6000000:$messages"
-    DSP_LINK EDMA_TRACE NONRAM_BULK_TRACE ESDHC_TRACE
+    DSP_LINK EDMA_TRACE NONRAM_BULK_TRACE FLEXBUS_TRACE ESDHC_TRACE
   )
   if [[ -n "$raw_capture" ]]; then
     options+=("SSI_TX_RAW=$raw_capture")
@@ -90,6 +90,37 @@ check_no_cpu_bulk() {
   echo "PASS $name non-RAM bulk DMA counts verified; CPU bulk writes=0"
 }
 
+check_dspi2_fields() {
+  local name=$1 variant=$2
+  python3 - "$OUT/$name.log" "$variant" <<'PY'
+import collections
+import re
+import sys
+
+counts = collections.Counter()
+blocks = 0
+for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
+    match = re.match(r"DSP_LINK block (\d+) len=\d+ (.*)", line)
+    if not match:
+        continue
+    words = match.group(2).split()
+    if len(words) < 8:
+        raise SystemExit(f"short DSPI2 block: {match.group(1)}")
+    counts[(words[3], words[7])] += 1
+    blocks += 1
+
+expected = {
+    "note1": {("0000", "0000"): 64, ("3c00", "0000"): 570, ("3c00", "2d00"): 365},
+    "note2": {("0000", "0000"): 646, ("0000", "2d00"): 353},
+}[sys.argv[2]]
+if blocks != 999 or counts != expected:
+    raise SystemExit(
+        f"{sys.argv[1]}: blocks={blocks}, fields={dict(counts)}, expected={expected}"
+    )
+print(f"PASS {sys.argv[1]} DSPI2 offsets 0x02/0x06: {dict(counts)}")
+PY
+}
+
 echo "Sample-load probe uses synthetic DSP_LINK replies; no DSP or audio is modeled."
 run_trace sample-load out/shots/action-down.snap 200000000 \
   2104,2100,2104,2100,2104,2100,2104,2100,2102,2100,-,-,-,-,2102,2100 \
@@ -112,6 +143,12 @@ grep -q '^EDMA_TRACE request channel=28 .*NBYTES=0x00000002 .*DADDR=0x80001000 .
 grep -q '^DSP_LINK block 0 len=5496 8001 ' "$OUT/sample-load.log"
 echo "PASS sample-load DSPI2 frames=1374 RX_bytes=2748 PUSHR_source_bytes=5496"
 grep -q '^RGPIO trace: 135300 events, showing first 32' "$OUT/sample-load.log"
+grep -q '^FlexBus trace: 135300 access(es); offset <0x10=135300 offset >=0x10=0' \
+  "$OUT/sample-load.log"
+if grep -Eq '^EDMA_TRACE .*(SADDR|DADDR)=0x8c' "$OUT/sample-load.log"; then
+  echo "sample-load: unexpected eDMA endpoint in the 0x8c window" >&2
+  exit 1
+fi
 grep -q 'read16 0x8c000002' "$OUT/sample-load.log"
 grep -q 'write16 0x8c00000a' "$OUT/sample-load.log"
 grep -q 'write watch at 0x43176a30..0x43176a40:' "$OUT/sample-load.log"
@@ -149,5 +186,18 @@ check_bulk_actor trig-play DMA50 999
 check_no_cpu_bulk trig-play
 grep -q 'SSI TX raw capture: 999 DMA block(s), 2045952 byte(s), 0 nonzero' \
   "$OUT/trig-play.log"
+grep -q '^FlexBus trace: 0 access(es); offset <0x10=0 offset >=0x10=0' \
+  "$OUT/trig-play.log"
+if grep -Eq '^EDMA_TRACE .*(SADDR|DADDR)=0x8c' "$OUT/trig-play.log"; then
+  echo "trig-play: unexpected eDMA endpoint in the 0x8c window" >&2
+  exit 1
+fi
+check_dspi2_fields trig-play note1
+
+run_trace trig-play-note2 out/shots/main-after-load.snap 100000000 \
+  2302,2300,2208,2200
+check_requests trig-play-note2 28 999
+check_requests trig-play-note2 29 999
+check_dspi2_fields trig-play-note2 note2
 
 echo "AUDIO EDMA TRACE PASS"

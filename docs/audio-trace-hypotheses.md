@@ -16,10 +16,70 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 | A separate bulk eDMA transfer carries sample PCM during sample load or trigger/play | No bulk transfer observed in these runs | `EDMA_TRACE` saw channels 14, 15, 28, 29, 35, and 59 during sample load; only 28, 29, and synthetic panel RX channel 35 during trigger/play. Channel 59 performed two 32 KiB eMMC reads into `0x4060d770` and `0x40605770`. Channel 50 SSI TX is scheduled by the emulator's timer diagnostic rather than an observed firmware SERQ request. This only rules out other eDMA request starts in these exact diagnostic runs. |
 | The post-load DSPI1 eDMA 14/15 transfer is sample payload | Ruled out as bulk PCM; role unresolved | It runs once after the eMMC reads. Channel 15 sends 8 framed bytes from `0x4fe7a340` to DSPI1 PUSHR (`8001 0001 0801 012c`); channel 14 is configured for two 16-bit reads. Disassembly traces the request through `0x4003314e` to helper `0x40012562`, which constructs the 4-byte request `0001 012c`: word `0001` is set by the helper, and `012c` is copied from a caller argument. Related OS 1.16 research labels this helper `small` and describes the packet as two big-endian `u16` fields (`kind`, `slot`), suggesting kind 1 / slot 300; the same source warns that the waveform cache had not yet been shown calling this transport. The entry trace shows caller return `0x4019fc7e`, argument `0x012c`, and pointer `0x4525722c`; that caller is in a routine iterating over `0x64400` bytes in `0x191`-byte strides, but its context is not yet identified. The helper passes request length 4 and response length `0x300` to `0x400124a0`, using response buffer `0x4fe79340`; the observed channel-14 transfer reads only two halfwords. Digiemu's older-version notes likewise classify DSPI1 channels 14/15 as short opcode request/reply transactions, probably to a codec. These are useful cross-checks, not proof this exchange is an audio handoff. The watched `0x43176a34` and `0x43176a38` writes are the saved A6 from `LINK` and return address from `JSR`, not additional request fields. |
 | CPU or modeled eDMA reads/writes the loaded sample during trigger/play | No accesses observed in this run | The two channel-59 eMMC transfers wrote adjacent 32 KiB windows spanning `0x40605770..0x40615770`. Replaying trigger/play from the loaded snapshot with an exact span watch produced zero CPU-bus or modeled eDMA accesses. This excludes only the emulator-observable access paths, not an external DSP or other unmodeled hardware reader. |
-| The OS 1.17 accesses at `0x8c000000..0x8c00000f` carry sample-page descriptors | Ruled out for the observed accesses | With `RGPIOBAR=0x8c000035`, this 16-byte window is decoded as RGPIO in the current OS 1.17 trace. The sample-load capture records 135,300 RGPIO events, including repeated reads at `+0x2` and writes at `+0x2`/`+0xa`, consistent with GPIO polling and strobes rather than descriptor memory. The runner enables `RGPIO_READY_MODEL`, so the modeled pin-0 ready response is synthetic; the access addresses and operations are firmware-observed. Digiemu's OS 1.15C/1.16 findings label `0x8c000000` as a sample-page/slot-header region; that older-version clue does not establish the OS 1.17 decode or handoff. This conclusion is limited to the RGPIO window, not the surrounding address space. |
+| OS 1.17 sample-load traffic through the `0x8c` window is a sample-page transfer | Candidate transfer path observed; payload association unresolved | Sample load makes 135,300 16-bit accesses, all within the RGPIO register window at offsets `0x2` and `0xa`; trigger/play makes none. The active bit-bang routines and their caller are identified below. Their source pointers are in `0x450fxxxx`/`0x450exxxx`, not `0x40605770`; a captured frame includes `0x9c00`, matching the loaded sample byte count, but the contents were not compared. Do not equate this with the 1.15C/1.16 FlexBus map or claim sample delivery without payload evidence. |
 | The DSPI1 response buffer at `0x4fe79340..0x4fe79640` is populated or consumed during sample load | inconclusive | A repeat sample-load run starts with all `0x300` bytes zero and records zero overlapping CPU-bus reads and writes. The channel-14 TCD is configured for two 16-bit reads from DSPI1 POPR into the buffer, but the emulator's synthetic DSPI diagnostic does not execute eDMA channels 14/15. Therefore the empty buffer is evidence about this emulator run, not evidence that real hardware returns no response. |
 | DSP reads the sample directly from shared DDR/FlexBus, or receives a descriptor through another path | Unresolved | The sample bytes are present in ColdFire DDR, while the DSPI2 stream has no sample address. The OS 1.17 SHARC loader contains no literal `0x40605770`/adjacent sample address and no recognizable voice/sample descriptor table was identified by the raw scan. It remains possible that firmware computes or relocates the address, or uses another interface; do not infer a physical bus or peer from the emulated MMIO model. |
 | `SYNTH_VOICE` output demonstrates firmware playback | Rejected as progress evidence | It injects sample bytes directly into the SSI TX source and creates nonzero output, but does not exercise the firmware's handoff. Keep it diagnostic-only; the trigger/play SSI capture remains zero. |
+
+## OS 1.17 FlexBus/RGPIO and helper trace
+
+The Digiemu OS 1.15C/1.16 report is a useful lead, but its `0x8c000000`
+sample-page/slot-header interpretation is not directly transferable to OS 1.17.
+In this OS 1.17 run `RGPIOBAR=0x8c000035`; the first 16 bytes
+(`0x8c000000..0x8c00000f`) decode as RGPIO. The rest of the `0x8c000000..0x8cffffff`
+range is not dropped or a bus-error window in this emulator: with the MCF SRAM
+overlay active, it aliases the 64 KiB SRAM through the `0x80000000..0x8fffffff`
+window. No access at offset `>=0x10` occurred in either phase, so the trace
+does not test writes to that alias.
+
+An OS 1.17 scan for `0x8c0000xx` references, excluding the three boot/control
+functions, leaves the GPIO bit-bang routines around `0x400ccf04` and
+`0x400ccf90` as the plausible transfer path; the other relevant references
+around `0x400cd298..0x400cd2ac` are initialization. The transfer dispatcher at
+`0x400cd79c` selects/calls those routines. It is the best functional candidate
+for the older `FUN_400cfd40`, but the address/name correspondence is not proven.
+The `TRACE_REGS=0x400cd79c` hook with `WATCH_WRITE=0x43176a30:0x43176a40`
+captured 12 calls with all D0–D7/A0–A7 registers and 12 stack words visible.
+Ten calls use source pointers in `0x450f1c40..0x450f8c40` (4 KiB-spaced pages)
+and `0x450f1c40`/`0x450f2c40`. D7 is `0x8000` in ten captures, with the same
+value in a captured stack word; its precise length/argument role is not
+established. Another frame has source pointer `0x450ecc40` and `0x9c00` on the
+stack, matching the loaded sample byte count. The loaded sample itself is at
+`0x40605770`. Neither `0x40605770` nor `0x10000` appears in any captured data
+or address register or stack word. The `0x9c00` size match is suggestive, not
+proof that this path carries those sample bytes. Full hook output is in
+`out/audio-edma-trace/sample-load-helper-400cd79c.log`.
+
+During sample load, the complete FlexBus trace has 135,300 accesses:
+
+| PC sites | Count | Access |
+|---|---:|---|
+| `0x400ccf40`, `0x400ccfcc` | 2,060; 10,240 | 16-bit writes of `0x0080` to `0x8c00000a` (strobe) |
+| `0x400ccf48`, `0x400ccfd4` | 4,120; 20,480 | 16-bit reads from `0x8c000002` (status/pin read) |
+| `0x400ccf56`, `0x400ccf5c`, `0x400ccf62`, `0x400ccf68`, `0x400ccf6e`, `0x400ccf74`, `0x400ccf7a`, `0x400ccf84` | 2,060 each | 16-bit writes to `0x8c000002` (serialized values) |
+| `0x400ccfe2`, `0x400ccfe8`, `0x400ccfee`, `0x400ccff4`, `0x400ccffa`, `0x400cd000`, `0x400cd006`, `0x400cd010` | 10,240 each | 16-bit writes to `0x8c000002` (serialized values) |
+
+All 135,300 accesses are at offsets `<0x10`; there are zero at offsets
+`>=0x10`. Trigger/play has zero accesses in the whole `0x8c000000..0x8cffffff`
+range. `EDMA_TRACE` shows no source/destination in this range; all recorded
+accesses are CPU bus cycles. The full ordered trace, including every PC, width,
+address and value, is in `out/audio-edma-trace/sample-load.log` (consecutive
+identical events are folded with an `xN` repeat count); the trigger/play
+zero-count is in `out/audio-edma-trace/trig-play.log`. `RGPIO_READY_MODEL`
+synthesizes the pin-ready response, so read values are emulator-model
+responses; the firmware accesses and write values are traced.
+
+The note comparison uses the data-only TX payload offsets `0x02` and `0x06`
+(raw PUSHR halfword positions 3 and 7). For trigger `2301`, the pairs are
+`0000/0000` for blocks 0–63, `3c00/0000` for 64–633, and `3c00/2d00` for
+634–998. For trigger `2302`, they are `0000/0000` for 0–645 and
+`0000/2d00` for 646–998. Thus the `0x02` value depends on the selected trigger,
+and `0x2d00` at `0x06` appears after each trigger; their block onset follows
+the input timing. They are distinct from the previously identified
+free-running counter fields at data halfword indices 270 and 462. The
+repeatable comparison is checked by `tools/audio-edma-trace.sh`; logs are
+`out/audio-edma-trace/trig-play.log` and
+`out/audio-edma-trace/trig-play-note2.log`.
 
 ## 32-byte sample signature scan
 
