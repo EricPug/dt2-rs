@@ -66,6 +66,9 @@ snapshots at one PC; `TRACE_TAIL=n` reports the last 1-1024 pre-instruction
 snapshots with PC, SR, D0-D7, and A0-A7. `TRACE_A1=offset,...` captures A0/A1
 pairs at output offsets. `SCHED_TRACE` logs scheduler list transitions with the
 current TCB, mapped task entry, registers, and raw TCB/live/saved stack words.
+`WRITE_TRACE=start:end` records CPU bus writes and modeled eDMA destination writes
+for the half-open instruction-offset window relative to the restored snapshot (or
+run start), including actor, PC, width, address, and value.
 `CONVERT_TRACE` records the conversion output index and the outer CMP/BGT flags
 and branch result around `0x401811d2`.
 Run logs list DSPI0/DSPI1 PUSHR words first, with instruction count, PC, PCS mask,

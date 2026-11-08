@@ -1334,6 +1334,31 @@ User confirmed `out/kick-48k.wav` sounded like a kick. Rerun with `SYNTH_VOICE=0
 
 Scanning every 50th block of `out/dsp-c.log` for halfwords `0x4060`, `0x5770`, `0xd776`, `0x8020`, `0x4020`, `0x4011` (masked to 15 bits) finds nothing. Between idle (block 100) and after-TRIG (block 300) only indices 4, 13, 14, 16, 29, 38, 39, 41 (values `0x3c00`/`0x2b00`/`0x6400`/`0x7f00`, per-track-looking level fields) and counter 259 change. So the sample location/length is not in the per-block DSPI2 stream; the sample must reach the renderer another way or have been described earlier. The sample-load probe below finds a small DSPI1 command but no PCM transfer, leaving the descriptor/shared-memory path open.
 
+### Matched post-TRIG activity window
+
+From `out/shots/main-after-load.snap`, a 25M-instruction idle replay and the
+same replay with `UART8_RX_PERIODIC=6000000:2301,2300,2208,2200` were compared.
+The watched half-open interval was offsets 6M..7M from the restored snapshot,
+immediately after the TRIG press and before the later PLAY event. UART8 DMA
+delivered the `23 01` TRIG packet at instruction 9,406,000,001.
+
+The trigger window recorded 20,315 CPU writes, two UART RX DMA writes, and two
+DSPI2 blocks; idle recorded 110 CPU writes and no DSPI2 blocks in that interval.
+Both runs had the same 21,120 synthetic SSI channel-50 writes. The two
+triggered DSPI2 blocks were 1,374 frames each at instructions 9,406,010,478 and
+9,406,054,910. Relative to the prior idle block, their transmitted data changed
+only at counter halfword indices 270 and 462. No payload data halfword matched
+the sample address halves `0x4060`/`0x5770`, the candidate offsets `0xd770`/
+`0xd776`, or `0x8000`. The `0x012c` and `0x0006` values, plus six `0001 0000`
+pairs (a possible 32-bit `0x10000` representation), were identical in the
+prior idle payload, so none demonstrates a trigger-dependent sample reference.
+
+This rules out a dead TRIG input path in this diagnostic replay, but does not
+show that a voice is rendered or that the DSPI2 peer receives equivalent
+traffic on hardware. `DSP_LINK` still supplies fixed `0xffff` replies. Full
+write and payload logs are local under `out/trigger-window-experiment/`; the
+write-window tracer is documented in the README.
+
 ### Sample load and the per-block DSPI2 stream
 
 - Load replay (from `out/shots/action-down.snap`, cursor on RENAME in the `incoming` action menu): `UP UP UP UP YES wait wait YES` with `ESDHC_FILE=out/run-card.img DSPI2_BOOTSTRAP DSP_LINK ESDHC_TRACE`, 200M instructions, log `out/dsp-load.log`. The browser shows `008 kick verb` with `C044` afterwards, so the load happened. (`UP` x4 then one `YES` alone leaves the Destination dialog open; a second `YES` confirms.)

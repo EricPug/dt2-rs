@@ -49,7 +49,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE EDMA_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address WATCH_READ=address|start:end TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE EDMA_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address WATCH_READ=address|start:end WRITE_TRACE=start:end TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -409,7 +409,7 @@ fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE EDMA_TRACE PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value TRACE_TAIL=n ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE EDMA_TRACE PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value WRITE_TRACE=start:end TRACE_TAIL=n ...]");
         eprintln!("SSI_TX_RAW=<path> captures channel-50 SSI TX DMA bytes");
         std::process::exit(2);
     }
@@ -541,6 +541,27 @@ fn run_binary(args: &[String]) {
             });
             if start >= end {
                 eprintln!("invalid WATCH_WRITE range: start must be less than exclusive end");
+                std::process::exit(2)
+            }
+            (start, end)
+        })
+    });
+    let write_trace_range = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("WRITE_TRACE=").map(|spec| {
+            let (start, end) = spec.split_once(':').unwrap_or_else(|| {
+                eprintln!("invalid WRITE_TRACE range: expected start:end instruction offsets");
+                std::process::exit(2)
+            });
+            let start = start.parse::<usize>().unwrap_or_else(|error| {
+                eprintln!("invalid WRITE_TRACE start offset: {error}");
+                std::process::exit(2)
+            });
+            let end = end.parse::<usize>().unwrap_or_else(|error| {
+                eprintln!("invalid WRITE_TRACE end offset: {error}");
+                std::process::exit(2)
+            });
+            if start >= end {
+                eprintln!("invalid WRITE_TRACE range: start must be less than exclusive end");
                 std::process::exit(2)
             }
             (start, end)
@@ -970,6 +991,9 @@ fn run_binary(args: &[String]) {
     if let Some(range) = watch_write_range {
         bus.watch_write_range(range);
     }
+    if let Some(range) = write_trace_range {
+        bus.write_trace_range = Some(range);
+    }
     if let Some(range) = watch_read_range {
         bus.watch_read_range(range);
     }
@@ -1119,6 +1143,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("DUMP_CALL=")
             || assignment.starts_with("STOP_PC=")
             || assignment.starts_with("WATCH_WRITE=")
+            || assignment.starts_with("WRITE_TRACE=")
             || assignment.starts_with("WATCH_READ=")
             || assignment.starts_with("SAMPLE_ACCESS_TRACE=")
             || assignment.starts_with("TRACE_REGS=")
@@ -1261,6 +1286,7 @@ fn run_binary(args: &[String]) {
                 eprintln!("cannot restore snapshot: {error}");
                 std::process::exit(2)
             });
+        bus.write_trace_base = bus.current_instruction_count;
         bus.sync_esdhc_trace_baseline();
         // An explicit rate overrides the one stored in the snapshot.
         if dtim3_tick_setting.is_some() {
@@ -1684,6 +1710,7 @@ fn run_binary(args: &[String]) {
     }
     bus.print_watched_writes();
     bus.print_watched_reads();
+    bus.print_firmware_write_trace();
     bus.print_sample_access_trace();
     bus.print_register_trace();
     bus.print_instruction_trace_tail();
@@ -2624,6 +2651,9 @@ struct ProbeBus {
     watch_write_range: Option<(u32, u32)>,
     watched_write_count: usize,
     watched_writes: VecDeque<WatchedWrite>,
+    write_trace_range: Option<(usize, usize)>,
+    write_trace_base: usize,
+    firmware_write_trace: Vec<FirmwareWriteTrace>,
     watched_initial_bytes: Option<Vec<u8>>,
     watched_completion_tail: Option<(usize, Vec<u8>)>,
     watch_read_range: Option<(u32, u32)>,
@@ -2945,6 +2975,21 @@ struct WatchedRead {
     value: u32,
 }
 
+struct FirmwareWriteTrace {
+    instruction_count: usize,
+    pc: u32,
+    actor: FirmwareWriteActor,
+    address: u32,
+    width_bits: u8,
+    value: u32,
+}
+
+#[derive(Clone, Copy)]
+enum FirmwareWriteActor {
+    Cpu,
+    Dma(u8),
+}
+
 #[derive(Clone, Copy)]
 enum SampleAccessActor {
     Cpu,
@@ -3099,6 +3144,9 @@ impl ProbeBus {
             watch_write_range: None,
             watched_write_count: 0,
             watched_writes: VecDeque::new(),
+            write_trace_range: None,
+            write_trace_base: 0,
+            firmware_write_trace: Vec::new(),
             watched_initial_bytes: None,
             watched_completion_tail: None,
             watch_read_range: None,
@@ -3409,6 +3457,31 @@ impl ProbeBus {
         });
     }
 
+    fn record_firmware_write(
+        &mut self,
+        actor: FirmwareWriteActor,
+        address: u32,
+        width_bits: u8,
+        value: u32,
+    ) {
+        let Some((start_offset, end_offset)) = self.write_trace_range else {
+            return;
+        };
+        let start = self.write_trace_base.saturating_add(start_offset);
+        let end = self.write_trace_base.saturating_add(end_offset);
+        if !(start..end).contains(&self.current_instruction_count) {
+            return;
+        }
+        self.firmware_write_trace.push(FirmwareWriteTrace {
+            instruction_count: self.current_instruction_count,
+            pc: self.current_pc,
+            actor,
+            address,
+            width_bits,
+            value,
+        });
+    }
+
     fn record_sample_access(
         &mut self,
         actor: SampleAccessActor,
@@ -3519,6 +3592,7 @@ impl ProbeBus {
     /// Turns off per-instruction diagnostics that nothing requested; returns a status label.
     fn configure_instruction_hooks(&mut self) -> &'static str {
         self.capture_registers = self.watch_write_range.is_some()
+            || self.write_trace_range.is_some()
             || self.rgpio_trace_limit > 0
             || self.conversion_trace_enabled;
         self.instruction_hooks = !self.dump_calls.is_empty()
@@ -3528,6 +3602,7 @@ impl ProbeBus {
             || self.trace_a0_range.is_some()
             || !self.trace_a1_checkpoints.is_empty()
             || self.trace_register_pc.is_some()
+            || self.write_trace_range.is_some()
             || self.synth_voice.is_some();
         if self.instruction_hooks {
             "full"
@@ -3986,6 +4061,32 @@ impl ProbeBus {
             println!(
                 "  first write reaching range end at instruction={instruction_count}: tail64={}",
                 hex_bytes(bytes)
+            );
+        }
+    }
+
+    fn print_firmware_write_trace(&self) {
+        let Some((start_offset, end_offset)) = self.write_trace_range else {
+            return;
+        };
+        let start = self.write_trace_base.saturating_add(start_offset);
+        let end = self.write_trace_base.saturating_add(end_offset);
+        println!(
+            "bus write trace {start}..{end}: {} write(s)",
+            self.firmware_write_trace.len()
+        );
+        for write in &self.firmware_write_trace {
+            let actor = match write.actor {
+                FirmwareWriteActor::Cpu => "CPU".to_owned(),
+                FirmwareWriteActor::Dma(channel) => format!("DMA{channel}"),
+            };
+            println!(
+                "  WRITE actor={actor} instruction={} PC={:#010x} width={} address={:#010x} value={:#010x}",
+                write.instruction_count,
+                write.pc,
+                write.width_bits,
+                write.address,
+                write.value
             );
         }
     }
@@ -5099,6 +5200,7 @@ impl ProbeBus {
             for offset in (0..total).step_by(2) {
                 let address = destination.wrapping_add(offset);
                 self.write16_inner(address, 0xFFFF)?;
+                self.record_firmware_write(FirmwareWriteActor::Dma(channel), address, 16, 0xFFFF);
                 self.record_sample_access(
                     SampleAccessActor::Dma {
                         channel,
@@ -5209,6 +5311,7 @@ impl ProbeBus {
                 u32::from(byte),
             );
             self.write8_inner(to, byte)?;
+            self.record_firmware_write(FirmwareWriteActor::Dma(channel), to, 8, u32::from(byte));
             self.record_sample_access(
                 SampleAccessActor::Dma {
                     channel,
@@ -5263,7 +5366,14 @@ impl ProbeBus {
             // (64-byte spacing); emulate the codec side that sends it.
             for half in [SSI_AUDIO_RX_BUFFER, SSI_AUDIO_RX_BUFFER + 0x800] {
                 for slot in 0..32u32 {
-                    self.write32_inner(half + slot * 64, 0x007F_FFFF)?;
+                    let address = half + slot * 64;
+                    self.write32_inner(address, 0x007F_FFFF)?;
+                    self.record_firmware_write(
+                        FirmwareWriteActor::Dma(channel),
+                        address,
+                        32,
+                        0x007F_FFFF,
+                    );
                 }
             }
             if csr & 0x02 != 0 {
@@ -5321,6 +5431,12 @@ impl ProbeBus {
         for value in bytes.iter().copied() {
             let destination = self.uart8_dma_daddr;
             self.write8_inner(destination, value)?;
+            self.record_firmware_write(
+                FirmwareWriteActor::Dma(UART8_TCD34_REQUEST_VALUE),
+                destination,
+                8,
+                u32::from(value),
+            );
             self.record_uart8_event(UART8_URB, value, false, true, destination);
             self.uart8_dma_daddr = self.uart8_dma_ring_base.wrapping_add(
                 destination
@@ -5363,6 +5479,12 @@ impl ProbeBus {
         for value in bytes.iter().copied() {
             let destination = self.uart8_dma_daddr;
             self.write8_inner(destination, value)?;
+            self.record_firmware_write(
+                FirmwareWriteActor::Dma(UART8_TCD34_REQUEST_VALUE),
+                destination,
+                8,
+                u32::from(value),
+            );
             self.record_uart8_event(UART8_URB, value, false, true, destination);
             self.uart8_dma_daddr = self.uart8_dma_ring_base.wrapping_add(
                 destination
@@ -6584,16 +6706,21 @@ impl Bus for ProbeBus {
     fn write8(&mut self, address: u32, value: u8) -> Result<(), BusError> {
         if self.in_fast_ram(address, 1) {
             self.code_map.note_write(address, 1);
-            return self.ram.write8(address, value);
+            self.ram.write8(address, value)?;
+            self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
+            return Ok(());
         }
         if self.in_fast_sram(address, 1) {
-            return self.sram_overlay.as_mut().unwrap().write8(address, value);
+            self.sram_overlay.as_mut().unwrap().write8(address, value)?;
+            self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
+            return Ok(());
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 1);
         let old = self.watched_old_bytes(address, 1)?;
         self.write8_inner(address, value)?;
+        self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
         self.record_sample_access(SampleAccessActor::Cpu, address, 1, true, u32::from(value));
         if Uart8::contains(address) {
             self.record_uart8_event(address, value, true, false, 0);
@@ -6614,16 +6741,24 @@ impl Bus for ProbeBus {
     fn write16(&mut self, address: u32, value: u16) -> Result<(), BusError> {
         if self.in_fast_ram(address, 2) {
             self.code_map.note_write(address, 2);
-            return self.ram.write16(address, value);
+            self.ram.write16(address, value)?;
+            self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
+            return Ok(());
         }
         if self.in_fast_sram(address, 2) {
-            return self.sram_overlay.as_mut().unwrap().write16(address, value);
+            self.sram_overlay
+                .as_mut()
+                .unwrap()
+                .write16(address, value)?;
+            self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
+            return Ok(());
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 2);
         let old = self.watched_old_bytes(address, 2)?;
         self.write16_inner(address, value)?;
+        self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
         self.record_sample_access(SampleAccessActor::Cpu, address, 2, true, u32::from(value));
         self.snapshot_source_on_write(address, 2)?;
         self.record_watched_write(address, 2, u32::from(value), old);
@@ -6641,16 +6776,24 @@ impl Bus for ProbeBus {
     fn write32(&mut self, address: u32, value: u32) -> Result<(), BusError> {
         if self.in_fast_ram(address, 4) {
             self.code_map.note_write(address, 4);
-            return self.ram.write32(address, value);
+            self.ram.write32(address, value)?;
+            self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
+            return Ok(());
         }
         if self.in_fast_sram(address, 4) {
-            return self.sram_overlay.as_mut().unwrap().write32(address, value);
+            self.sram_overlay
+                .as_mut()
+                .unwrap()
+                .write32(address, value)?;
+            self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
+            return Ok(());
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 4);
         let old = self.watched_old_bytes(address, 4)?;
         self.write32_inner(address, value)?;
+        self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
         self.record_sample_access(SampleAccessActor::Cpu, address, 4, true, value);
         self.record_dspi_push(address, value);
         self.snapshot_source_on_write(address, 4)?;
@@ -7089,6 +7232,28 @@ mod tests {
             assert_eq!(event.write, write);
             assert_eq!(event.value, value);
         }
+    }
+
+    #[test]
+    fn firmware_write_trace_captures_only_the_selected_instruction_window() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x1000, 0x100));
+        bus.write_trace_range = Some((3, 5));
+        bus.write_trace_base = 100;
+        bus.current_pc = 0x2000;
+
+        bus.current_instruction_count = 103;
+        bus.write16(0x1010, 0x1234).unwrap();
+        bus.current_instruction_count = 105;
+        bus.write8(0x1012, 0x56).unwrap();
+
+        assert_eq!(bus.firmware_write_trace.len(), 1);
+        let write = &bus.firmware_write_trace[0];
+        assert_eq!(write.instruction_count, 103);
+        assert_eq!(write.pc, 0x2000);
+        assert!(matches!(write.actor, FirmwareWriteActor::Cpu));
+        assert_eq!(write.address, 0x1010);
+        assert_eq!(write.width_bits, 16);
+        assert_eq!(write.value, 0x1234);
     }
 
     #[test]
