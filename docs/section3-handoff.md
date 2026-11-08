@@ -53,10 +53,11 @@ and must point here rather than maintain competing status reports.
 
 Run `tools/ui-smoke.sh [path/to/dt2-cli]`. It performs the 1.5B-instruction
 section-3 diagnostic boot with the synthetic conditions in `tools/run-section3.sh`,
-captures its upright UART8 screen, then checks repeated encoder and FLTR page
-changes from the pinned sample-loaded UI state, and runs the modeled-DSP WAV
-load-plus-trigger regression. The clean boot has no loaded sample, so an encoder
-delta does not produce a meaningful value change there.
+captures its upright UART8 screen, then uses the reusable recipes in
+[ui-recipes.md](./ui-recipes.md) to check one encoder detent, a FLTR page change,
+and return to SAMPLE from the pinned sample-loaded UI state. It then runs the
+modeled-DSP WAV load-plus-trigger regression. The clean boot has no loaded
+sample, so an encoder delta does not produce a meaningful value change there.
 
 The script requires local ignored assets: the section-3 image/RAM/NOR files,
 `out/run-card.img`, and the sample-loaded `out/shots/main-after-load.snap` plus
@@ -70,8 +71,9 @@ Expected SHA-256 frame hashes:
 |---|---|
 | Cold boot SAMPLE page | `8cdccf4db484a161695d1453c0841b4a454ea6cb839ec9ded67ff7f255616e6a` |
 | Sample-loaded baseline | `6e4f2126469865d8b9c49cbae17ecf9cb61e22bc85c522acb6e2bc01b2c62ff6` |
-| Encoder A delta (`3005,3000`, repeated every 3M instructions) | `e1a74aa4668f4a1ba7863cb787d929e3291aa756f531214fce4a055876dcb7f2` |
-| FLTR page (`2004,2000`, repeated every 3M instructions) | `754122aa73411057148ae3c8dfc78eb5f8f9a15243310dcd1544e831d43fbfb8` |
+| One encoder A detent (`3005,3000`, once at 3M spacing) | `3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a` |
+| FLTR page (`2004,2000`, once at 3M spacing) | `20b7b62611a13133779f3da6e452591182fc7ff5bc37c2b9b3ada5e16b7133c3` |
+| Return to SAMPLE (`2002,2000`, once at 3M spacing) | `18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b` |
 | Modeled-DSP load + trigger WAV (mono 16-bit, 48 kHz) | `7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200` |
 
 This gate confirms the expected diagnostic path and modeled WAV only; it does
