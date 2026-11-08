@@ -33,12 +33,16 @@ read the same changing values. The Track-01 kick and clap traces both reached
 `0x012c`, while the clap-to-Track-02 trace remained at `0x0007`.
 
 This is a real per-run state difference, but its meaning is not established:
-the source producer's caller and the field's relationship to a track/sample
-assignment are unresolved, and both RGPIO sample headers still contain slot
-`300`. Do not treat `0xe0` as a confirmed selector or use it for modeled
-per-track routing yet. Logs: `out/modeled-dsp/clap-track1-slot-watch-word.log`,
+the field-writing helper's immediate call site is `0x4002eb9c` (calling
+`0x40136388`, returning to `0x4002eba2`), but the enclosing routine and the
+origin of its changing `D3` value are unresolved. The field's relationship to a
+track/sample assignment is also unproven, and both RGPIO sample headers still
+contain slot `300`. Do not treat `0xe0` as a confirmed selector or use it for
+modeled per-track routing yet. Logs:
+`out/modeled-dsp/clap-track1-slot-watch-word.log`,
 `out/modeled-dsp/clap-track1-source-watch.log`,
-`out/modeled-dsp/clap-track1-source-read.log`, and
+`out/modeled-dsp/clap-track1-source-read.log`,
+`out/modeled-dsp/clap-track1-writer-stack.log`, and
 `out/modeled-dsp/clap-track2-loaded.log`.
 
 ## OS 1.17 FlexBus/RGPIO and helper trace
