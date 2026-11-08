@@ -10,12 +10,22 @@ and pages, and sample loading to RAM is observed. These results depend on explic
 diagnostic assumptions; this is not yet a hardware-faithful cold boot.
 
 Real firmware-driven audio playback is not implemented. SSI remains silent in the
-documented trigger/play trace; the DSP handoff from sample RAM is still unknown.
-Synthetic voice output is a diagnostic only, not emulator playback.
+documented trigger/play trace. A separately labeled modeled-DSP path now consumes
+the traced RGPIO sample pages and DSPI2 note fields to produce a 48 kHz WAV;
+its trigger timing, PCM interpretation, and 32-frames-per-block cadence include
+explicit assumptions. This is measured modeled playback, not a SHARC core or
+hardware-faithful audio implementation. The model currently supports one
+uploaded sample; per-track sample-slot association and note-rate mapping remain
+unverified.
 
 The canonical project status, evidence, current blockers, and next-step order are in
 [docs/section3-handoff.md](docs/section3-handoff.md). That document is the single
 source of truth for implementation status; this README is a user-facing overview.
+
+`tools/ui-smoke.sh` checks the boot-to-SAMPLE screen, sample-loaded encoder and
+page changes, and a load-plus-trigger modeled-DSP WAV against deterministic
+frame and audio hashes. It requires the local ignored firmware/card assets
+documented in the handoff.
 
 ```sh
 cargo test

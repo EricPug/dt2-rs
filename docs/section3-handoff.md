@@ -16,8 +16,11 @@ and must point here rather than maintain competing status reports.
   available in the optional window build.
 - The synthetic eMMC supports formatting, browsing, and loading a sample into RAM.
 - Firmware-driven audio playback is not working: SSI TX remains silent in the
-  documented trigger/play trace. `SYNTH_VOICE` output is diagnostic-only and does
-  not count as emulated playback. The actual sample-to-DSP handoff remains unknown.
+  documented trigger/play trace. A separately labeled modeled-DSP stand-in now
+  receives the traced sample bytes over RGPIO, uses DSPI2 note/machine fields for
+  triggering, and produces a WAV whose played segment matches the loaded sample.
+  This is a modeled playback milestone, not a SHARC implementation or evidence
+  of physical DSP reception or hardware audio.
 - The latest sample-load and trigger/play trace found no qualifying CPU bulk
   write to non-RAM. Its only >=1 KiB transfers are the synthetic DSPI2 `DSP_LINK`
   path and the emulator's timer-scheduled SSI service, not evidence of physical
@@ -33,19 +36,27 @@ and must point here rather than maintain competing status reports.
 2. **Complete:** establish a deterministic boot-to-SAMPLE-page smoke gate, with
    sample-loaded encoder and page-change frame hashes, before changing
    DMA/shared-memory behavior.
-3. **In progress; CPU-visible trace limit reached:** record the remaining
-   evidence and ruled-out paths in the [audio handoff hypothesis log](./audio-trace-hypotheses.md),
-   then decide on a minimal DSP stand-in before further probes.
-4. Implement one firmware-driven playback slice and retain its SSI capture.
-5. Retire synthetic startup assumptions individually when evidence replaces them.
+3. **Complete:** trace and document the CPU-visible RGPIO sample-page upload and
+   DSPI2 note fields. Physical DSP receipt/consumption remains unverified.
+4. **Complete, modeled only:** load one sample, trigger it from the observed
+   DSPI2 note edge, and verify a nonzero 48 kHz WAV segment against source bytes.
+   The runner and WAV hash are part of the smoke gate; no injected audio counts.
+5. **In progress:** the second sample upload is confirmed, but its header still
+   reports slot 300, the same slot as the first sample. The UI can select
+   `LOAD TO TRK 02`, but distinct per-track sample-slot association and
+   two-track playback remain unverified. Note 60/45 fields are visible in DSPI2,
+   but a note-60 input on the sample-machine track and its rate mapping remain
+   inconclusive. Retire synthetic startup assumptions individually when evidence
+   replaces them.
 
 ## UI smoke regression
 
 Run `tools/ui-smoke.sh [path/to/dt2-cli]`. It performs the 1.5B-instruction
 section-3 diagnostic boot with the synthetic conditions in `tools/run-section3.sh`,
 captures its upright UART8 screen, then checks repeated encoder and FLTR page
-changes from the pinned sample-loaded UI state. The clean boot has no loaded
-sample, so an encoder delta does not produce a meaningful value change there.
+changes from the pinned sample-loaded UI state, and runs the modeled-DSP WAV
+load-plus-trigger regression. The clean boot has no loaded sample, so an encoder
+delta does not produce a meaningful value change there.
 
 The script requires local ignored assets: the section-3 image/RAM/NOR files,
 `out/run-card.img`, and the sample-loaded `out/shots/main-after-load.snap` plus
@@ -61,9 +72,11 @@ Expected SHA-256 frame hashes:
 | Sample-loaded baseline | `6e4f2126469865d8b9c49cbae17ecf9cb61e22bc85c522acb6e2bc01b2c62ff6` |
 | Encoder A delta (`3005,3000`, repeated every 3M instructions) | `e1a74aa4668f4a1ba7863cb787d929e3291aa756f531214fce4a055876dcb7f2` |
 | FLTR page (`2004,2000`, repeated every 3M instructions) | `754122aa73411057148ae3c8dfc78eb5f8f9a15243310dcd1544e831d43fbfb8` |
+| Modeled-DSP load + trigger WAV (mono 16-bit, 48 kHz) | `7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200` |
 
-This gate confirms the expected diagnostic path and screens only; it does not
-validate audio or establish hardware reset/peripheral behavior.
+This gate confirms the expected diagnostic path and modeled WAV only; it does
+not establish hardware reset/peripheral behavior, a SHARC ABI, or physical DSP
+audio. The modeled 32-frames-per-DSPI2-block timing remains an assumption.
 
 ## Checkpoints
 
@@ -1391,4 +1404,7 @@ write-window tracer is documented in the README.
 - The indexed pages reconstruct exactly: pages 0–7 match the first `0x8000`-byte channel-59 source at `0x4060d770`; page 8 matches the first `0x1000` bytes from `0x40605770`; page 9 has a `0xc00`-byte source match at offset `0x1000`, with the last `0x400` bytes matching staging data/padding. Reversing each byte pair and concatenating pages 0–9 gives the converted `0x9c00`-byte sample (SHA-256 `5f84301e6021dd5530e71614a3c4b04cf61d88ee4bcf4bfba0fb12865fc7d2a4`). Per-call qualifications are in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
 - `MODELED_DSP_WAV=<path>` is separate from `SYNTH_VOICE`. It consumes those RGPIO uploads and channel-29 DSPI2 frames, using note fields at `0x02 + 2*i`, machine fields at `0x94 + 2*i`, and a zero-to-nonzero note edge on observed machine type 2 to start a 16-bit PCM sample.
 - **Measured run:** `tools/modeled-dsp-sample.sh` replayed the saved load plus TRIG/PLAY sequence to the 300M-instruction limit. It captured 12 upload calls and 2,999 DSPI2 blocks. Track 2's `0x2d00` note edge occurred at cumulative instruction 8,582,436,295 / block 1,823. The generated mono 48 kHz WAV contains 95,968 frames; its 19,965-frame sample segment begins at frame 58,336 and exactly matches the concatenated channel-59 source ranges after excluding the first six bytes. The source waveform SHA-256 is `d9781f776139a7d97d42d89616f5b976803696fa2f03ede416688103166a99fb`.
+- **Frame-count correction:** header length `0x9c00` is 39,936 bytes, or 19,968 16-bit words. The first six bytes (three words) are the observed non-audio prefix, leaving `19,968 - 3 = 19,965` emitted PCM frames. So the six-byte prefix accounts exactly for the difference; it is not truncated playback.
+- **Second-sample and track trial (inconclusive for slot selection):** selecting `303 clap real` and choosing `LOAD TO TRK 02` produced four indexed RGPIO pages and a final header with slot `300`, length `0x3022`; the first sample's header also names slot `300` with length `0x9c00`. Thus these header fields distinguish length but did not identify a different slot for the second sample. The modeled-DSP path successfully played the clap upload as a single sample (6,158 PCM frames), but two distinct samples playing on two tracks are not demonstrated.
+- **Note-field trial (inconclusive for same-track pitch):** in the Track 02 capture, note data at offset `0x06` is `0x2d00` while machine data at `0x98` is type 2. A keyboard/TRIG 16 attempt changed note data at offset `0x02` from `0x3c00` to `0x4800`, while offset `0x06` stayed `0x2d00`; machine data at `0x94` remained zero. The test therefore changed a different, non-sample-machine track and did not produce note 60 on the sample track. A possible equal-tempered rate rule is `rate(n) = rate(60) * 2^((n - 60) / 12)` (so note 45 is about 0.42045x note 60), but this is a proposal, not measured DSP behavior.
 - **Assumptions:** the first six bytes are non-audio prefix; the remainder is signed 16-bit big-endian mono PCM; one sample per 48 kHz frame is nominal pitch; each DSPI2 block advances 32 audio frames; sample-machine type 2 and a zero-to-nonzero edge are the trigger; no pitch mapping, gain, envelope, mixing, or polyphony is modeled. These assumptions are not a decoded SHARC ABI. The successful WAV comparison validates only this modeled path; no SHARC core, eDMA behavior, physical DSP reception, or hardware audio has been established.
