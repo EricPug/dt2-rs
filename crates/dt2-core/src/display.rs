@@ -15,6 +15,12 @@ pub struct Display {
     leds_seen: bool,
 }
 
+impl Default for Display {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Display {
     pub fn new() -> Self {
         Self {
@@ -88,7 +94,8 @@ impl Display {
             0xB8 => self.updates += 1,
             0xB5 => {
                 // `b5 index r g b`
-                self.palette[usize::from(self.pending[1])] = [self.pending[2], self.pending[3], self.pending[4]];
+                self.palette[usize::from(self.pending[1])] =
+                    [self.pending[2], self.pending[3], self.pending[4]];
                 self.leds_seen = true;
             }
             0xB9 => {
@@ -103,7 +110,8 @@ impl Display {
                     for row in 0..8 {
                         let bits = self.pending[2 + row];
                         for col in 0..8 {
-                            self.pixels[(y0 + row) * FB_WIDTH + x0 + col] = bits >> (7 - col) & 1 != 0;
+                            self.pixels[(y0 + row) * FB_WIDTH + x0 + col] =
+                                bits >> (7 - col) & 1 != 0;
                         }
                     }
                 }
@@ -197,7 +205,11 @@ fn crc32(data: &[u8]) -> u32 {
     for &byte in data {
         crc ^= u32::from(byte);
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
         }
     }
     !crc
@@ -244,7 +256,9 @@ mod tests {
     #[test]
     fn led_records_update_palette_and_led_colours() {
         let mut display = Display::new();
-        for byte in [0xB5, 0x01, 4, 4, 4, 0xB5, 0x71, 0x3F, 0x3F, 0x3F, 0xB9, 0x14, 0x71, 0xB9, 0x15, 0x01] {
+        for byte in [
+            0xB5, 0x01, 4, 4, 4, 0xB5, 0x71, 0x3F, 0x3F, 0x3F, 0xB9, 0x14, 0x71, 0xB9, 0x15, 0x01,
+        ] {
             display.feed(byte);
         }
         assert_eq!(display.led_rgb(0x14), Some(0x00FF_FFFF));
@@ -278,7 +292,9 @@ mod tests {
         let data = writer.into_inner();
 
         let mut restored = Display::new();
-        restored.load_state(&mut crate::snapshot::Reader::new(&data)).unwrap();
+        restored
+            .load_state(&mut crate::snapshot::Reader::new(&data))
+            .unwrap();
         assert!(restored.pixel(16, 16) && restored.pixel(19, 16) && !restored.pixel(20, 16));
         // The half-received record at the snapshot point completes after restore.
         for byte in [0x80, 0, 0, 0, 0, 0, 0, 0] {

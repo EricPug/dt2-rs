@@ -1,17 +1,21 @@
 # dt2-rs
 
-An early-stage Digitakt II emulator and firmware analysis toolkit written in Rust.
+An early-stage Digitakt II firmware emulator and analysis toolkit written in Rust.
 Not affiliated with or endorsed by Elektron.
 
-The CLI can inspect and unpack SysEx firmware containers, and run raw binary images
-on a partial ColdFire V4e core with configurable RAM and MMIO seeds. Optional models
-cover MCF5441x SRAM/SBF reset-vector mapping, DSPI0 with a W25Q128JV SPI NOR device,
-the DDR controller registers observed during bootstrap, and an opt-in synthetic MMIO
-diagnostic mode.
+It can inspect and unpack SysEx firmware containers and run firmware traces on a
+partial ColdFire V4e core with modeled and synthetic peripherals. The current OS 1.17
+diagnostic path reaches an interactive SAMPLE page: panel input can change values
+and pages, and sample loading to RAM is observed. These results depend on explicit
+diagnostic assumptions; this is not yet a hardware-faithful cold boot.
 
-The emulator can execute diagnostic firmware traces under explicit or synthetic
-startup assumptions. It does not yet boot the full operating system: DDR timing and
-SDRAM behavior, later peripherals, the display, controls, and audio are incomplete.
+Real firmware-driven audio playback is not implemented. SSI remains silent in the
+documented trigger/play trace; the DSP handoff from sample RAM is still unknown.
+Synthetic voice output is a diagnostic only, not emulator playback.
+
+The canonical project status, evidence, current blockers, and next-step order are in
+[docs/section3-handoff.md](docs/section3-handoff.md). That document is the single
+source of truth for implementation status; this README is a user-facing overview.
 
 ```sh
 cargo test

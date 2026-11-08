@@ -19,7 +19,9 @@ impl Fnv {
 }
 
 fn lcg(s: &mut u64) -> u32 {
-    *s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+    *s = s
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(1442695040888963407);
     (*s >> 32) as u32
 }
 
@@ -45,14 +47,19 @@ fn main() {
     let cached = std::env::var("CACHED").is_ok_and(|v| v == "1");
     let double = std::env::var("DOUBLE").is_ok_and(|v| v == "1");
     let per_op = std::env::var("PER_OP").is_ok_and(|v| v == "1");
-    let seeds: u64 = std::env::var("N_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(6);
+    let seeds: u64 = std::env::var("N_SEEDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6);
     let mut h = Fnv(0xcbf2_9ce4_8422_2325);
     for seed in 0..seeds {
         let mut ram = FlatRam::new(BASE, 0x10000);
         let mut cpu = Cpu::new();
         cpu.set_icache(cached);
         for op in 0..=0xFFFFu32 {
-            let mut rng = seed.wrapping_mul(0x9E37_79B9).wrapping_add(op as u64 * 31 + 1);
+            let mut rng = seed
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add(op as u64 * 31 + 1);
             // Writing the code page bumps the cache epoch, so stale entries are never replayed.
             ram.write16(BASE, op as u16).unwrap();
             for i in 0..6u32 {

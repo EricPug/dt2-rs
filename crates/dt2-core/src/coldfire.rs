@@ -631,7 +631,11 @@ impl Cpu {
         // Mark the pages before executing so an instruction that overwrites itself is not cached.
         let cacheable = bus.cacheable_code(pc0, (MAX_WORDS * 2) as u32);
         self.iw_len = 0;
-        self.fetch_mode = if cacheable { FetchMode::Record } else { FetchMode::Bus };
+        self.fetch_mode = if cacheable {
+            FetchMode::Record
+        } else {
+            FetchMode::Bus
+        };
         let result = match self.fetch16(bus) {
             Ok(op) => self.execute(bus, pc0, op, loop_budget),
             Err(error) => Err(error),
@@ -649,7 +653,12 @@ impl Cpu {
     /// MOVE.L / MOVEA.L for the operand modes `classify` accepts. Mirrors the group 1..3 arm of
     /// `execute` step for step (source EA, read, destination EA, write, flags), so side effects
     /// and error states are identical; extension words come straight from the cached entry.
-    fn fast_move_l<B: Bus>(&mut self, bus: &mut B, pc0: u32, words: &[u16; MAX_WORDS]) -> Result<(), CpuError> {
+    fn fast_move_l<B: Bus>(
+        &mut self,
+        bus: &mut B,
+        pc0: u32,
+        words: &[u16; MAX_WORDS],
+    ) -> Result<(), CpuError> {
         let op = words[0];
         let mut pos = 1;
         self.pc = pc0.wrapping_add(2);
@@ -866,7 +875,9 @@ impl Cpu {
                             .zip((dividend as i32).checked_rem(divisor as i32))
                             .map(|(q, r)| (q as u32, r as u32))
                     } else {
-                        dividend.checked_div(divisor).zip(dividend.checked_rem(divisor))
+                        dividend
+                            .checked_div(divisor)
+                            .zip(dividend.checked_rem(divisor))
                     };
                     let Some((quotient, remainder)) = division else {
                         return Err(CpuError::UnsupportedExceptionState { pc: pc0, op });
@@ -879,11 +890,15 @@ impl Cpu {
                         remainder
                     };
                     self.flags_move(result, Size::L);
-                                } else if op & 0xFFF8 == 0x4C80 {
+                } else if op & 0xFFF8 == 0x4C80 {
                     // SATS.L: with CCR[V] set, saturate in the direction opposite to the wrapped sign.
                     let value = self.d[reg];
                     let result = if self.sr & CCR_V != 0 {
-                        if value & 0x8000_0000 != 0 { 0x7FFF_FFFF } else { 0x8000_0000 }
+                        if value & 0x8000_0000 != 0 {
+                            0x7FFF_FFFF
+                        } else {
+                            0x8000_0000
+                        }
                     } else {
                         value
                     };
@@ -1188,10 +1203,9 @@ impl Cpu {
                 let original = self.d[reg];
                 let (result, carry) = match (shift_type, left) {
                     (_, _) if count == 0 => (original, false),
-                    (0, true) if count < 32 => (
-                        original << count,
-                        original & (1 << (32 - count)) != 0,
-                    ),
+                    (0, true) if count < 32 => {
+                        (original << count, original & (1 << (32 - count)) != 0)
+                    }
                     (0, true) if count == 32 => (0, original & 1 != 0),
                     (0, true) => (0, false),
                     (0, false) if count < 32 => (
@@ -1398,7 +1412,14 @@ impl Cpu {
                         None
                     };
                     let word = (ext & 0x800 == 0).then_some((ext & 0x80 != 0, ext & 0x40 != 0));
-                    self.emac.mac(usize::from(accumulator), x, y, word, ((ext >> 9) & 3) as u8, ext & 0x100 != 0);
+                    self.emac.mac(
+                        usize::from(accumulator),
+                        x,
+                        y,
+                        word,
+                        ((ext >> 9) & 3) as u8,
+                        ext & 0x100 != 0,
+                    );
                     if let Some(value) = loaded {
                         let destination = ((op >> 9) & 7) as usize;
                         if op & 0x40 != 0 {
@@ -1596,7 +1617,8 @@ impl Cpu {
                 if let Some(request) = bus.pending_interrupt() {
                     let interrupt_mask = ((self.sr >> 8) & 7) as u8;
                     if request.level > interrupt_mask {
-                        if let Err(error) = self.take_interrupt(bus, request.level, request.vector) {
+                        if let Err(error) = self.take_interrupt(bus, request.level, request.vector)
+                        {
                             break RunStop::Error(error);
                         }
                         bus.interrupt_taken(request.level, request.vector);
@@ -1625,7 +1647,11 @@ impl Cpu {
                     break RunStop::InstructionLimit;
                 }
             }
-            let mut room = if self.icache.is_some() { bus.quiet_horizon() } else { 0 };
+            let mut room = if self.icache.is_some() {
+                bus.quiet_horizon()
+            } else {
+                0
+            };
             if room > 1 {
                 room = room.min(instruction_limit - budget_used);
                 if let Some(event) = injection {
@@ -1735,7 +1761,11 @@ mod tests {
         assert_eq!(c.pc, 0x1006);
     }
 
-    fn cached_and_uncached(code: &[u16], steps: &[usize], patch: Option<(u32, u16)>) -> (Cpu, Cpu, u64) {
+    fn cached_and_uncached(
+        code: &[u16],
+        steps: &[usize],
+        patch: Option<(u32, u16)>,
+    ) -> (Cpu, Cpu, u64) {
         let (mut cached, mut ram_a) = machine(code);
         let (mut plain, mut ram_b) = machine(code);
         plain.set_icache(false);
@@ -1753,9 +1783,13 @@ mod tests {
 
     #[test]
     fn instruction_cache_matches_the_uncached_interpreter() {
-        let (cached, plain, hits) = cached_and_uncached(&[0x7003, 0x5380, 0x66FC, 0x4E71], &[7], None);
+        let (cached, plain, hits) =
+            cached_and_uncached(&[0x7003, 0x5380, 0x66FC, 0x4E71], &[7], None);
         assert!(hits > 0);
-        assert_eq!((cached.d, cached.pc, cached.sr), (plain.d, plain.pc, plain.sr));
+        assert_eq!(
+            (cached.d, cached.pc, cached.sr),
+            (plain.d, plain.pc, plain.sr)
+        );
     }
 
     /// `FlatRam` that opts into the quiet batch loop and counts its bookkeeping calls.
@@ -1766,18 +1800,42 @@ mod tests {
     }
 
     impl Bus for QuietRam {
-        fn read8(&mut self, a: u32) -> Result<u8, crate::bus::BusError> { self.ram.read8(a) }
-        fn read16(&mut self, a: u32) -> Result<u16, crate::bus::BusError> { self.ram.read16(a) }
-        fn read32(&mut self, a: u32) -> Result<u32, crate::bus::BusError> { self.ram.read32(a) }
-        fn write8(&mut self, a: u32, v: u8) -> Result<(), crate::bus::BusError> { self.ram.write8(a, v) }
-        fn write16(&mut self, a: u32, v: u16) -> Result<(), crate::bus::BusError> { self.ram.write16(a, v) }
-        fn write32(&mut self, a: u32, v: u32) -> Result<(), crate::bus::BusError> { self.ram.write32(a, v) }
-        fn code_epoch(&self) -> u32 { self.ram.code_epoch() }
-        fn cacheable_code(&mut self, pc: u32, bytes: u32) -> bool { self.ram.cacheable_code(pc, bytes) }
-        fn quiet_horizon(&self) -> usize { usize::MAX }
-        fn poll_due(&self) -> bool { false }
-        fn quiet_step(&mut self, _pc: u32, _sr: u16) { self.steps += 1; }
-        fn quiet_retire(&mut self) { self.retired += 1; }
+        fn read8(&mut self, a: u32) -> Result<u8, crate::bus::BusError> {
+            self.ram.read8(a)
+        }
+        fn read16(&mut self, a: u32) -> Result<u16, crate::bus::BusError> {
+            self.ram.read16(a)
+        }
+        fn read32(&mut self, a: u32) -> Result<u32, crate::bus::BusError> {
+            self.ram.read32(a)
+        }
+        fn write8(&mut self, a: u32, v: u8) -> Result<(), crate::bus::BusError> {
+            self.ram.write8(a, v)
+        }
+        fn write16(&mut self, a: u32, v: u16) -> Result<(), crate::bus::BusError> {
+            self.ram.write16(a, v)
+        }
+        fn write32(&mut self, a: u32, v: u32) -> Result<(), crate::bus::BusError> {
+            self.ram.write32(a, v)
+        }
+        fn code_epoch(&self) -> u32 {
+            self.ram.code_epoch()
+        }
+        fn cacheable_code(&mut self, pc: u32, bytes: u32) -> bool {
+            self.ram.cacheable_code(pc, bytes)
+        }
+        fn quiet_horizon(&self) -> usize {
+            usize::MAX
+        }
+        fn poll_due(&self) -> bool {
+            false
+        }
+        fn quiet_step(&mut self, _pc: u32, _sr: u16) {
+            self.steps += 1;
+        }
+        fn quiet_retire(&mut self) {
+            self.retired += 1;
+        }
     }
 
     #[test]
@@ -1786,11 +1844,21 @@ mod tests {
         let code = [0x7000 | 25, 0x2080, 0x5380, 0x66FA, 0x4E71];
         let (mut normal, mut ram_a) = machine(&code);
         let (mut quiet, ram_b) = machine(&code);
-        let mut qram = QuietRam { ram: ram_b, steps: 0, retired: 0 };
+        let mut qram = QuietRam {
+            ram: ram_b,
+            steps: 0,
+            retired: 0,
+        };
         let a = normal.run(&mut ram_a, 60);
         let b = quiet.run(&mut qram, 60);
-        assert_eq!((format!("{:?}", a.stop), a.instructions), (format!("{:?}", b.stop), b.instructions));
-        assert_eq!((normal.d, normal.a, normal.pc, normal.sr), (quiet.d, quiet.a, quiet.pc, quiet.sr));
+        assert_eq!(
+            (format!("{:?}", a.stop), a.instructions),
+            (format!("{:?}", b.stop), b.instructions)
+        );
+        assert_eq!(
+            (normal.d, normal.a, normal.pc, normal.sr),
+            (quiet.d, quiet.a, quiet.pc, quiet.sr)
+        );
         assert_eq!(qram.steps, 60);
         assert_eq!(qram.retired, 60);
     }
@@ -1798,10 +1866,14 @@ mod tests {
     #[test]
     fn instruction_cache_sees_rewritten_code() {
         // addq.l #1,d0 / bra.b back; the addq is patched to #2 after it has been cached.
-        let (cached, plain, hits) = cached_and_uncached(&[0x5280, 0x60FC], &[10, 10], Some((0x1000, 0x5480)));
+        let (cached, plain, hits) =
+            cached_and_uncached(&[0x5280, 0x60FC], &[10, 10], Some((0x1000, 0x5480)));
         assert!(hits > 0);
         assert_eq!(cached.d[0], 15);
-        assert_eq!((cached.d, cached.pc, cached.sr), (plain.d, plain.pc, plain.sr));
+        assert_eq!(
+            (cached.d, cached.pc, cached.sr),
+            (plain.d, plain.pc, plain.sr)
+        );
     }
 
     #[test]
@@ -2475,15 +2547,23 @@ mod tests {
     #[test]
     fn emac_register_moves_save_restore_and_clear() {
         // move.l d1,acc1; movclr.l acc1,d2; movclr.l acc1,d3; move.l macsr,a0; move.l #0x20,macsr; move.l macsr,d4
-        let (mut cpu, mut ram) = machine(&[0xA301, 0xA3C2, 0xA3C3, 0xA988, 0xA93C, 0x0000, 0x0020, 0xA984]);
+        let (mut cpu, mut ram) = machine(&[
+            0xA301, 0xA3C2, 0xA3C3, 0xA988, 0xA93C, 0x0000, 0x0020, 0xA984,
+        ]);
         cpu.d[1] = 0x8000_0001;
         cpu.d[3] = 0xFFFF_FFFF;
 
         run(&mut cpu, &mut ram, 6);
 
         assert_eq!(cpu.d[2], 0x8000_0001);
-        assert_eq!(cpu.d[3], 0, "the accumulator was cleared by the first MOVCLR");
-        assert_eq!(cpu.a[0], 0x8, "N from the load, PAV and the other flags clear");
+        assert_eq!(
+            cpu.d[3], 0,
+            "the accumulator was cleared by the first MOVCLR"
+        );
+        assert_eq!(
+            cpu.a[0], 0x8,
+            "N from the load, PAV and the other flags clear"
+        );
         assert_eq!(cpu.d[4], 0x20);
         assert_eq!(cpu.pc, 0x1010);
     }
@@ -3228,10 +3308,24 @@ mod tests {
             (0xE380, 0x1000_0001, 0, ALL, 0x2000_0002, 0),
             (0xE380, 0x4000_0000, 0, 0, 0x8000_0000, CCR_N | CCR_V),
             (0xE380, 0x8000_0000, 0, 0, 0, CCR_X | CCR_C | CCR_Z | CCR_V),
-            (0xE380, 0xC000_0000, 0, 0, 0x8000_0000, CCR_X | CCR_C | CCR_N),
+            (
+                0xE380,
+                0xC000_0000,
+                0,
+                0,
+                0x8000_0000,
+                CCR_X | CCR_C | CCR_N,
+            ),
             (0xE180, 0x00FF_0000, 0, 0, 0xFF00_0000, CCR_N | CCR_V),
             (0xE180, 0xFF00_0000, 0, 0, 0, CCR_X | CCR_C | CCR_Z | CCR_V),
-            (0xE3A0, 0x4000_0000, 0, CCR_X | CCR_V | CCR_C, 0x4000_0000, CCR_X),
+            (
+                0xE3A0,
+                0x4000_0000,
+                0,
+                CCR_X | CCR_V | CCR_C,
+                0x4000_0000,
+                CCR_X,
+            ),
             (0xE3A0, 0x0000_0001, 32, 0, 0, CCR_X | CCR_C | CCR_Z | CCR_V),
             (0xE3A0, 0xFFFF_FFFF, 40, CCR_X, 0, CCR_Z | CCR_V),
         ];

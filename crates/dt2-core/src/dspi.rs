@@ -349,7 +349,6 @@ impl Bus for Dspi {
     }
 }
 
-
 impl Dspi {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
         w.u32(self.mcr);

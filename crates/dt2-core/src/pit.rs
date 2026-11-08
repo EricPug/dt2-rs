@@ -406,7 +406,6 @@ impl Bus for PitController {
     }
 }
 
-
 impl PitController {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
         debug_assert_eq!(self.lag, 0);
@@ -546,7 +545,9 @@ mod tests {
     fn lazy_and_eager_timers_stay_identical_under_random_traffic() {
         let mut seed = 0x1234_5678_u64;
         let mut next = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         for ticks in [1, 3] {
@@ -564,7 +565,8 @@ mod tests {
                     }
                     1 => {
                         let module = u32::from(next() as u8 % 4) * MODULE_STRIDE;
-                        let value = [0x0033, 0x003B, 0x0013, 0x0143, 0x0031, 0x0000, 0x0004][(next() % 7) as usize];
+                        let value = [0x0033, 0x003B, 0x0013, 0x0143, 0x0031, 0x0000, 0x0004]
+                            [(next() % 7) as usize];
                         for pits in [&mut eager, &mut lazy] {
                             pits.write16(BASE + module, value).unwrap();
                         }

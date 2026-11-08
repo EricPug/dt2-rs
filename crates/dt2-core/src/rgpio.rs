@@ -160,7 +160,6 @@ impl Bus for Rgpio {
     }
 }
 
-
 impl Rgpio {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
         w.u16(self.direction);

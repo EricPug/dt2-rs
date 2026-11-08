@@ -770,7 +770,8 @@ fn run_binary(args: &[String]) {
     }
     // The clickable panel defaults to 4: measured by hand, one upward drag then sweeps an encoder to its
     // maximum (16 gave about half the range, 8 a quarter, 64 almost none); see docs/section3-handoff.md.
-    let panel_default_ticks = (dtim3_bootstrap && args[6..].iter().any(|a| a == "LIVE_PANEL")).then_some("4");
+    let panel_default_ticks =
+        (dtim3_bootstrap && args[6..].iter().any(|a| a == "LIVE_PANEL")).then_some("4");
     let dtim3_tick_setting = args[6..]
         .iter()
         .find_map(|assignment| assignment.strip_prefix("DTIM3_TICKS_PER_INSTRUCTION="))
@@ -882,7 +883,10 @@ fn run_binary(args: &[String]) {
                 .set_first_tick_delay(pit_first_tick_delay);
         }
     }
-    if let Some(period) = args[6..].iter().find_map(|a| a.strip_prefix("SSI_AUDIO_IRQ=")) {
+    if let Some(period) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("SSI_AUDIO_IRQ="))
+    {
         let Ok(period) = period.parse() else {
             eprintln!("invalid SSI_AUDIO_IRQ period: {period}");
             std::process::exit(2);
@@ -945,8 +949,14 @@ fn run_binary(args: &[String]) {
         bus.enable_loop_detection();
     }
     let live_panel = args[6..].iter().any(|a| a == "LIVE_PANEL");
-    let panel_image = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_IMAGE=")).map(str::to_owned);
-    if let Some(value) = args[6..].iter().find_map(|a| a.strip_prefix("PANEL_COUNTS_PER_DEGREE=")) {
+    let panel_image = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("PANEL_IMAGE="))
+        .map(str::to_owned);
+    if let Some(value) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("PANEL_COUNTS_PER_DEGREE="))
+    {
         match value.parse::<f32>() {
             Ok(pixels) if pixels > 0.0 => panel_ui::set_counts_per_degree(pixels),
             _ => {
@@ -959,7 +969,8 @@ fn run_binary(args: &[String]) {
         if a == "LIVE_WINDOW" || a == "LIVE_PANEL" {
             Some(4)
         } else {
-            a.strip_prefix("LIVE_WINDOW=").and_then(|s| s.parse::<usize>().ok())
+            a.strip_prefix("LIVE_WINDOW=")
+                .and_then(|s| s.parse::<usize>().ok())
         }
     });
     let live_png = args[6..].iter().find_map(|a| a.strip_prefix("LIVE_PNG="));
@@ -1181,7 +1192,10 @@ fn run_binary(args: &[String]) {
             std::process::exit(2)
         });
     }
-    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("SNAPSHOT_LOAD=")) {
+    if let Some(path) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("SNAPSHOT_LOAD="))
+    {
         let data = std::fs::read(path).unwrap_or_else(|error| {
             eprintln!("cannot read SNAPSHOT_LOAD {path}: {error}");
             std::process::exit(2)
@@ -1200,8 +1214,13 @@ fn run_binary(args: &[String]) {
         }
         println!("restored snapshot {path}: PC={:#010x}", cpu.pc);
     }
-    if let Some(spec) = args[6..].iter().find_map(|a| a.strip_prefix("SYNTH_VOICE=")) {
-        let parsed = spec.split_once(':').and_then(|(a, l)| Some((parse_address(a).ok()?, parse_address(l).ok()?)));
+    if let Some(spec) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("SYNTH_VOICE="))
+    {
+        let parsed = spec
+            .split_once(':')
+            .and_then(|(a, l)| Some((parse_address(a).ok()?, parse_address(l).ok()?)));
         let Some((address, length)) = parsed else {
             eprintln!("invalid SYNTH_VOICE, expected address:length");
             std::process::exit(2)
@@ -1219,14 +1238,20 @@ fn run_binary(args: &[String]) {
         bus.dsp_link = true;
         println!("diagnostic: DSP link (DSPI2 + eDMA 28/29) enabled");
     }
-    for seed in args[6..].iter().filter_map(|a| a.strip_prefix("POST_LOAD_RAM32@")) {
+    for seed in args[6..]
+        .iter()
+        .filter_map(|a| a.strip_prefix("POST_LOAD_RAM32@"))
+    {
         bus.seed_ram32(seed).unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2)
         });
         println!("diagnostic: post-load RAM32 seed {seed}");
     }
-    if let Some(list) = args[6..].iter().find_map(|a| a.strip_prefix("INTC0_UNMASK=")) {
+    if let Some(list) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("INTC0_UNMASK="))
+    {
         let Some(intc0) = bus.intc0.as_mut() else {
             eprintln!("INTC0_UNMASK needs an attached INTC0");
             std::process::exit(2)
@@ -1240,12 +1265,17 @@ fn run_binary(args: &[String]) {
             println!("diagnostic: INTC0 source {source} unmasked");
         }
     }
-    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_TX_FILE=")) {
+    if let Some(path) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("UART8_TX_FILE="))
+    {
         let open = |path: &str| {
-            std::fs::File::create(path).map(std::io::BufWriter::new).unwrap_or_else(|error| {
-                eprintln!("cannot create {path}: {error}");
-                std::process::exit(2)
-            })
+            std::fs::File::create(path)
+                .map(std::io::BufWriter::new)
+                .unwrap_or_else(|error| {
+                    eprintln!("cannot create {path}: {error}");
+                    std::process::exit(2)
+                })
         };
         bus.uart8_tx_file = Some((open(path), open(&format!("{path}.times"))));
     }
@@ -1260,7 +1290,10 @@ fn run_binary(args: &[String]) {
     if ssi_tx_raw_path.is_some() {
         bus.ssi_tx_raw = Some(Vec::new());
     }
-    if let Some(spec) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_RX_PERIODIC=")) {
+    if let Some(spec) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("UART8_RX_PERIODIC="))
+    {
         let (period, messages) = spec.split_once(':').unwrap_or_else(|| {
             eprintln!("UART8_RX_PERIODIC expects period:hex[,hex...]");
             std::process::exit(2)
@@ -1288,7 +1321,10 @@ fn run_binary(args: &[String]) {
     if args[6..].iter().any(|a| a == "RGPIO_READY_MODEL") {
         bus.rgpio_ready_model = true;
     }
-    for spec in args[6..].iter().filter_map(|a| a.strip_prefix("DUMP_CALL=")) {
+    for spec in args[6..]
+        .iter()
+        .filter_map(|a| a.strip_prefix("DUMP_CALL="))
+    {
         let fields: Vec<&str> = spec.splitn(4, ':').collect();
         let parsed = (fields.len() == 4)
             .then(|| {
@@ -1305,19 +1341,28 @@ fn run_binary(args: &[String]) {
             std::process::exit(2)
         }));
     }
-    if let Some(limit) = args[6..].iter().find_map(|a| a.strip_prefix("RGPIO_TRACE=")) {
+    if let Some(limit) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("RGPIO_TRACE="))
+    {
         bus.rgpio_trace_limit = limit.parse().unwrap_or_else(|_| {
             eprintln!("RGPIO_TRACE must be an integer");
             std::process::exit(2)
         });
     }
-    if let Some(mask) = args[6..].iter().find_map(|a| a.strip_prefix("RGPIO_INPUT_HIGH=")) {
+    if let Some(mask) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("RGPIO_INPUT_HIGH="))
+    {
         bus.rgpio_input_high = parse_address(mask).unwrap_or_else(|error| {
             eprintln!("invalid RGPIO_INPUT_HIGH: {error}");
             std::process::exit(2)
         }) as u16;
     }
-    if let Some(hex) = args[6..].iter().find_map(|a| a.strip_prefix("UART8_RX_LATE=")) {
+    if let Some(hex) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("UART8_RX_LATE="))
+    {
         let bytes = parse_uart_rx_bytes(hex).unwrap_or_else(|error| {
             eprintln!("{error}");
             std::process::exit(2)
@@ -1326,7 +1371,10 @@ fn run_binary(args: &[String]) {
             eprintln!("cannot deliver UART8_RX_LATE at {:#010x}", error.addr);
             std::process::exit(2)
         });
-        println!("UART8_RX_LATE: delivered {} byte(s) through the RX DMA ring", bytes.len());
+        println!(
+            "UART8_RX_LATE: delivered {} byte(s) through the RX DMA ring",
+            bytes.len()
+        );
     }
     let run_started = Instant::now();
     if args[6..].iter().any(|a| a == "PIT_EAGER") {
@@ -1362,9 +1410,23 @@ fn run_binary(args: &[String]) {
     let report = if let Some(spec) = pc_sample {
         run_pc_sampled(&mut cpu, &mut bus, instruction_limit, spec)
     } else if let Some(spec) = state_hash {
-        run_state_hashed(&mut cpu, &mut bus, instruction_limit, spec, ram_base, ram_size as u32)
+        run_state_hashed(
+            &mut cpu,
+            &mut bus,
+            instruction_limit,
+            spec,
+            ram_base,
+            ram_size as u32,
+        )
     } else if let Some(scale) = live_window {
-        run_live(&mut cpu, &mut bus, instruction_limit, interrupt_injection, scale, live_panel.then_some(panel_image))
+        run_live(
+            &mut cpu,
+            &mut bus,
+            instruction_limit,
+            interrupt_injection,
+            scale,
+            live_panel.then_some(panel_image),
+        )
     } else {
         run_engine(&mut cpu, &mut bus, instruction_limit, interrupt_injection)
     };
@@ -1372,11 +1434,16 @@ fn run_binary(args: &[String]) {
     unicorn_tier::print_stats();
     if let (Some(path), Some(display)) = (live_png, &bus.display) {
         let (width, height, pixels) = display.render_upright(4);
-        std::fs::write(path, display::encode_gray_png(width, height, &pixels)).unwrap_or_else(|error| {
-            eprintln!("cannot write LIVE_PNG {path}: {error}");
-            std::process::exit(2)
-        });
-        println!("LIVE_PNG: wrote {path} after {} display update(s)", display.updates);
+        std::fs::write(path, display::encode_gray_png(width, height, &pixels)).unwrap_or_else(
+            |error| {
+                eprintln!("cannot write LIVE_PNG {path}: {error}");
+                std::process::exit(2)
+            },
+        );
+        println!(
+            "LIVE_PNG: wrote {path} after {} display update(s)",
+            display.updates
+        );
     }
     let elapsed_seconds = run_started.elapsed().as_secs_f64();
     let instructions_per_second = if elapsed_seconds > 0.0 {
@@ -1404,17 +1471,19 @@ fn run_binary(args: &[String]) {
             std::process::exit(2)
         });
         let nonzero_bytes = bytes.iter().filter(|&&byte| byte != 0).count();
-        let first_source = bus.ssi_tx_first_source.map_or_else(
-            || "none".to_owned(),
-            |address| format!("0x{address:08x}"),
-        );
+        let first_source = bus
+            .ssi_tx_first_source
+            .map_or_else(|| "none".to_owned(), |address| format!("0x{address:08x}"));
         println!(
             "SSI TX raw capture: {} DMA block(s), {} byte(s), {nonzero_bytes} nonzero, first source {first_source}, written to {path}; byte order follows the big-endian eDMA source buffer",
             bus.ssi_tx_dma_blocks,
             bytes.len()
         );
     }
-    if let Some(path) = args[6..].iter().find_map(|a| a.strip_prefix("SNAPSHOT_SAVE=")) {
+    if let Some(path) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("SNAPSHOT_SAVE="))
+    {
         let data = bus
             .save_snapshot(&cpu, ram_base, ram_size as u32)
             .unwrap_or_else(|error| {
@@ -1564,7 +1633,10 @@ fn run_binary(args: &[String]) {
     );
     let (icache_hits, icache_misses) = cpu.icache_stats();
     if icache_hits + icache_misses > 0 {
-        println!("icache: {icache_hits} hits, {icache_misses} misses, {} flushes", bus.code_map.flushes());
+        println!(
+            "icache: {icache_hits} hits, {icache_misses} misses, {} flushes",
+            bus.code_map.flushes()
+        );
     }
     if report.fast_forwarded_instructions > 0 {
         println!(
@@ -1606,9 +1678,7 @@ fn run_binary(args: &[String]) {
     if let Some(pit) = &bus.pit {
         for module in 0..4 {
             if let Some((pcsr, pmr, counter)) = pit.timer_state(module) {
-                println!(
-                    "PIT{module} state: PCSR={pcsr:#06x} PMR={pmr:#06x} PCNTR={counter:#06x}"
-                );
+                println!("PIT{module} state: PCSR={pcsr:#06x} PMR={pmr:#06x} PCNTR={counter:#06x}");
             }
         }
     }
@@ -1809,24 +1879,42 @@ fn parse_ram_file_dump_spec(spec: &str) -> Result<(u32, usize, String), String> 
 
 /// `PC_SAMPLE=start:end:interval:path` records the program counter every `interval` instructions between
 /// instruction counts `start` and `end` (counted from this run's start) as `instruction pc` lines in `path`.
-fn run_pc_sampled(cpu: &mut Cpu, bus: &mut ProbeBus, instruction_limit: usize, spec: &str) -> dt2_core::coldfire::RunReport {
+fn run_pc_sampled(
+    cpu: &mut Cpu,
+    bus: &mut ProbeBus,
+    instruction_limit: usize,
+    spec: &str,
+) -> dt2_core::coldfire::RunReport {
     let fields: Vec<&str> = spec.splitn(4, ':').collect();
     let number = |index: usize| fields.get(index).and_then(|f| f.parse::<usize>().ok());
-    let (Some(start), Some(end), Some(interval), Some(path)) = (number(0), number(1), number(2), fields.get(3)) else {
+    let (Some(start), Some(end), Some(interval), Some(path)) =
+        (number(0), number(1), number(2), fields.get(3))
+    else {
         eprintln!("PC_SAMPLE expects start:end:interval:path");
         std::process::exit(2)
     };
     let mut report = cpu.run_with_interrupt(bus, start.min(instruction_limit), None);
     let mut done = report.instructions + report.fast_forwarded_instructions;
     let mut out = String::new();
-    while report.stop == RunStop::InstructionLimit && done < end.min(instruction_limit) && interval > 0 {
+    while report.stop == RunStop::InstructionLimit
+        && done < end.min(instruction_limit)
+        && interval > 0
+    {
         report = cpu.run_with_interrupt(bus, interval, None);
         done += report.instructions + report.fast_forwarded_instructions;
         let sp = cpu.a[7];
-        let stack: Vec<String> = (0..12).map(|slot| format!("{:08x}", bus.peek_ram_u32(sp.wrapping_add(4 * slot)).unwrap_or(0))).collect();
+        let stack: Vec<String> = (0..12)
+            .map(|slot| {
+                format!(
+                    "{:08x}",
+                    bus.peek_ram_u32(sp.wrapping_add(4 * slot)).unwrap_or(0)
+                )
+            })
+            .collect();
         out.push_str(&format!("{done} {:#010x} {}\n", cpu.pc, stack.join(" ")));
     }
-    std::fs::write(path, out).unwrap_or_else(|error| eprintln!("cannot write PC_SAMPLE {path}: {error}"));
+    std::fs::write(path, out)
+        .unwrap_or_else(|error| eprintln!("cannot write PC_SAMPLE {path}: {error}"));
     report.instructions = done;
     report
 }
@@ -1881,13 +1969,15 @@ fn run_state_hashed(
             report = run_engine(cpu, bus, target - done, None);
             done += report.instructions + report.fast_forwarded_instructions;
         }
-        let snapshot = bus.save_snapshot(cpu, ram_base, ram_size).unwrap_or_else(|error| {
-            eprintln!("STATE_HASH: cannot snapshot: {error}");
-            std::process::exit(2)
+        let snapshot = bus
+            .save_snapshot(cpu, ram_base, ram_size)
+            .unwrap_or_else(|error| {
+                eprintln!("STATE_HASH: cannot snapshot: {error}");
+                std::process::exit(2)
+            });
+        let hash = snapshot.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3)
         });
-        let hash = snapshot
-            .iter()
-            .fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3));
         println!("STATE_HASH {done} {hash:016x}");
         if report.stop != RunStop::InstructionLimit {
             break;
@@ -1917,8 +2007,13 @@ fn run_live(
     let mut done = 0usize;
     // PANEL_PERF=1 prints where wall time goes (CPU, input, drawing) every two seconds.
     let perf = std::env::var_os("PANEL_PERF").is_some();
-    let (mut t_cpu, mut t_in, mut t_draw) = (std::time::Duration::ZERO, std::time::Duration::ZERO, std::time::Duration::ZERO);
-    let (mut perf_start, mut perf_done, mut perf_slices) = (std::time::Instant::now(), 0usize, 0u32);
+    let (mut t_cpu, mut t_in, mut t_draw) = (
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+        std::time::Duration::ZERO,
+    );
+    let (mut perf_start, mut perf_done, mut perf_slices) =
+        (std::time::Instant::now(), 0usize, 0u32);
     loop {
         let t0 = std::time::Instant::now();
         let chunk = LIVE_CHUNK_INSTRUCTIONS.min(instruction_limit - done);
@@ -1960,7 +2055,9 @@ fn run_live(
                 (perf_start, perf_done, perf_slices) = (t3, done, 0);
             }
         }
-        let finished = report.stop != RunStop::InstructionLimit || done >= instruction_limit || !window.is_open();
+        let finished = report.stop != RunStop::InstructionLimit
+            || done >= instruction_limit
+            || !window.is_open();
         if finished {
             report.instructions = done;
             return report;
@@ -2013,7 +2110,11 @@ impl PanelInput {
             return;
         };
         let old = self.masks[usize::from(channel)];
-        let new = if down { old | 1 << bit } else { old & !(1 << bit) };
+        let new = if down {
+            old | 1 << bit
+        } else {
+            old & !(1 << bit)
+        };
         if new != old {
             self.masks[usize::from(channel)] = new;
             self.out.push([0x20 | channel, new]);
@@ -2054,13 +2155,20 @@ impl PanelInput {
 
 #[cfg(feature = "window")]
 mod live_window {
-    pub struct Window(minifb::Window, super::PanelInput, Option<super::panel_ui::PanelUi>);
+    pub struct Window(
+        minifb::Window,
+        super::PanelInput,
+        Option<super::panel_ui::PanelUi>,
+    );
 
     /// `panel` opens the clickable faceplate (with an optional panel photo as the backdrop) instead of the bare display.
     pub fn open(scale: usize, panel: Option<Option<String>>) -> Window {
         let (width, height) = match &panel {
             Some(_) => (super::panel_ui::PANEL_WIDTH, super::panel_ui::PANEL_HEIGHT),
-            None => (super::display::FB_HEIGHT * scale, super::display::FB_WIDTH * scale),
+            None => (
+                super::display::FB_HEIGHT * scale,
+                super::display::FB_WIDTH * scale,
+            ),
         };
         let ui = panel.map(|image| {
             let backdrop = image.and_then(|path| match super::panel_ui::load_backdrop(&path) {
@@ -2072,18 +2180,38 @@ mod live_window {
             });
             super::panel_ui::PanelUi::new(backdrop)
         });
-        Window(minifb::Window::new("dt2-rs panel display (synthetic boot)", width, height, minifb::WindowOptions::default()).unwrap_or_else(|error| {
-            eprintln!("cannot open LIVE_WINDOW: {error}");
-            std::process::exit(2)
-        }), super::PanelInput::default(), ui)
+        Window(
+            minifb::Window::new(
+                "dt2-rs panel display (synthetic boot)",
+                width,
+                height,
+                minifb::WindowOptions::default(),
+            )
+            .unwrap_or_else(|error| {
+                eprintln!("cannot open LIVE_WINDOW: {error}");
+                std::process::exit(2)
+            }),
+            super::PanelInput::default(),
+            ui,
+        )
     }
 
     impl Window {
-        pub fn present(&mut self, width: usize, height: usize, pixels: &[u32], leds: &dyn Fn(u8) -> Option<u32>) {
+        pub fn present(
+            &mut self,
+            width: usize,
+            height: usize,
+            pixels: &[u32],
+            leds: &dyn Fn(u8) -> Option<u32>,
+        ) {
             match &self.2 {
                 Some(ui) => {
                     let frame = ui.render(Some((width, height, pixels)), leds);
-                    let _ = self.0.update_with_buffer(&frame, super::panel_ui::PANEL_WIDTH, super::panel_ui::PANEL_HEIGHT);
+                    let _ = self.0.update_with_buffer(
+                        &frame,
+                        super::panel_ui::PANEL_WIDTH,
+                        super::panel_ui::PANEL_HEIGHT,
+                    );
                 }
                 None => {
                     let _ = self.0.update_with_buffer(pixels, width, height);
@@ -2169,13 +2297,22 @@ mod live_window {
                     _ => return None,
                 })
             };
-            let delta = if self.0.is_key_down(Key::LeftShift) || self.0.is_key_down(Key::RightShift) { -1 } else { 1 };
+            let delta = if self.0.is_key_down(Key::LeftShift) || self.0.is_key_down(Key::RightShift)
+            {
+                -1
+            } else {
+                1
+            };
             self.1.begin_slice();
             if let Some(ui) = self.2.as_mut() {
                 use super::panel_ui::Action;
                 // While dragging, keep reporting positions outside the window so the turn continues.
                 let dragging = self.0.get_mouse_down(minifb::MouseButton::Left);
-                let position = self.0.get_mouse_pos(if dragging { minifb::MouseMode::Pass } else { minifb::MouseMode::Discard });
+                let position = self.0.get_mouse_pos(if dragging {
+                    minifb::MouseMode::Pass
+                } else {
+                    minifb::MouseMode::Discard
+                });
                 let wheel = self.0.get_scroll_wheel().map_or(0.0, |(_, y)| y);
                 let mut actions = ui.handle_mouse(
                     position,
@@ -2224,7 +2361,14 @@ mod live_window {
     }
 
     impl Window {
-        pub fn present(&mut self, _width: usize, _height: usize, _pixels: &[u32], _leds: &dyn Fn(u8) -> Option<u32>) {}
+        pub fn present(
+            &mut self,
+            _width: usize,
+            _height: usize,
+            _pixels: &[u32],
+            _leds: &dyn Fn(u8) -> Option<u32>,
+        ) {
+        }
         pub fn is_open(&self) -> bool {
             false
         }
@@ -2383,7 +2527,10 @@ struct ProbeBus {
     edma_deferred: std::collections::BTreeSet<u8>,
     uart8_rx_periodic: Option<(usize, Vec<Vec<u8>>, usize, usize)>,
     uart8_rx_once: bool,
-    uart8_tx_file: Option<(std::io::BufWriter<std::fs::File>, std::io::BufWriter<std::fs::File>)>,
+    uart8_tx_file: Option<(
+        std::io::BufWriter<std::fs::File>,
+        std::io::BufWriter<std::fs::File>,
+    )>,
     display: Option<display::Display>,
     fast_ram: Option<(u32, u32)>,
     /// SRAM overlay accesses within its first 64 KiB go straight to the model.
@@ -3175,10 +3322,14 @@ impl ProbeBus {
     /// Returns why the fast path stayed off, or None when it is on.
     fn enable_fast_ram(&mut self, base: u32, size: u32) -> Option<&'static str> {
         let end = u64::from(base) + u64::from(size);
-        let overlaps = |start: u32, stop: u32| u64::from(base) < u64::from(stop) && u64::from(start) < end;
+        let overlaps =
+            |start: u32, stop: u32| u64::from(base) < u64::from(stop) && u64::from(start) < end;
         let peripheral = MCF_PERIPHERAL_WINDOWS.iter().any(|&(s, e)| overlaps(s, e))
             || overlaps(MCF_SRAM_ALIAS_WINDOW.0, MCF_SRAM_ALIAS_WINDOW.1)
-            || overlaps(dt2_core::rgpio::RGPIO_BASE, dt2_core::rgpio::RGPIO_BASE + 0x10)
+            || overlaps(
+                dt2_core::rgpio::RGPIO_BASE,
+                dt2_core::rgpio::RGPIO_BASE + 0x10,
+            )
             || overlaps(0, 0x1_0000);
         let reason = if peripheral || end > 1 << 32 {
             Some("RAM window overlaps a peripheral or SRAM window")
@@ -3282,8 +3433,7 @@ impl ProbeBus {
     }
 
     fn in_fast_sram(&self, address: u32, width: u32) -> bool {
-        self.sram_fast
-            && address.wrapping_sub(SRAM_FAST_BASE) <= SRAM_FAST_SIZE - width
+        self.sram_fast && address.wrapping_sub(SRAM_FAST_BASE) <= SRAM_FAST_SIZE - width
     }
 
     fn in_fast_ram(&self, address: u32, width: u32) -> bool {
@@ -4037,7 +4187,10 @@ impl ProbeBus {
             );
         }
         if self.rgpio_trace_limit > 0 {
-            println!("RGPIO full trace: {} distinct entries (repeats folded)", self.rgpio_trace.len());
+            println!(
+                "RGPIO full trace: {} distinct entries (repeats folded)",
+                self.rgpio_trace.len()
+            );
             for entry in &self.rgpio_trace {
                 let operation = if entry.event.write { "write" } else { "read" };
                 println!(
@@ -4693,11 +4846,13 @@ impl ProbeBus {
                 words.push(self.read16_inner(source.wrapping_add(offset))?);
             }
             if self.dsp_link_blocks < 4000 {
-                let data: Vec<String> = words
-                    .iter()
-                    .map(|w| format!("{w:04x}"))
-                    .collect();
-                println!("DSP_LINK block {} len={} {}", self.dsp_link_blocks, total, data.join(" "));
+                let data: Vec<String> = words.iter().map(|w| format!("{w:04x}")).collect();
+                println!(
+                    "DSP_LINK block {} len={} {}",
+                    self.dsp_link_blocks,
+                    total,
+                    data.join(" ")
+                );
             }
             self.dsp_link_blocks += 1;
             if let Some(dspi) = self.dspi2.as_mut() {
@@ -4790,7 +4945,9 @@ impl ProbeBus {
                 .wrapping_add(((index / source_size) as i32).wrapping_mul(source_offset) as u32)
                 .wrapping_add(index % source_size);
             let to = destination
-                .wrapping_add(((index / destination_size) as i32).wrapping_mul(destination_offset) as u32)
+                .wrapping_add(
+                    ((index / destination_size) as i32).wrapping_mul(destination_offset) as u32,
+                )
                 .wrapping_add(index % destination_size);
             let byte = self.read8_inner(from)?;
             self.write8_inner(to, byte)?;
@@ -5066,10 +5223,7 @@ impl ProbeBus {
             self.tcd_value(tcd + 0x1C, 2),
             self.tcd_value(tcd + 0x1E, 2)
         );
-        println!(
-            "eSDHC eDMA channel events: {}",
-            self.esdhc_dma_events.len()
-        );
+        println!("eSDHC eDMA channel events: {}", self.esdhc_dma_events.len());
         for event in &self.esdhc_dma_events {
             println!(
                 "  channel={} {} instruction={} PC={:#010x} address={:#010x} value={:#010x} detail={:#010x}",
@@ -5181,7 +5335,12 @@ impl ProbeBus {
         ranges
     }
 
-    fn save_snapshot(&mut self, cpu: &Cpu, ram_base: u32, ram_size: u32) -> Result<Vec<u8>, String> {
+    fn save_snapshot(
+        &mut self,
+        cpu: &Cpu,
+        ram_base: u32,
+        ram_size: u32,
+    ) -> Result<Vec<u8>, String> {
         self.flush_timers();
         if let Some(pit) = self.pit.as_mut() {
             pit.sync();
@@ -5397,7 +5556,9 @@ impl ProbeBus {
         // RGPIO is created lazily when the firmware writes RGPIOBAR.
         let rgpio_present = r.bool()?;
         if rgpio_present {
-            self.rgpio.get_or_insert_with(Rgpio::new).load_state(&mut r)?;
+            self.rgpio
+                .get_or_insert_with(Rgpio::new)
+                .load_state(&mut r)?;
         } else {
             self.rgpio = None;
         }
@@ -5445,7 +5606,12 @@ impl ProbeBus {
             match (present, self.esdhc.as_mut()) {
                 (true, Some(esdhc)) => esdhc.load_state(&mut r)?,
                 (false, None) => {}
-                _ => return Err("snapshot/config mismatch for esdhc: re-run with the same device flags".into()),
+                _ => {
+                    return Err(
+                        "snapshot/config mismatch for esdhc: re-run with the same device flags"
+                            .into(),
+                    )
+                }
             }
             self.esdhc_dma_irq_pending = r.bool()?;
             self.edma_deferred = (0..r.u32()?).map(|_| r.u8()).collect::<Result<_, _>>()?;
@@ -5678,7 +5844,12 @@ impl Bus for ProbeBus {
                 self.irq_dirty = true;
             }
         }
-        if self.uart8_rx_once && self.uart8_rx_periodic.as_ref().is_some_and(|(_, m, _, cursor)| *cursor >= m.len()) {
+        if self.uart8_rx_once
+            && self
+                .uart8_rx_periodic
+                .as_ref()
+                .is_some_and(|(_, m, _, cursor)| *cursor >= m.len())
+        {
             self.uart8_rx_periodic = None;
         }
     }
@@ -5704,7 +5875,10 @@ impl Bus for ProbeBus {
         }
         if self.synth_voice.is_some() && pc == VOICE_RECORD_BUILDER && self.synth_pos.is_none() {
             self.synth_pos = Some(0);
-            println!("SYNTH_VOICE start at instruction {}", self.current_instruction_count);
+            println!(
+                "SYNTH_VOICE start at instruction {}",
+                self.current_instruction_count
+            );
         }
         if !self.instruction_hooks {
             return;
@@ -5744,7 +5918,7 @@ impl Bus for ProbeBus {
         }
         let trace_pc_matches = self
             .trace_pc_range
-            .is_none_or(|(start, end)| (start..end).contains(&pc));
+            .map_or(true, |(start, end)| (start..end).contains(&pc));
         if trace_pc_matches
             && self.first_a0_range_trace.is_none()
             && self
@@ -6208,12 +6382,19 @@ impl Bus for ProbeBus {
             // After a snapshot restore the channel was started earlier: arm on the first poll.
             if self.ssi_audio_rearm_at.is_none()
                 && !self.ssi_audio_irq_pending
-                && self.tcd_value(0xFC04_5000 + 0x20 * u32::from(SSI_AUDIO_DMA_CHANNEL) + 0x14, 2) != 0
+                && self.tcd_value(
+                    0xFC04_5000 + 0x20 * u32::from(SSI_AUDIO_DMA_CHANNEL) + 0x14,
+                    2,
+                ) != 0
             {
-                self.ssi_audio_rearm_at = Some(self.current_instruction_count.saturating_add(period));
+                self.ssi_audio_rearm_at =
+                    Some(self.current_instruction_count.saturating_add(period));
             }
         }
-        if self.ssi_audio_rearm_at.is_some_and(|at| self.current_instruction_count >= at) {
+        if self
+            .ssi_audio_rearm_at
+            .is_some_and(|at| self.current_instruction_count >= at)
+        {
             self.ssi_audio_rearm_at = None;
             let _ = self.run_edma_memory_to_peripheral(SSI_AUDIO_DMA_CHANNEL);
         }
@@ -6248,7 +6429,10 @@ impl Bus for ProbeBus {
                 vector: 192,
             });
         }
-        let pending_sources = self.pit.as_ref().map_or(0, PitController::pending_source_bits);
+        let pending_sources = self
+            .pit
+            .as_ref()
+            .map_or(0, PitController::pending_source_bits);
         let timer1_pending = self
             .dtim1
             .as_ref()
@@ -6270,31 +6454,27 @@ impl Bus for ProbeBus {
         }
         let intc0_request = self.intc0.as_ref().and_then(|intc0| {
             intc0.pending_interrupt_with(
-                (u64::from(timer1_pending) << DTIM1_SOURCE) | (u64::from(timer3_pending) << DTIM3_SOURCE),
+                (u64::from(timer1_pending) << DTIM1_SOURCE)
+                    | (u64::from(timer3_pending) << DTIM3_SOURCE),
             )
         });
         let intc2_request = self
             .intc2
             .as_ref()
             .and_then(|intc2| intc2.pending_interrupt(pending_sources));
-        let intc1_request = self
-            .intc1
-            .as_ref()
-            .and_then(|intc1| {
-                intc1.pending_interrupt_with(if self.ssi_audio_irq_pending {
-                    1u64 << SSI_AUDIO_INTC1_SOURCE
-                } else {
-                    0
-                })
-            });
+        let intc1_request = self.intc1.as_ref().and_then(|intc1| {
+            intc1.pending_interrupt_with(if self.ssi_audio_irq_pending {
+                1u64 << SSI_AUDIO_INTC1_SOURCE
+            } else {
+                0
+            })
+        });
         // Highest level wins; ties go to INTC0, then INTC1, then INTC2 (an approximation).
         let request = [intc0_request, intc1_request, intc2_request]
             .into_iter()
             .flatten()
             .reduce(|best, next| if next.level > best.level { next } else { best });
-        let Some(request) = request else {
-            return None;
-        };
+        let request = request?;
         if request.source == 13 && self.pit0_oneshot {
             if self.pit0_request_seen {
                 return None;
@@ -6420,7 +6600,6 @@ impl Bus for ProbeBus {
         self.retire_external(n, n);
     }
 
-
     fn advance_instruction(&mut self) {
         self.poll_countdown = self.poll_countdown.saturating_sub(1);
         if self.lazy_poll {
@@ -6507,10 +6686,8 @@ mod tests {
         ] {
             let bytes = value.to_be_bytes();
             for index in 0..width {
-                bus.edma_tcd.insert(
-                    tcd + offset + index,
-                    bytes[(4 - width + index) as usize],
-                );
+                bus.edma_tcd
+                    .insert(tcd + offset + index, bytes[(4 - width + index) as usize]);
             }
         }
 
@@ -6519,7 +6696,10 @@ mod tests {
 
         assert_eq!(bus.ssi_tx_dma_blocks, 1);
         assert_eq!(bus.ssi_tx_first_source, Some(0x1000));
-        assert_eq!(bus.ssi_tx_raw.as_deref(), Some(&[0x12, 0x34, 0x56, 0x78][..]));
+        assert_eq!(
+            bus.ssi_tx_raw.as_deref(),
+            Some(&[0x12, 0x34, 0x56, 0x78][..])
+        );
     }
 
     #[test]
@@ -7034,14 +7214,8 @@ mod tests {
 
     #[test]
     fn panel_stub_can_report_func_held_during_discovery() {
-        assert_eq!(
-            &panel_stub_discovery_records(true)[4..6],
-            &[0x22, 0x01]
-        );
-        assert_eq!(
-            &panel_stub_discovery_records(false)[4..6],
-            &[0x22, 0x00]
-        );
+        assert_eq!(&panel_stub_discovery_records(true)[4..6], &[0x22, 0x01]);
+        assert_eq!(&panel_stub_discovery_records(false)[4..6], &[0x22, 0x00]);
     }
 
     #[test]

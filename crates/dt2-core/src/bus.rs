@@ -70,7 +70,15 @@ pub trait Bus {
     fn begin_instruction_fetch(&mut self) {}
     fn end_instruction_fetch(&mut self) {}
 
-    fn report_tst(&mut self, _pc: u32, _operand: TstOperand, _value: u32, _size_bytes: u8, _sr: u16) {}
+    fn report_tst(
+        &mut self,
+        _pc: u32,
+        _operand: TstOperand,
+        _value: u32,
+        _size_bytes: u8,
+        _sr: u16,
+    ) {
+    }
 
     fn report_branch(&mut self, _pc: u32, _condition: u8, _taken: bool, _target: u32, _sr: u16) {}
 

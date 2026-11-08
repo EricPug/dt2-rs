@@ -218,7 +218,6 @@ impl Bus for Uart8 {
     fn advance_instruction(&mut self) {}
 }
 
-
 impl Uart8 {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
         w.bytes(&self.mode_registers);

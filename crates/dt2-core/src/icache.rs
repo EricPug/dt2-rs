@@ -115,7 +115,10 @@ impl CodeMap {
         if !self.enabled() {
             return false;
         }
-        let (Some(first), Some(last)) = (self.page(address), self.page(address.wrapping_add(bytes - 1))) else {
+        let (Some(first), Some(last)) = (
+            self.page(address),
+            self.page(address.wrapping_add(bytes - 1)),
+        ) else {
             return false;
         };
         for page in first..=last {
