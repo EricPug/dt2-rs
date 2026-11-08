@@ -1,0 +1,85 @@
+#!/bin/bash
+# Deterministic UI smoke gate. Requires ignored firmware-derived boot assets plus
+# out/shots/main-after-load.snap, its out/run-card.img backing file, and matching PNG.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+BIN=${1:-target/release/dt2-cli}
+OUT=out/ui-smoke
+
+required=(
+  out/section3-pre-entry-image.bin
+  out/section3-panel-discovery-pre-entry-ddr.bin
+  out/section3-panel-discovery-pre-entry-sram.bin
+  out/dt2-os-1.17-container-nor.bin
+  out/shots/main-after-load.snap
+  out/shots/main-after-load.png
+  out/run-card.img
+)
+for path in "${required[@]}"; do
+  if [[ ! -f "$path" ]]; then
+    echo "missing smoke-test input: $path" >&2
+    exit 2
+  fi
+done
+if [[ $(stat -c %s out/run-card.img) -ne 4294967296 ]]; then
+  echo "out/run-card.img must be a 4 GiB sparse eMMC backing image" >&2
+  exit 2
+fi
+
+if [[ ! -x "$BIN" ]]; then
+  cargo build --release -p dt2-cli
+fi
+mkdir -p "$OUT"
+
+check_sha256() {
+  local path=$1 expected=$2 actual
+  actual=$(sha256sum "$path" | cut -d' ' -f1)
+  if [[ "$actual" != "$expected" ]]; then
+    echo "FAIL $path: expected $expected, got $actual" >&2
+    exit 1
+  fi
+  echo "PASS $path sha256=$actual"
+}
+
+# Full diagnostic boot: required synthetic/reset options are centralized in run-section3.sh.
+tools/run-section3.sh "$BIN" 1500000000 \
+  RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC INTC1_BOOTSTRAP \
+  SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP \
+  UART8_TX_FILE="$OUT/boot.tx" LIVE_PNG="$OUT/boot.png" \
+  SNAPSHOT_SAVE="$OUT/boot.snap" \
+  >"$OUT/boot.log" 2>&1
+grep -q '^stop: instruction limit$' "$OUT/boot.log"
+check_sha256 "$OUT/boot.png" \
+  8cdccf4db484a161695d1453c0841b4a454ea6cb839ec9ded67ff7f255616e6a
+
+# Test visible controls from a pinned, sample-loaded state. A clean boot has no loaded
+# sample, so it cannot produce a meaningful encoder-value change.
+check_sha256 out/shots/main-after-load.png \
+  6e4f2126469865d8b9c49cbae17ecf9cb61e22bc85c522acb6e2bc01b2c62ff6
+check_sha256 out/shots/main-after-load.snap \
+  225760283abcf448018f924c3eb71890666694e5b0c5d2825df7d545efa297a6
+
+run_input() {
+  local name=$1 message=$2
+  tools/run-section3.sh "$BIN" 100000000 \
+    RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=out/run-card.img \
+    INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP \
+    DTIM3_TICKS_PER_INSTRUCTION=16 \
+    SNAPSHOT_LOAD=out/shots/main-after-load.snap \
+    UART8_TX_FILE="$OUT/$name.tx" \
+    "UART8_RX_PERIODIC=3000000:$message" \
+    >"$OUT/$name.log" 2>&1
+  grep -q '^stop: instruction limit$' "$OUT/$name.log"
+  python3 tools/render-uart-frames.py --base out/shots/main-after-load.png \
+    "$OUT/$name.tx" "$OUT/$name-frame"
+}
+
+run_input encoder 3005,3000
+check_sha256 "$OUT/encoder-frame-input-000-final.png" \
+  e1a74aa4668f4a1ba7863cb787d929e3291aa756f531214fce4a055876dcb7f2
+run_input fltr 2004,2000
+check_sha256 "$OUT/fltr-frame-input-000-final.png" \
+  754122aa73411057148ae3c8dfc78eb5f8f9a15243310dcd1544e831d43fbfb8
+
+echo "UI SMOKE PASS"

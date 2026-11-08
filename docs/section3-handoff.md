@@ -26,11 +26,38 @@ and must point here rather than maintain competing status reports.
 
 1. **Complete:** format the workspace, resolve Clippy findings, and align the
    project summaries with this document.
-2. Establish a deterministic boot-to-SAMPLE-page regression test and reproducible
-   run script before changing DMA/shared-memory behavior.
+2. **Complete:** establish a deterministic boot-to-SAMPLE-page smoke gate, with
+   sample-loaded encoder and page-change frame hashes, before changing
+   DMA/shared-memory behavior.
 3. Trace the real sample-to-DSP handoff, recording evidence and ruled-out paths.
 4. Implement one firmware-driven playback slice and retain its SSI capture.
 5. Retire synthetic startup assumptions individually when evidence replaces them.
+
+## UI smoke regression
+
+Run `tools/ui-smoke.sh [path/to/dt2-cli]`. It performs the 1.5B-instruction
+section-3 diagnostic boot with the synthetic conditions in `tools/run-section3.sh`,
+captures its upright UART8 screen, then checks repeated encoder and FLTR page
+changes from the pinned sample-loaded UI state. The clean boot has no loaded
+sample, so an encoder delta does not produce a meaningful value change there.
+
+The script requires local ignored assets: the section-3 image/RAM/NOR files,
+`out/run-card.img`, and the sample-loaded `out/shots/main-after-load.snap` plus
+`out/shots/main-after-load.png`. It verifies the snapshot and baseline screenshot
+hashes before injecting input. Upright 512x256 screenshots and logs are written under ignored `out/ui-smoke/`.
+These are deterministic emulator regression artifacts, not hardware-faithful outputs.
+
+Expected SHA-256 frame hashes:
+
+| Frame | SHA-256 |
+|---|---|
+| Cold boot SAMPLE page | `8cdccf4db484a161695d1453c0841b4a454ea6cb839ec9ded67ff7f255616e6a` |
+| Sample-loaded baseline | `6e4f2126469865d8b9c49cbae17ecf9cb61e22bc85c522acb6e2bc01b2c62ff6` |
+| Encoder A delta (`3005,3000`, repeated every 3M instructions) | `e1a74aa4668f4a1ba7863cb787d929e3291aa756f531214fce4a055876dcb7f2` |
+| FLTR page (`2004,2000`, repeated every 3M instructions) | `754122aa73411057148ae3c8dfc78eb5f8f9a15243310dcd1544e831d43fbfb8` |
+
+This gate confirms the expected diagnostic path and screens only; it does not
+validate audio or establish hardware reset/peripheral behavior.
 
 ## Checkpoints
 
