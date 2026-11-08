@@ -16,9 +16,9 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 | A separate bulk eDMA transfer carries sample PCM during sample load or trigger/play | No bulk transfer observed in these runs | `EDMA_TRACE` saw channels 14, 15, 28, 29, 35, and 59 during sample load; only 28, 29, and synthetic panel RX channel 35 during trigger/play. Channel 59 performed two 32 KiB eMMC reads into `0x4060d770` and `0x40605770`. Channel 50 SSI TX is scheduled by the emulator's timer diagnostic rather than an observed firmware SERQ request. This only rules out other eDMA request starts in these exact diagnostic runs. |
 | The post-load DSPI1 eDMA 14/15 transfer is sample payload | Ruled out as bulk PCM; role unresolved | It runs once after the eMMC reads. Channel 15 sends 8 framed bytes from `0x4fe7a340` to DSPI1 PUSHR (`8001 0001 0801 012c`); channel 14 is configured for two 16-bit reads. Disassembly traces the request through `0x4003314e` to helper `0x40012562`, which constructs the 4-byte request `0001 012c`: word `0001` is set by the helper, and `012c` is copied from a caller argument. Related OS 1.16 research labels this helper `small` and describes the packet as two big-endian `u16` fields (`kind`, `slot`), suggesting kind 1 / slot 300; the same source warns that the waveform cache had not yet been shown calling this transport. The entry trace shows caller return `0x4019fc7e`, argument `0x012c`, and pointer `0x4525722c`; that caller is in a routine iterating over `0x64400` bytes in `0x191`-byte strides, but its context is not yet identified. The helper passes request length 4 and response length `0x300` to `0x400124a0`, using response buffer `0x4fe79340`; the observed channel-14 transfer reads only two halfwords. Digiemu's older-version notes likewise classify DSPI1 channels 14/15 as short opcode request/reply transactions, probably to a codec. These are useful cross-checks, not proof this exchange is an audio handoff. The watched `0x43176a34` and `0x43176a38` writes are the saved A6 from `LINK` and return address from `JSR`, not additional request fields. |
 | CPU or modeled eDMA reads/writes the loaded sample during trigger/play | No accesses observed in that trigger/play run; sample-load CPU-read question remains inconclusive | Replaying trigger/play from the loaded snapshot with an exact watch on `0x40605770..0x40615770` produced zero CPU-bus or modeled-eDMA accesses. That watch did not cover sample load, so it says nothing about CPU reads during loading. The separate staging-buffer watch below is not a direct watch of the `0x406...` source span. |
-| OS 1.17 GPIO serial traffic carries sample bytes | Sample bytes confirmed in some serialized payloads; downstream handoff inconclusive | Each of the 12 helper calls emitted a 4,096-byte body after its 4-byte prefix. Call 2 exactly matches the 16-bit-byte-swapped sample dump at offset `0x8000`; call 10 matches the same conversion at offset `0`. Calls 4, 5, and 11 match the 16-bit-byte-swapped `0x450ecc40` buffer at offsets `0x7000`, `0x8000`, and `0x6000`. The other seven bodies have no full-body match among the tested raw, 16-bit, and standard 24-bit/shift variants; their association is inconclusive. This confirms bytes in the GPIO stream, not what an external device does with them. |
+| OS 1.17 GPIO serial traffic carries sample bytes | Sample page stream confirmed; downstream DSP receipt/consumption inconclusive | Calls 2–10 contain exact 4 KiB 16-bit-byte-swapped sample pages from `0x4060d770..+0x8000` and `0x40605770`; call 11 carries a matching `0xc00`-byte tail plus `0x400` bytes of staging/padding. Pages 0–9 reconstruct the converted `0x9c00`-byte sample exactly. Calls 4, 5, and 11 also match staging-buffer pages. Calls 1 and 12 are sentinel header/control packets. This confirms serialized bytes at the RGPIO data port, not physical DSP receipt. |
 | The DSPI1 response buffer at `0x4fe79340..0x4fe79640` is populated or consumed during sample load | inconclusive | A repeat sample-load run starts with all `0x300` bytes zero and records zero overlapping CPU-bus reads and writes. The channel-14 TCD is configured for two 16-bit reads from DSPI1 POPR into the buffer, but the emulator's synthetic DSPI diagnostic does not execute eDMA channels 14/15. Therefore the empty buffer is evidence about this emulator run, not evidence that real hardware returns no response. |
-| DSP reads the sample directly from shared DDR/FlexBus, or receives a descriptor through another path | Unresolved | The sample bytes are present in ColdFire DDR, while the DSPI2 stream has no sample address. The OS 1.17 SHARC loader contains no literal `0x40605770`/adjacent sample address and no recognizable voice/sample descriptor table was identified by the raw scan. It remains possible that firmware computes or relocates the address, or uses another interface; do not infer a physical bus or peer from the emulated MMIO model. |
+| Physical DSP receives and consumes the confirmed RGPIO pages | Unresolved | Firmware serializes the sample pages to RGPIO, but the emulator has no physical DSP peer. The per-block DSPI2 stream has no sample address, and the OS 1.17 SHARC loader contains no literal `0x40605770`/adjacent address or recognizable voice/sample descriptor table. Computed or relocated addresses and DSP-side consumption remain possible; the modeled WAV is not physical-device evidence. |
 | `SYNTH_VOICE` output demonstrates firmware playback | Rejected as progress evidence | It injects sample bytes directly into the SSI TX source and creates nonzero output, but does not exercise the firmware's handoff. Keep it diagnostic-only; the trigger/play SSI capture remains zero. |
 
 ## OS 1.17 FlexBus/RGPIO and helper trace
@@ -74,31 +74,33 @@ responses; the firmware accesses and write values are traced.
 The `0x8c000002` write stream contains 12 groups of 8,200 16-bit writes. Each
 byte is strobed twice with the same high byte; taking one high byte from each
 pair reconstructs 4,100 bytes per call: a 4-byte prefix followed by 4,096
-payload bytes. The sample and helper-buffer inputs are the 39,936-byte dumps
-from `0x40605770` and `0x450ecc40`. Exact body matches, after stripping the
-prefix, are:
+payload bytes. The sample comparison combines `0x8000` bytes from `0x4060d770` and
+`0x1c00` bytes from `0x40605770`; the helper-buffer comparison covers
+`0x450ecc40`. The four-byte prefix is little-endian: calls 2–11 decode to page indices
+0–9; calls 1 and 12 use the `0xffffffff` sentinel. Exact and partial matches,
+after stripping the prefix, are:
 
-| Call | Prefix | Exact 4 KiB body match |
+| Call | Prefix bytes → value | Body match |
 |---:|---|---|
-| 1 | `ffffffff` | No exact match; inconclusive |
-| 2 | `00000000` | 16-bit-byte-swapped sample at `0x40605770 + 0x8000` |
-| 3 | `01000000` | No exact match; inconclusive |
-| 4 | `02000000` | 16-bit-byte-swapped helper buffer at `0x450ecc40 + 0x7000` |
-| 5 | `03000000` | 16-bit-byte-swapped helper buffer at `0x450ecc40 + 0x8000` |
-| 6 | `04000000` | No exact match; inconclusive |
-| 7 | `05000000` | No exact match; inconclusive |
-| 8 | `06000000` | No exact match; inconclusive |
-| 9 | `07000000` | No exact match; inconclusive |
-| 10 | `08000000` | 16-bit-byte-swapped sample at `0x40605770` |
-| 11 | `09000000` | 16-bit-byte-swapped helper buffer at `0x450ecc40 + 0x6000` |
-| 12 | `ffffffff` | No exact match; inconclusive |
+| 1 | `ff ff ff ff` → sentinel | Pre-card header/control packet; body begins `0x12c, 0xfffffc00, 0xfffffc00`; not a match for the later sample data. Remaining semantics are inconclusive. |
+| 2 | `00 00 00 00` → 0 | Exact 16-bit-byte-swapped page 0 of first channel-59 source at `0x4060d770`. |
+| 3 | `01 00 00 00` → 1 | Exact 16-bit-byte-swapped page 1 at `0x4060d770 + 0x1000`. |
+| 4 | `02 00 00 00` → 2 | Exact sample page at `0x4060d770 + 0x2000`; also matches helper buffer `0x450ecc40 + 0x7000`. |
+| 5 | `03 00 00 00` → 3 | Exact sample page at `0x4060d770 + 0x3000`; also matches helper buffer `0x450ecc40 + 0x8000`. |
+| 6 | `04 00 00 00` → 4 | Exact 16-bit-byte-swapped page 4 at `0x4060d770 + 0x4000`. |
+| 7 | `05 00 00 00` → 5 | Exact 16-bit-byte-swapped page 5 at `0x4060d770 + 0x5000`. |
+| 8 | `06 00 00 00` → 6 | Exact 16-bit-byte-swapped page 6 at `0x4060d770 + 0x6000`. |
+| 9 | `07 00 00 00` → 7 | Exact 16-bit-byte-swapped page 7 at `0x4060d770 + 0x7000`. |
+| 10 | `08 00 00 00` → 8 | Exact 16-bit-byte-swapped page 8 from `0x40605770`. |
+| 11 | `09 00 00 00` → 9 | First `0xc00` bytes match converted source `0x40605770 + 0x1000`; full body matches helper buffer `0x450ecc40 + 0x6000`. Its final `0x400` bytes are padding/other staging data, not confirmed sample audio. |
+| 12 | `ff ff ff ff` → sentinel | Final header/control packet; sample length `0x9c00` is at body offset `0x10`. Other fields are not interpreted. |
 
-The unmatched bodies have no exact 4 KiB match under the tested raw,
-16-bit-byte-swap, or standard 24-bit/shift conversions. Their payload
-association is **inconclusive**; this is not evidence that they contain no
-sample-derived data. The confirmed sample-byte matches show that OS 1.17
-serializes sample data through the RGPIO data register, but the trace does not
-identify the receiving device or prove DSP-side consumption.
+Concatenating pages 0–9, truncating to `0x9c00`, and reversing each byte pair
+exactly matches the converted source assembled from `0x4060d770..+0x8000` and
+`0x40605770..+0x1c00`; its SHA-256 is
+`5f84301e6021dd5530e71614a3c4b04cf61d88ee4bcf4bfba0fb12865fc7d2a4`. This
+confirms serialized sample bytes at the RGPIO data port and their page order,
+not downstream DSP receipt or consumption.
 
 ### 2. Staging-buffer accesses
 
@@ -376,6 +378,69 @@ transfer mechanism to reuse for the current Digitakt II handoff.
 No second exact sample signature or active trigger-time eDMA transfer to the
 sample was observed. The only sample-address TCD is channel 59's completed
 eMMC-load descriptor, retained in the snapshot. Further firmware-side tracing
-has reached the CPU-visible limit: decide whether to build a minimal DSP
-stand-in around the unresolved DSP-visible/shared-memory path. Do not model an
-unverified peripheral or count synthetic audio as playback progress.
+has reached the CPU-visible limit. The modeled-DSP stand-in below uses only the
+confirmed RGPIO page stream and firmware DSPI2 note fields; it is not evidence
+of physical DSP behavior.
+
+### Confirmed page reconstruction
+
+The 12 dispatcher calls each produce a four-byte little-endian prefix followed
+by 4,096 body bytes. Calls 1 and 12 use `0xffffffff`; calls 2–11 use prefixes
+`0..9`, which appear to be page indices. The sentinel packet is treated as
+metadata/control, not a numbered sample page.
+
+| Call | Prefix | Interpretation and evidence |
+|---:|---:|---|
+| 1 | `ffffffff` | Pre-card header/control packet. Its body begins `0x12c`, `0xfffffc00`, `0xfffffc00`; it occurs before the first channel-59 read completes and does not match that later sample data. Its remaining semantics are inconclusive. |
+| 2–9 | `00000000`–`00000007` | Pages 0–7; each body is the 16-bit-byte-swapped page at offsets `0x0000`–`0x7000` of the first channel-59 transfer (`0x4060d770..+0x8000`). |
+| 10 | `00000008` | Page 8; exact 16-bit-byte-swapped match for the first 4 KiB of the second channel-59 transfer at `0x40605770`. |
+| 11 | `00000009` | Page 9; the first `0xc00` bytes match the converted second-transfer bytes at offset `0x1000`. The complete 4 KiB body matches `0x450ecc40 + 0x6000`; its final `0x400` bytes are padding or other staging data, not confirmed sample audio. |
+| 12 | `ffffffff` | Final header/control packet. Its body begins `0x12c, 0x40, 0x40, 0xb71b`; a 32-bit sample length `0x9c00` occurs at body offset `0x10`. Other fields are not interpreted by the model. |
+
+Calls 4, 5, and 11 also match byte-swapped staging-buffer pages at offsets
+`0x7000`, `0x8000`, and `0x6000`. Concatenating pages 0–9, truncating to
+`0x9c00`, and reversing each byte pair exactly reconstructs the converted
+sample: first `0x8000` bytes from `0x4060d770`, then `0x1c00` bytes from
+`0x40605770`. The reconstructed sequence's SHA-256 is
+`5f84301e6021dd5530e71614a3c4b04cf61d88ee4bcf4bfba0fb12865fc7d2a4`.
+This confirms the upload bytes and page ordering, not physical DSP receipt.
+
+### Modeled DSP stand-in and assumptions
+
+`MODELED_DSP_WAV=<path>` is separate from `SYNTH_VOICE` and requires
+`DSP_LINK`. At each `0x400cd79c` entry, it captures paired high-byte RGPIO
+data writes at `0x8c000002`, validates the repeated-write byte strobe and 4 KiB
+body size, stores numbered pages, and reads the final header's sample length.
+It consumes data halfwords from DSPI2 channel-29 frames: per-track note fields
+at data offsets `0x02 + 2*i` and machine fields at `0x94 + 2*i`. A
+zero-to-nonzero note edge on observed machine type 2 starts the sample.
+
+The following are explicit model assumptions, not hardware findings:
+
+- The first six reconstructed bytes are a non-audio prefix; PCM begins at
+  offset 6, consistent with the previously identified sample start at
+  `0x4060d776`.
+- The sample is signed 16-bit big-endian mono PCM. One source sample is emitted
+  per 48 kHz output frame; note-to-pitch mapping, gain, envelopes, polyphony,
+  and DSP mixing are not modeled.
+- Each DSPI2 block advances 32 audio frames. The note edge starts playback at
+  that block's first frame. The observed machine-type value `2` and note-edge
+  interpretation are based on the saved OS 1.17 trace, not a decoded SHARC
+  ABI.
+- Sentinel-header fields other than sample length are ignored. The emulator's
+  `DSP_LINK` replies remain synthetic `0xffff`; no SHARC or eDMA is modeled.
+
+`tools/modeled-dsp-sample.sh` replays the saved load and TRIG sequence, writes a
+48 kHz WAV, and compares the sample segment byte-for-byte (as decoded PCM)
+against the concatenated channel-59 source ranges. A passing run demonstrates
+the modeled upload/trigger path only; it does not demonstrate firmware-driven
+or hardware audio.
+
+The bounded run completed 2,999 DSPI2 blocks and captured all 12 RGPIO calls.
+The first sample-machine edge was track 2, note `0x2d00`, at cumulative
+instruction 8,582,436,295 / block 1,823. The WAV contains 95,968 mono frames;
+the 19,965-frame played segment begins at frame 58,336 and exactly matches the
+source ranges after the six-byte prefix is excluded. Its source-waveform
+SHA-256 is `d9781f776139a7d97d42d89616f5b976803696fa2f03ede416688103166a99fb`.
+The WAV and source dumps are reproducible under `out/modeled-dsp/`; these are
+generated artifacts, not firmware or hardware output.

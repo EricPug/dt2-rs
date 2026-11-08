@@ -16,12 +16,14 @@ use dt2_fw::{aplib, container, syx};
 
 use dt2_core::display;
 
+mod modeled_dsp;
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 mod panel_ui;
 #[cfg(dt2_unicorn)]
 mod unicorn_tier;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::path::PathBuf;
 use std::time::Instant;
 
 fn main() {
@@ -54,6 +56,7 @@ fn main() {
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
         eprintln!("       run-bin option: SSI_TX_RAW=<path> captures channel-50 SSI TX DMA bytes");
+        eprintln!("       run-bin MODELED_DSP_WAV=<path> requires DSP_LINK and writes the modeled DSP's mono 48 kHz WAV");
         eprintln!("       dt2-cli trace-depack <packed-section.bin>");
         std::process::exit(2)
     });
@@ -1129,6 +1132,7 @@ fn run_binary(args: &[String]) {
             || assignment == "NONRAM_BULK_TRACE"
             || assignment == "FLEXBUS_TRACE"
             || assignment.starts_with("SYNTH_VOICE=")
+            || assignment.starts_with("MODELED_DSP_WAV=")
             || assignment == "PIT0_ONESHOT"
             || assignment == "PIT2_PERIODIC"
             || assignment.starts_with("SNAPSHOT_SAVE=")
@@ -1326,6 +1330,31 @@ fn run_binary(args: &[String]) {
         };
         bus.synth_voice = Some((address, length));
         println!("diagnostic: SYNTH_VOICE plays {length:#x} bytes of 16-bit BE mono from {address:#010x} into SSI TX on voice start (not firmware behavior)");
+    }
+    if let Some(path) = args[6..]
+        .iter()
+        .find_map(|a| a.strip_prefix("MODELED_DSP_WAV="))
+    {
+        if path.is_empty() {
+            eprintln!("MODELED_DSP_WAV path must not be empty");
+            std::process::exit(2)
+        }
+        if bus.synth_voice.is_some() {
+            eprintln!("MODELED_DSP_WAV cannot be combined with SYNTH_VOICE");
+            std::process::exit(2)
+        }
+        if !args[6..].iter().any(|a| a == "DSP_LINK") {
+            eprintln!("MODELED_DSP_WAV requires DSP_LINK");
+            std::process::exit(2)
+        }
+        if bus.dspi2.is_none() {
+            eprintln!("MODELED_DSP_WAV needs DSPI2_BOOTSTRAP or a snapshot with DSPI2");
+            std::process::exit(2)
+        }
+        bus.modeled_dsp = Some(modeled_dsp::ModeledDsp::new(PathBuf::from(path)));
+        println!(
+            "diagnostic: MODELED_DSP_WAV uses RGPIO uploads and DSPI2 note edges; modeled DSP only, not a SHARC implementation"
+        );
     }
     if args[6..].iter().any(|a| a == "DSP_LINK") {
         let Some(dspi2) = bus.dspi2.as_mut() else {
@@ -1548,6 +1577,13 @@ fn run_binary(args: &[String]) {
     } else {
         run_engine(&mut cpu, &mut bus, instruction_limit, interrupt_injection)
     };
+    if let Some(modeled_dsp) = &mut bus.modeled_dsp {
+        let summary = modeled_dsp.finish().unwrap_or_else(|error| {
+            eprintln!("MODELED_DSP_WAV failed: {error}");
+            std::process::exit(2)
+        });
+        println!("{summary}");
+    }
     #[cfg(dt2_unicorn)]
     unicorn_tier::print_stats();
     if let (Some(path), Some(display)) = (live_png, &bus.display) {
@@ -2725,6 +2761,7 @@ struct ProbeBus {
     flexbus_trace: Vec<FlexbusTraceEntry>,
     synth_voice: Option<(u32, u32)>,
     synth_pos: Option<u32>,
+    modeled_dsp: Option<modeled_dsp::ModeledDsp>,
     dsp_link_blocks: u32,
     access_events: Vec<AccessEvent>,
     section3_mmio_events: Vec<(usize, u32, AccessEvent)>,
@@ -3267,6 +3304,7 @@ impl ProbeBus {
             flexbus_trace: Vec::new(),
             synth_voice: None,
             synth_pos: None,
+            modeled_dsp: None,
             dsp_link_blocks: 0,
             access_events: Vec::new(),
             section3_mmio_events: Vec::new(),
@@ -3766,6 +3804,8 @@ impl ProbeBus {
             Some("SAMPLE_ACCESS_TRACE active")
         } else if self.synth_voice.is_some() {
             Some("SYNTH_VOICE active")
+        } else if self.modeled_dsp.is_some() {
+            Some("MODELED_DSP_WAV active")
         } else if self.loop_detection {
             Some("LOOP_DETECT active")
         } else if self.mmio.keys().any(|&a| overlaps(a, a.saturating_add(1))) {
@@ -3801,7 +3841,8 @@ impl ProbeBus {
             || !self.trace_a1_checkpoints.is_empty()
             || self.trace_register_pc.is_some()
             || self.write_trace_range.is_some()
-            || self.synth_voice.is_some();
+            || self.synth_voice.is_some()
+            || self.modeled_dsp.is_some();
         if self.instruction_hooks {
             "full"
         } else {
@@ -5193,6 +5234,9 @@ impl ProbeBus {
     }
 
     fn write16_inner(&mut self, address: u32, value: u16) -> Result<(), BusError> {
+        if let Some(modeled_dsp) = &mut self.modeled_dsp {
+            modeled_dsp.write_rgpio_data(address, value);
+        }
         if let Some(rgpio) = self.rgpio_for(address) {
             return rgpio.write16(address, value);
         }
@@ -5534,7 +5578,7 @@ impl ProbeBus {
                 u64::from(total),
                 prefix,
             );
-            if self.dsp_link_blocks < 4000 {
+            if self.modeled_dsp.is_none() && self.dsp_link_blocks < 4000 {
                 let data: Vec<String> = words.iter().map(|w| format!("{w:04x}")).collect();
                 println!(
                     "DSP_LINK block {} len={} {}",
@@ -5544,6 +5588,9 @@ impl ProbeBus {
                 );
             }
             self.dsp_link_blocks += 1;
+            if let Some(modeled_dsp) = &mut self.modeled_dsp {
+                modeled_dsp.process_dspi2_frame(&words, self.current_instruction_count);
+            }
             if let Some(dspi) = self.dspi2.as_mut() {
                 dspi.set_eoq_flag();
             }
@@ -6638,6 +6685,11 @@ impl Bus for ProbeBus {
                 "SYNTH_VOICE start at instruction {}",
                 self.current_instruction_count
             );
+        }
+        if pc == 0x400c_d79c {
+            if let Some(modeled_dsp) = &mut self.modeled_dsp {
+                modeled_dsp.begin_upload_call();
+            }
         }
         if !self.instruction_hooks {
             return;
