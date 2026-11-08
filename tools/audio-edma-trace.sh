@@ -81,6 +81,12 @@ check_requests sample-load 35 991
 check_requests sample-load 59 2
 grep -q 'DADDR=0x4060d770' "$OUT/sample-load.log"
 grep -q 'DADDR=0x40605770' "$OUT/sample-load.log"
+grep -q '^EDMA_TRACE request channel=29 .*NBYTES=0x00000004 .*DADDR=0xec038034 .*CITER=0x055e ' \
+  "$OUT/sample-load.log"
+grep -q '^EDMA_TRACE request channel=28 .*NBYTES=0x00000002 .*DADDR=0x80001000 .*CITER=0x055e ' \
+  "$OUT/sample-load.log"
+grep -q '^DSP_LINK block 0 len=5496 8001 ' "$OUT/sample-load.log"
+echo "PASS sample-load DSPI2 frames=1374 RX_bytes=2748 PUSHR_source_bytes=5496"
 grep -q 'write watch at 0x43176a30..0x43176a40:' "$OUT/sample-load.log"
 grep -q 'PC=0x40033160 address=0x43176a3c .*new=0000012c' \
   "$OUT/sample-load.log"
