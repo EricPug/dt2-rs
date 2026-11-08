@@ -69,7 +69,11 @@ impl Intc0 {
     /// Highest pending source: DMA timer 1 when `timer_pending` (subject to IMR), plus forced (INTFRC)
     /// sources, which the manual (17.2.3) says are not affected by the mask register.
     pub fn pending_interrupt(&self, timer_pending: bool) -> Option<InterruptRequest> {
-        self.pending_interrupt_with(if timer_pending { 1u64 << SOURCE_DTIM1 } else { 0 })
+        self.pending_interrupt_with(if timer_pending {
+            1u64 << SOURCE_DTIM1
+        } else {
+            0
+        })
     }
 
     /// Like `pending_interrupt`, with `peripheral_pending` holding level-pending source bits (subject to IMR).
@@ -225,7 +229,6 @@ impl Bus for Intc0 {
     }
 }
 
-
 impl Intc0 {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
         for v in [self.imrh, self.imrl, self.intfrch, self.intfrcl] {
@@ -278,12 +281,22 @@ mod tests {
         // Source 57 is bit 25 of INTFRCH and ICR57 lives at +0x40+57.
         intc0.write8(BASE + 0x40 + 57, 4).unwrap();
         intc0.write32(BASE + REG_INTFRCH, 1 << 25).unwrap();
-        let expected = InterruptRequest { source: 57, level: 4, vector: 121 };
-        assert_eq!(intc0.pending_interrupt(false), Some(expected), "force ignores IMR");
+        let expected = InterruptRequest {
+            source: 57,
+            level: 4,
+            vector: 121,
+        };
+        assert_eq!(
+            intc0.pending_interrupt(false),
+            Some(expected),
+            "force ignores IMR"
+        );
 
         // A higher level wins over an earlier source; clearing the force bit ends the request.
         intc0.write8(BASE + 0x40 + 44, 6).unwrap();
-        intc0.write32(BASE + REG_INTFRCH, (1 << 25) | (1 << 12)).unwrap();
+        intc0
+            .write32(BASE + REG_INTFRCH, (1 << 25) | (1 << 12))
+            .unwrap();
         assert_eq!(intc0.pending_interrupt(false).map(|r| r.source), Some(44));
         intc0.write32(BASE + REG_INTFRCH, 0).unwrap();
         assert_eq!(intc0.pending_interrupt(false), None);

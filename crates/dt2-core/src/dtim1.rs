@@ -85,7 +85,13 @@ impl DmaTimer1 {
     /// (DTMR, DTXMR, DTER, DTRR, DTCN) for diagnostics.
     pub fn debug_state(&mut self) -> (u16, u8, u8, u32, u32) {
         self.sync();
-        (self.mode, self.extended_mode, self.event, self.reference, self.counter)
+        (
+            self.mode,
+            self.extended_mode,
+            self.event,
+            self.reference,
+            self.counter,
+        )
     }
 
     /// Changes the tick rate; used to override the rate stored in a snapshot.
@@ -425,7 +431,9 @@ mod tests {
     fn lazy_and_eager_timers_stay_identical_under_random_traffic() {
         let mut seed = 0x9E37_79B9_u64;
         let mut next = move || {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             (seed >> 33) as u32
         };
         for ticks in [1, 5] {
@@ -441,7 +449,8 @@ mod tests {
                         }
                     }
                     1 => {
-                        let value = [0x841B, 0x840B, 0x8419, 0x8400, 0x0013, 0x0A1D][(next() % 6) as usize];
+                        let value =
+                            [0x841B, 0x840B, 0x8419, 0x8400, 0x0013, 0x0A1D][(next() % 6) as usize];
                         for timer in [&mut eager, &mut lazy] {
                             timer.write16(DTIM1_BASE, value).unwrap();
                         }
@@ -471,8 +480,14 @@ mod tests {
             }
             eager.sync();
             lazy.sync();
-            assert_eq!(eager.read32(DTIM1_BASE + DTCN).unwrap(), lazy.read32(DTIM1_BASE + DTCN).unwrap());
-            assert_eq!(eager.read8(DTIM1_BASE + DTER).unwrap(), lazy.read8(DTIM1_BASE + DTER).unwrap());
+            assert_eq!(
+                eager.read32(DTIM1_BASE + DTCN).unwrap(),
+                lazy.read32(DTIM1_BASE + DTCN).unwrap()
+            );
+            assert_eq!(
+                eager.read8(DTIM1_BASE + DTER).unwrap(),
+                lazy.read8(DTIM1_BASE + DTER).unwrap()
+            );
         }
     }
 }

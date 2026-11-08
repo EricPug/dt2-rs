@@ -19,7 +19,7 @@ const RSP0: usize = 0x10 / 4;
 const SYSCTL: usize = 0x2C / 4;
 const IRQSTAT: usize = 0x30 / 4;
 const IRQSIGEN: usize = 0x38 / 4;
-const BLKATTR: usize = 0x04 / 4;
+const BLKATTR: usize = 1;
 
 const IRQ_CC: u32 = 1;
 const IRQ_TC: u32 = 2;
@@ -65,7 +65,7 @@ impl Esdhc {
         ext_csd[152] = 1; // SLC mode: the OS wants 1 here
         ext_csd[155] = 1; // PARTITION_SETTING_COMPLETED
         ext_csd[160] = 3; // PARTITIONING_SUPPORT
-        // bytes 156..158 (one 24-bit value), 222 and 227 must equal the matched table row's identity words
+                          // bytes 156..158 (one 24-bit value), 222 and 227 must equal the matched table row's identity words
         ext_csd[156..159].copy_from_slice(&[0x00, 0x04, 0xdb]);
         ext_csd[222] = 0x10;
         ext_csd[227] = 1;
@@ -168,8 +168,7 @@ impl Esdhc {
             data
         } else if let Some(file) = &mut self.backing_file {
             let mut data = [0; BLOCK];
-            file
-                .seek(SeekFrom::Start(u64::from(block) * BLOCK as u64))
+            file.seek(SeekFrom::Start(u64::from(block) * BLOCK as u64))
                 .and_then(|_| file.read_exact(&mut data))
                 .map_err(|_| BusError {
                     addr: ESDHC_DATPORT,
@@ -311,8 +310,7 @@ impl Esdhc {
             self.last_written_block = Some(block);
             self.write_buf.drain(..BLOCK);
             self.write_blocks_remaining -= 1;
-            self.write_block = (self.write_blocks_remaining > 0)
-                .then_some(block.wrapping_add(1));
+            self.write_block = (self.write_blocks_remaining > 0).then_some(block.wrapping_add(1));
             self.regs[IRQSTAT] |= IRQ_TC;
         }
         if self.write_blocks_remaining == 0 {
@@ -347,7 +345,10 @@ impl Esdhc {
         let index = (offset / 4) as usize & 63;
         match offset {
             0x20 => self.data_write(&value.to_be_bytes())?,
-            0x2C => self.regs[SYSCTL] = value & !((1 << 24) | (1 << 25) | (1 << 26) | (1 << 27)) | (1 << 3),
+            0x2C => {
+                self.regs[SYSCTL] =
+                    value & !((1 << 24) | (1 << 25) | (1 << 26) | (1 << 27)) | (1 << 3)
+            }
             0x30 => self.regs[IRQSTAT] &= !value,
             0x0C => {
                 self.regs[XFERTYP] = value;
@@ -432,7 +433,11 @@ impl Bus for Esdhc {
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
         let offset = address - ESDHC_BASE;
         let word = self.read_register(offset & !3);
-        Ok(if offset & 2 == 0 { (word >> 16) as u16 } else { word as u16 })
+        Ok(if offset & 2 == 0 {
+            (word >> 16) as u16
+        } else {
+            word as u16
+        })
     }
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
@@ -447,7 +452,10 @@ impl Bus for Esdhc {
         }
         let shift = 8 * (3 - (offset & 3));
         let current = self.regs[(offset / 4) as usize & 63];
-        self.write_register(offset & !3, (current & !(0xFF << shift)) | u32::from(value) << shift)?;
+        self.write_register(
+            offset & !3,
+            (current & !(0xFF << shift)) | u32::from(value) << shift,
+        )?;
         Ok(())
     }
 
@@ -458,7 +466,10 @@ impl Bus for Esdhc {
         }
         let shift = if offset & 2 == 0 { 16 } else { 0 };
         let current = self.regs[(offset / 4) as usize & 63];
-        self.write_register(offset & !3, (current & !(0xFFFF << shift)) | u32::from(value) << shift)?;
+        self.write_register(
+            offset & !3,
+            (current & !(0xFFFF << shift)) | u32::from(value) << shift,
+        )?;
         Ok(())
     }
 
@@ -476,7 +487,8 @@ mod tests {
     fn cmd8_returns_ext_csd_and_raises_completion() {
         let mut host = Esdhc::new();
         host.write32(ESDHC_BASE + 0x38, IRQ_CC | IRQ_TC).unwrap();
-        host.write32(ESDHC_BASE + 0x0C, (8 << 24) | (1 << 21) | (1 << 4)).unwrap();
+        host.write32(ESDHC_BASE + 0x0C, (8 << 24) | (1 << 21) | (1 << 4))
+            .unwrap();
         assert!(host.irq_pending());
         assert_eq!(host.read32(ESDHC_BASE + 0x30).unwrap() & 3, 3);
         host.write32(ESDHC_BASE + 0x30, 3).unwrap();
@@ -543,15 +555,19 @@ mod tests {
     #[test]
     fn byte_and_halfword_fifo_writes_store_the_bytes_written() {
         let mut host = Esdhc::new();
-        host.write32(ESDHC_BASE + 0x04, (1 << 16) | BLOCK as u32).unwrap();
+        host.write32(ESDHC_BASE + 0x04, (1 << 16) | BLOCK as u32)
+            .unwrap();
         host.write32(ESDHC_BASE + 0x08, 1).unwrap();
         host.write32(ESDHC_BASE + 0x0C, 23 << 24).unwrap();
         for index in 0..BLOCK / 2 {
             if index % 2 == 0 {
-                host.write8(ESDHC_DATPORT + (index as u32 * 2 & 3), index as u8).unwrap();
-                host.write8(ESDHC_DATPORT + (index as u32 * 2 & 3) + 1, 0x5A).unwrap();
+                host.write8(ESDHC_DATPORT + ((index as u32 * 2) & 3), index as u8)
+                    .unwrap();
+                host.write8(ESDHC_DATPORT + ((index as u32 * 2) & 3) + 1, 0x5A)
+                    .unwrap();
             } else {
-                host.write16(ESDHC_DATPORT + 2, (index as u16) << 8 | 0x3C).unwrap();
+                host.write16(ESDHC_DATPORT + 2, (index as u16) << 8 | 0x3C)
+                    .unwrap();
             }
         }
         host.write32(ESDHC_BASE + 0x08, 0x900).unwrap();

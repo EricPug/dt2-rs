@@ -36,7 +36,13 @@ impl Emac {
     /// Raw register file for an engine that executes MAC instructions itself:
     /// (ACC0..3, ACCext01, ACCext23, MACSR, MASK).
     pub fn raw_registers(&self) -> ([u32; 4], u32, u32, u32, u32) {
-        (self.acc, self.ext_pair(false), self.ext_pair(true), self.macsr, self.read_mask())
+        (
+            self.acc,
+            self.ext_pair(false),
+            self.ext_pair(true),
+            self.macsr,
+            self.read_mask(),
+        )
     }
 
     /// Replaces the register file from an engine's raw state (see [`Emac::raw48`]).
@@ -127,7 +133,11 @@ impl Emac {
                 let up = tail > 0x80_0000 || (tail == 0x80_0000 && upper & 1 == 1);
                 let rounded = i64::from(upper) + i64::from(up);
                 if !guard_ok || rounded > i64::from(i16::MAX) {
-                    return if saturate { saturated(false) } else { (rounded as u32) & 0xFFFF };
+                    return if saturate {
+                        saturated(false)
+                    } else {
+                        (rounded as u32) & 0xFFFF
+                    };
                 }
                 return (rounded as u32) & 0xFFFF;
             }
@@ -135,15 +145,27 @@ impl Emac {
                 let up = low8 > 0x80 || (low8 == 0x80 && acc & 1 == 1);
                 let rounded = i64::from(acc as i32) + i64::from(up);
                 if !guard_ok || rounded > i64::from(i32::MAX) {
-                    return if saturate { saturated(true) } else { rounded as u32 };
+                    return if saturate {
+                        saturated(true)
+                    } else {
+                        rounded as u32
+                    };
                 }
                 return rounded as u32;
             }
-            return if !guard_ok && saturate { saturated(true) } else { acc };
+            return if !guard_ok && saturate {
+                saturated(true)
+            } else {
+                acc
+            };
         }
         if self.unsigned_integer() {
             let raw = self.raw48(n);
-            return if saturate && raw > u64::from(u32::MAX) { u32::MAX } else { raw as u32 };
+            return if saturate && raw > u64::from(u32::MAX) {
+                u32::MAX
+            } else {
+                raw as u32
+            };
         }
         let value = self.signed48(n);
         if saturate && (value > i64::from(i32::MAX) || value < i64::from(i32::MIN)) {
@@ -161,10 +183,17 @@ impl Emac {
         value
     }
 
-
     /// One MAC or MSAC. `word` is `Some((x_upper, y_upper))` for word operands and `None` for longwords;
     /// `scale` is the 2-bit SF field (integer modes only).
-    pub fn mac(&mut self, n: usize, x: u32, y: u32, word: Option<(bool, bool)>, scale: u8, subtract: bool) {
+    pub fn mac(
+        &mut self,
+        n: usize,
+        x: u32,
+        y: u32,
+        word: Option<(bool, bool)>,
+        scale: u8,
+        subtract: bool,
+    ) {
         let omc = self.macsr & OMC != 0;
         let pav_bit = PAV0 << n;
         if omc && self.macsr & pav_bit != 0 {
@@ -189,8 +218,16 @@ impl Emac {
             None if unsigned => (i64::from(x), i64::from(y)),
             None => (i64::from(x as i32), i64::from(y as i32)),
         };
-        let acc48 = if unsigned { self.raw48(n) as i64 } else { self.signed48(n) };
-        let (min48, max48) = if unsigned { (0i128, (1i128 << 48) - 1) } else { (-(1i128 << 47), (1i128 << 47) - 1) };
+        let acc48 = if unsigned {
+            self.raw48(n) as i64
+        } else {
+            self.signed48(n)
+        };
+        let (min48, max48) = if unsigned {
+            (0i128, (1i128 << 48) - 1)
+        } else {
+            (-(1i128 << 47), (1i128 << 47) - 1)
+        };
         let mut product_overflow = false;
         let product: i128 = if fractional {
             let mut p = (i128::from(ox) * i128::from(oy)) << 1;
@@ -203,10 +240,18 @@ impl Emac {
             p >> 24
         } else {
             let raw = i128::from(ox) * i128::from(oy);
-            let (low, high) = if unsigned { (0i128, (1i128 << 40) - 1) } else { (-(1i128 << 39), (1i128 << 39) - 1) };
+            let (low, high) = if unsigned {
+                (0i128, (1i128 << 40) - 1)
+            } else {
+                (-(1i128 << 39), (1i128 << 39) - 1)
+            };
             product_overflow = raw < low || raw > high;
             let low40 = raw & ((1i128 << 40) - 1);
-            let mut p = if !unsigned && low40 >= 1i128 << 39 { low40 - (1i128 << 40) } else { low40 };
+            let mut p = if !unsigned && low40 >= 1i128 << 39 {
+                low40 - (1i128 << 40)
+            } else {
+                low40
+            };
             match scale & 3 {
                 1 => p <<= 1,
                 3 => p >>= 1,
@@ -220,7 +265,11 @@ impl Emac {
         }
         if product_overflow && omc {
             result = if unsigned {
-                if subtract { 0 } else { (1i128 << 48) - 1 }
+                if subtract {
+                    0
+                } else {
+                    (1i128 << 48) - 1
+                }
             } else {
                 let negative = i128::from(ox) * i128::from(oy) < 0;
                 match (subtract, negative) {
@@ -232,14 +281,26 @@ impl Emac {
             };
         } else {
             let base = i128::from(acc48);
-            result = if subtract { base - product } else { base + product };
+            result = if subtract {
+                base - product
+            } else {
+                base + product
+            };
             if result < min48 || result > max48 {
                 self.macsr |= pav_bit | FLAG_V;
                 if omc {
                     result = if unsigned {
-                        if subtract { 0 } else { (1i128 << 48) - 1 }
+                        if subtract {
+                            0
+                        } else {
+                            (1i128 << 48) - 1
+                        }
                     } else if fractional {
-                        if result > 0 { 0x007F_FFFF_FF00 } else { -0x0080_0000_0000 }
+                        if result > 0 {
+                            0x007F_FFFF_FF00
+                        } else {
+                            -0x0080_0000_0000
+                        }
                     } else if result > 0 {
                         0x7FFF_FFFF
                     } else {
@@ -402,13 +463,19 @@ mod tests {
 
     #[test]
     fn fractional_store_rounds_to_nearest_even_when_requested() {
-        let mut emac = Emac::default();
-        emac.macsr = FI | RT;
+        let mut emac = Emac {
+            macsr: FI | RT,
+            ..Emac::default()
+        };
         emac.acc[0] = 0x0000_0001;
         emac.ext[0] = 0x0080; // exactly half: odd lsb rounds up
         assert_eq!(emac.store(0), 2);
         emac.acc[0] = 0x0000_0002;
-        assert_eq!(emac.store(0), 2, "even lsb rounds down at the halfway point");
+        assert_eq!(
+            emac.store(0),
+            2,
+            "even lsb rounds down at the halfway point"
+        );
         emac.macsr = FI;
         emac.acc[0] = 0x0000_0001;
         assert_eq!(emac.store(0), 1, "truncate mode returns the raw fraction");
@@ -424,7 +491,8 @@ mod tests {
         emac.save_state(&mut w);
         let data = w.into_inner();
         let mut copy = Emac::default();
-        copy.load_state(&mut crate::snapshot::Reader::new(&data)).unwrap();
+        copy.load_state(&mut crate::snapshot::Reader::new(&data))
+            .unwrap();
         assert_eq!(copy, emac);
     }
 }

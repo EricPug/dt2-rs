@@ -24,7 +24,10 @@ static COUNTS_PER_DEGREE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic:
 /// moves a displayed value by roughly 0.006, so a degree needs several.
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 pub fn set_counts_per_degree(counts: f32) {
-    COUNTS_PER_DEGREE_BITS.store(counts.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    COUNTS_PER_DEGREE_BITS.store(
+        counts.max(0.0).to_bits(),
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 fn counts_per_degree() -> f32 {
@@ -63,11 +66,29 @@ struct Control {
 }
 
 const fn key(label: &'static str, code: u8, x: f32, y: f32, w: f32, h: f32) -> Control {
-    Control { label, code, encoder: None, x, y, w, h, shape: Shape::Rect }
+    Control {
+        label,
+        code,
+        encoder: None,
+        x,
+        y,
+        w,
+        h,
+        shape: Shape::Rect,
+    }
 }
 
 const fn knob(label: &'static str, encoder: u8, code: u8, x: f32, y: f32, d: f32) -> Control {
-    Control { label, code, encoder: Some(encoder), x, y, w: d, h: d, shape: Shape::Ellipse }
+    Control {
+        label,
+        code,
+        encoder: Some(encoder),
+        x,
+        y,
+        w: d,
+        h: d,
+        shape: Shape::Ellipse,
+    }
 }
 
 const fn trig(label: &'static str, step: u8, x: f32, y: f32) -> Control {
@@ -177,27 +198,47 @@ fn control_at(position: (f32, f32)) -> Option<usize> {
 impl PanelUi {
     /// `backdrop` is the 1048x856 panel crop as 0x00RRGGBB pixels; without it the panel is drawn from the control table.
     pub fn new(backdrop: Option<Vec<u32>>) -> Self {
-        Self { backdrop, ..Self::default() }
+        Self {
+            backdrop,
+            ..Self::default()
+        }
     }
 
     pub fn is_lit(&self, code: u8) -> bool {
-        self.latched.contains(&code) || self.left.as_ref().is_some_and(|press| press.held_code == Some(code))
+        self.latched.contains(&code)
+            || self
+                .left
+                .as_ref()
+                .is_some_and(|press| press.held_code == Some(code))
     }
 
     /// Releases every latched key (Escape, or a right click on empty panel).
     pub fn release_all(&mut self) -> Vec<Action> {
-        std::mem::take(&mut self.latched).into_iter().map(Action::Release).collect()
+        std::mem::take(&mut self.latched)
+            .into_iter()
+            .map(Action::Release)
+            .collect()
     }
 
     /// One mouse sample. `position` is in window pixels, `None` when the pointer is outside the window.
-    pub fn handle_mouse(&mut self, position: Option<(f32, f32)>, left: bool, right: bool, wheel: f32) -> Vec<Action> {
+    pub fn handle_mouse(
+        &mut self,
+        position: Option<(f32, f32)>,
+        left: bool,
+        right: bool,
+        wheel: f32,
+    ) -> Vec<Action> {
         let mut actions = Vec::new();
         let hovered = position.and_then(control_at);
 
         if wheel != 0.0 {
             if let Some(encoder) = hovered.and_then(|index| CONTROLS[index].encoder) {
                 let counts = (WHEEL_DEGREES_PER_NOTCH * counts_per_degree()).round() as i32;
-                push_turns(&mut actions, encoder, if wheel > 0.0 { counts } else { -counts });
+                push_turns(
+                    &mut actions,
+                    encoder,
+                    if wheel > 0.0 { counts } else { -counts },
+                );
             }
         }
 
@@ -265,7 +306,11 @@ impl PanelUi {
     }
 
     /// Draws the panel into a `PANEL_WIDTH` x `PANEL_HEIGHT` buffer with the live display in the glass area.
-    pub fn render(&self, display: Option<(usize, usize, &[u32])>, leds: &dyn Fn(u8) -> Option<u32>) -> Vec<u32> {
+    pub fn render(
+        &self,
+        display: Option<(usize, usize, &[u32])>,
+        leds: &dyn Fn(u8) -> Option<u32>,
+    ) -> Vec<u32> {
         let mut out = match &self.backdrop {
             Some(backdrop) => backdrop.clone(),
             None => vec![0x0020_2020; PANEL_WIDTH * PANEL_HEIGHT],
@@ -287,8 +332,14 @@ impl PanelUi {
             let (x0, y0) = (gx + (gw - target_w) * 0.5, gy + (gh - target_h) * 0.5);
             for y in 0..target_h as usize {
                 for x in 0..target_w as usize {
-                    let source = (y * height / target_h as usize) * width + x * width / target_w as usize;
-                    put(&mut out, (x0 as usize + x) as isize, (y0 as usize + y) as isize, pixels[source]);
+                    let source =
+                        (y * height / target_h as usize) * width + x * width / target_w as usize;
+                    put(
+                        &mut out,
+                        (x0 as usize + x) as isize,
+                        (y0 as usize + y) as isize,
+                        pixels[source],
+                    );
                 }
             }
         }
@@ -305,7 +356,10 @@ fn put(buffer: &mut [u32], x: isize, y: isize, color: u32) {
 fn blend(buffer: &mut [u32], x: isize, y: isize, color: u32, alpha: u32) {
     if (0..PANEL_WIDTH as isize).contains(&x) && (0..PANEL_HEIGHT as isize).contains(&y) {
         let old = buffer[y as usize * PANEL_WIDTH + x as usize];
-        let mix = |shift: u32| (((old >> shift & 0xFF) * (255 - alpha) + (color >> shift & 0xFF) * alpha) / 255) << shift;
+        let mix = |shift: u32| {
+            (((old >> shift & 0xFF) * (255 - alpha) + (color >> shift & 0xFF) * alpha) / 255)
+                << shift
+        };
         buffer[y as usize * PANEL_WIDTH + x as usize] = mix(16) | mix(8) | mix(0);
     }
 }
@@ -313,11 +367,19 @@ fn blend(buffer: &mut [u32], x: isize, y: isize, color: u32, alpha: u32) {
 fn bounds(control: &Control) -> (isize, isize, isize, isize) {
     let left = (control.x - CROP_LEFT - control.w * 0.5) as isize;
     let top = (control.y - CROP_TOP - control.h * 0.5) as isize;
-    (left, top, left + control.w as isize, top + control.h as isize)
+    (
+        left,
+        top,
+        left + control.w as isize,
+        top + control.h as isize,
+    )
 }
 
 fn inside(control: &Control, x: isize, y: isize) -> bool {
-    contains(control, (x as f32 + CROP_LEFT + 0.5, y as f32 + CROP_TOP + 0.5))
+    contains(
+        control,
+        (x as f32 + CROP_LEFT + 0.5, y as f32 + CROP_TOP + 0.5),
+    )
 }
 
 fn tint_control(buffer: &mut [u32], control: &Control, color: u32) {
@@ -360,13 +422,23 @@ fn draw_control(buffer: &mut [u32], control: &Control, lit: bool, led: Option<u3
             if !inside(control, x, y) {
                 continue;
             }
-            let edge = !inside(control, x - 1, y) || !inside(control, x + 1, y) || !inside(control, x, y - 1) || !inside(control, x, y + 1);
+            let edge = !inside(control, x - 1, y)
+                || !inside(control, x + 1, y)
+                || !inside(control, x, y - 1)
+                || !inside(control, x, y + 1);
             put(buffer, x, y, if edge { 0x00B0_B0B0 } else { fill });
         }
     }
     let scale = if control.label.len() <= 5 { 2 } else { 1 };
     let text_w = (control.label.len() * 4 - 1) as isize * scale;
-    draw_text(buffer, (left + right) / 2 - text_w / 2, (top + bottom) / 2 - 5 * scale / 2, control.label, scale, 0x00FF_FFFF);
+    draw_text(
+        buffer,
+        (left + right) / 2 - text_w / 2,
+        (top + bottom) / 2 - 5 * scale / 2,
+        control.label,
+        scale,
+        0x00FF_FFFF,
+    );
 }
 
 fn glyph(c: char) -> [u8; 5] {
@@ -418,7 +490,12 @@ fn draw_text(buffer: &mut [u32], x: isize, y: isize, text: &str, scale: isize, c
                 if bits >> (2 - col) & 1 == 1 {
                     for dy in 0..scale {
                         for dx in 0..scale {
-                            put(buffer, x + (index as isize * 4 + col) * scale + dx, y + row as isize * scale + dy, color);
+                            put(
+                                buffer,
+                                x + (index as isize * 4 + col) * scale + dx,
+                                y + row as isize * scale + dy,
+                                color,
+                            );
                         }
                     }
                 }
@@ -430,10 +507,16 @@ fn draw_text(buffer: &mut [u32], x: isize, y: isize, text: &str, scale: isize, c
 /// Decodes a panel photo and crops it to the visible 1048x856 panel. The photo is not part of this repository.
 #[cfg(feature = "window")]
 pub fn load_backdrop(path: &str) -> Result<Vec<u32>, String> {
-    let image = image::open(path).map_err(|error| format!("{path}: {error}"))?.to_rgb8();
+    let image = image::open(path)
+        .map_err(|error| format!("{path}: {error}"))?
+        .to_rgb8();
     let (left, top) = (CROP_LEFT as u32, CROP_TOP as u32);
     if image.width() < left + PANEL_WIDTH as u32 || image.height() < top + PANEL_HEIGHT as u32 {
-        return Err(format!("{path}: expected at least {}x{}", left + PANEL_WIDTH as u32, top + PANEL_HEIGHT as u32));
+        return Err(format!(
+            "{path}: expected at least {}x{}",
+            left + PANEL_WIDTH as u32,
+            top + PANEL_HEIGHT as u32
+        ));
     }
     let mut out = Vec::with_capacity(PANEL_WIDTH * PANEL_HEIGHT);
     for y in 0..PANEL_HEIGHT as u32 {
@@ -450,7 +533,10 @@ mod tests {
     use super::*;
 
     fn at(label: &str) -> (f32, f32) {
-        let control = CONTROLS.iter().find(|control| control.label == label).unwrap();
+        let control = CONTROLS
+            .iter()
+            .find(|control| control.label == label)
+            .unwrap();
         (control.x - CROP_LEFT, control.y - CROP_TOP)
     }
 
@@ -458,16 +544,28 @@ mod tests {
     fn left_click_is_momentary_and_right_click_latches() {
         let mut ui = PanelUi::default();
         let func = at("FUNC");
-        assert_eq!(ui.handle_mouse(Some(func), false, true, 0.0), vec![Action::Press(17)]);
+        assert_eq!(
+            ui.handle_mouse(Some(func), false, true, 0.0),
+            vec![Action::Press(17)]
+        );
         assert_eq!(ui.handle_mouse(Some(func), false, false, 0.0), vec![]);
         assert!(ui.is_lit(17));
 
         let trig1 = at("1");
-        assert_eq!(ui.handle_mouse(Some(trig1), true, false, 0.0), vec![Action::Press(25)]);
-        assert_eq!(ui.handle_mouse(Some(trig1), false, false, 0.0), vec![Action::Release(25)]);
+        assert_eq!(
+            ui.handle_mouse(Some(trig1), true, false, 0.0),
+            vec![Action::Press(25)]
+        );
+        assert_eq!(
+            ui.handle_mouse(Some(trig1), false, false, 0.0),
+            vec![Action::Release(25)]
+        );
         assert!(ui.is_lit(17));
 
-        assert_eq!(ui.handle_mouse(Some((2.0, 2.0)), false, true, 0.0), vec![Action::Release(17)]);
+        assert_eq!(
+            ui.handle_mouse(Some((2.0, 2.0)), false, true, 0.0),
+            vec![Action::Release(17)]
+        );
         assert!(!ui.is_lit(17));
     }
 
@@ -476,13 +574,34 @@ mod tests {
         let mut ui = PanelUi::default();
         let (x, y) = at("B");
         assert_eq!(ui.handle_mouse(Some((x, y)), true, false, 0.0), vec![]);
-        assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), true, false, 0.0), vec![Action::Turn(1, 127), Action::Turn(1, 127), Action::Turn(1, 106)]);
-        assert_eq!(ui.handle_mouse(Some((x, y - 12.0)), false, false, 0.0), vec![]);
+        assert_eq!(
+            ui.handle_mouse(Some((x, y - 12.0)), true, false, 0.0),
+            vec![
+                Action::Turn(1, 127),
+                Action::Turn(1, 127),
+                Action::Turn(1, 106)
+            ]
+        );
+        assert_eq!(
+            ui.handle_mouse(Some((x, y - 12.0)), false, false, 0.0),
+            vec![]
+        );
 
-        assert_eq!(ui.handle_mouse(Some((x, y)), false, false, -1.0), vec![Action::Turn(1, -127), Action::Turn(1, -127), Action::Turn(1, -127), Action::Turn(1, -69)]);
+        assert_eq!(
+            ui.handle_mouse(Some((x, y)), false, false, -1.0),
+            vec![
+                Action::Turn(1, -127),
+                Action::Turn(1, -127),
+                Action::Turn(1, -127),
+                Action::Turn(1, -69)
+            ]
+        );
 
         ui.handle_mouse(Some((x, y)), true, false, 0.0);
-        assert_eq!(ui.handle_mouse(Some((x, y)), false, false, 0.0), vec![Action::Press(42), Action::Release(42)]);
+        assert_eq!(
+            ui.handle_mouse(Some((x, y)), false, false, 0.0),
+            vec![Action::Press(42), Action::Release(42)]
+        );
     }
 
     #[test]
@@ -492,6 +611,12 @@ mod tests {
         let frame = ui.render(Some((8, 4, &display)), &|_| None);
         assert_eq!(frame.len(), PANEL_WIDTH * PANEL_HEIGHT);
         let (gx, gy, ..) = GLASS;
-        assert_eq!(frame[(gy - CROP_TOP) as usize * PANEL_WIDTH + (gx - CROP_LEFT) as usize + 10 + 40 * PANEL_WIDTH], 0x00FF_FFFF);
+        assert_eq!(
+            frame[(gy - CROP_TOP) as usize * PANEL_WIDTH
+                + (gx - CROP_LEFT) as usize
+                + 10
+                + 40 * PANEL_WIDTH],
+            0x00FF_FFFF
+        );
     }
 }

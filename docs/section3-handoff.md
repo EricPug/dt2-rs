@@ -2,6 +2,36 @@
 
 This is a diagnostic handoff checkpoint for the local Digitakt II OS 1.17 image. It uses modeled/synthetic peripherals and a source-only RAM shadow to preserve the packed section during its overlapping decompression. It is not a hardware-faithful boot. All firmware-derived binaries and snapshots remain under ignored `out/` and are not committed.
 
+This document is the canonical source of truth for project status, evidence,
+limitations, and next-step order. README.md and research/HANDOFF.md are summaries
+and must point here rather than maintain competing status reports.
+
+## Current project status
+
+- The partial ColdFire emulator executes the OS 1.17 section-3 direct-entry trace
+  with explicitly modeled and synthetic startup conditions; this is not a
+  hardware-faithful cold boot.
+- The diagnostic run reaches the SAMPLE page. UART8 panel input can change screen
+  values and pages, and panel LED records are observed. A clickable front panel is
+  available in the optional window build.
+- The synthetic eMMC supports formatting, browsing, and loading a sample into RAM.
+- Firmware-driven audio playback is not working: SSI TX remains silent in the
+  documented trigger/play trace. `SYNTH_VOICE` output is diagnostic-only and does
+  not count as emulated playback. The actual sample-to-DSP handoff remains unknown.
+- Current quality gates pass: `cargo fmt --check`, warning-free
+  `cargo clippy --workspace --all-targets -- -D warnings`, and
+  `cargo test --workspace` (317 passed, 1 ignored).
+
+## Milestone order
+
+1. **Complete:** format the workspace, resolve Clippy findings, and align the
+   project summaries with this document.
+2. Establish a deterministic boot-to-SAMPLE-page regression test and reproducible
+   run script before changing DMA/shared-memory behavior.
+3. Trace the real sample-to-DSP handoff, recording evidence and ruled-out paths.
+4. Implement one firmware-driven playback slice and retain its SSI capture.
+5. Retire synthetic startup assumptions individually when evidence replaces them.
+
 ## Checkpoints
 
 The pre-entry run stops before `0x400004e8`. Its clean decoded image is `out/section3-pre-entry-image.bin`; full DDR and SRAM snapshots are `out/section3-pre-entry-ddr.bin` (64 MiB) and `out/section3-pre-entry-sram.bin` (64 KiB). The callback descriptor at `0x4031153c` matches the host section: count `0xa1`, first function `0x40198e3c`, second function `0x401999f8` at `0x40311548`.

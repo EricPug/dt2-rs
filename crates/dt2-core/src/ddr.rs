@@ -521,7 +521,6 @@ impl Bus for DdrController {
     }
 }
 
-
 impl DdrController {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
         w.u32(self.padcr);

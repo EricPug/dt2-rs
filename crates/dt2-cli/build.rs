@@ -11,10 +11,18 @@ fn main() {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_default();
     let default_dir = cache.join("dt2-unicorn/build");
-    println!("cargo:rerun-if-changed={}", default_dir.join("libunicorn.so").display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        default_dir.join("libunicorn.so").display()
+    );
     let dir = std::env::var_os("UNICORN_LIB_DIR")
         .map(PathBuf::from)
-        .or_else(|| default_dir.join("libunicorn.so").exists().then(|| default_dir.clone()));
+        .or_else(|| {
+            default_dir
+                .join("libunicorn.so")
+                .exists()
+                .then(|| default_dir.clone())
+        });
     match dir {
         Some(dir) => {
             let dir = dir.canonicalize().unwrap_or(dir);
@@ -26,6 +34,8 @@ fn main() {
         None if std::env::var_os("CARGO_FEATURE_UNICORN").is_some() => {
             panic!("feature `unicorn` needs the patched libunicorn: run tools/unicorn/build.sh or set UNICORN_LIB_DIR")
         }
-        None => println!("cargo:warning=patched libunicorn not found; building the Rust interpreter only"),
+        None => println!(
+            "cargo:warning=patched libunicorn not found; building the Rust interpreter only"
+        ),
     }
 }

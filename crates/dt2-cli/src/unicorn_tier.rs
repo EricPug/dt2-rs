@@ -32,7 +32,16 @@ extern "C" {
         write: WriteCb,
         write_data: *mut c_void,
     ) -> i32;
-    fn uc_hook_add(uc: Uc, hook: *mut usize, kind: i32, cb: IntrCb, data: *mut c_void, begin: u64, end: u64, ...) -> i32;
+    fn uc_hook_add(
+        uc: Uc,
+        hook: *mut usize,
+        kind: i32,
+        cb: IntrCb,
+        data: *mut c_void,
+        begin: u64,
+        end: u64,
+        ...
+    ) -> i32;
     fn uc_emu_start(uc: Uc, begin: u64, until: u64, timeout: u64, count: usize) -> i32;
     fn uc_reg_read(uc: Uc, reg: i32, value: *mut c_void) -> i32;
     fn uc_reg_write(uc: Uc, reg: i32, value: *const c_void) -> i32;
@@ -158,6 +167,8 @@ extern "C" fn on_intr(uc: Uc, number: u32, user: *mut c_void) {
 pub struct UnicornTier {
     uc: Uc,
     shared: Box<Shared>,
+    // Callback userdata points into each allocation, so the region addresses must stay stable.
+    #[allow(clippy::vec_box)]
     _regions: Vec<Box<Region>>,
     max_slice: usize,
     pub slices: u64,
@@ -169,7 +180,10 @@ pub struct UnicornTier {
 
 impl UnicornTier {
     fn new(bus: &mut ProbeBus) -> Self {
-        let max_slice = std::env::var("DT2_UNICORN_SLICE").ok().and_then(|v| v.parse().ok()).unwrap_or(4096);
+        let max_slice = std::env::var("DT2_UNICORN_SLICE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096);
         let mut uc: Uc = std::ptr::null_mut();
         unsafe {
             assert_eq!(uc_open(UC_ARCH_M68K, UC_MODE_BIG_ENDIAN, &mut uc), 0);
@@ -189,17 +203,29 @@ impl UnicornTier {
         windows.sort_by_key(|w| w.0);
         let mut cursor: u64 = 0;
         let mut regions = Vec::new();
-        let map_mmio = |start: u64, end: u64, regions: &mut Vec<Box<Region>>, shared: &mut Shared| {
-            if end > start {
-                let region = Box::new(Region { shared, base: start as u32 });
-                let user = &*region as *const Region as *mut c_void;
-                let status = unsafe {
-                    uc_mmio_map(uc, start, (end - start) as usize, mmio_read, user, mmio_write, user)
-                };
-                assert_eq!(status, 0, "uc_mmio_map {start:#x}..{end:#x}");
-                regions.push(region);
-            }
-        };
+        let map_mmio =
+            |start: u64, end: u64, regions: &mut Vec<Box<Region>>, shared: &mut Shared| {
+                if end > start {
+                    let region = Box::new(Region {
+                        shared,
+                        base: start as u32,
+                    });
+                    let user = &*region as *const Region as *mut c_void;
+                    let status = unsafe {
+                        uc_mmio_map(
+                            uc,
+                            start,
+                            (end - start) as usize,
+                            mmio_read,
+                            user,
+                            mmio_write,
+                            user,
+                        )
+                    };
+                    assert_eq!(status, 0, "uc_mmio_map {start:#x}..{end:#x}");
+                    regions.push(region);
+                }
+            };
         for &(base, ptr, len) in &windows {
             map_mmio(cursor, u64::from(base), &mut regions, &mut shared);
             let status = unsafe { uc_mem_map_ptr(uc, u64::from(base), len, 7, ptr) };
@@ -210,11 +236,28 @@ impl UnicornTier {
         unsafe {
             let mut hook = 0usize;
             let data = &mut *shared as *mut Shared as *mut c_void;
-            assert_eq!(uc_hook_add(uc, &mut hook, UC_HOOK_INTR, on_intr, data, 1, 0), 0);
+            assert_eq!(
+                uc_hook_add(uc, &mut hook, UC_HOOK_INTR, on_intr, data, 1, 0),
+                0
+            );
             let options = NATIVE_RTE | NO_MEM_EXIT | NO_HOOK_PC_SYNC;
-            assert_eq!(uc_digikit_set_options(uc, options), 0, "patched Unicorn required");
+            assert_eq!(
+                uc_digikit_set_options(uc, options),
+                0,
+                "patched Unicorn required"
+            );
         }
-        Self { uc, shared, _regions: regions, max_slice, slices: 0, fallback_steps: 0, invalidated: 0, dirty: Vec::new(), irqs: Default::default() }
+        Self {
+            uc,
+            shared,
+            _regions: regions,
+            max_slice,
+            slices: 0,
+            fallback_steps: 0,
+            invalidated: 0,
+            dirty: Vec::new(),
+            irqs: Default::default(),
+        }
     }
 
     fn start(bus: &mut ProbeBus, cpu: &Cpu) -> Self {
@@ -232,8 +275,16 @@ impl UnicornTier {
             let sr = u32::from(cpu.sr);
             uc_reg_write(self.uc, REG_SR, &sr as *const u32 as *const c_void);
             for i in 0..8 {
-                uc_reg_write(self.uc, REG_A0 + i as i32, &cpu.a[i] as *const u32 as *const c_void);
-                uc_reg_write(self.uc, REG_D0 + i as i32, &cpu.d[i] as *const u32 as *const c_void);
+                uc_reg_write(
+                    self.uc,
+                    REG_A0 + i as i32,
+                    &cpu.a[i] as *const u32 as *const c_void,
+                );
+                uc_reg_write(
+                    self.uc,
+                    REG_D0 + i as i32,
+                    &cpu.d[i] as *const u32 as *const c_void,
+                );
             }
             uc_reg_write(self.uc, REG_PC, &cpu.pc as *const u32 as *const c_void);
             uc_digikit_vbr_set(self.uc, cpu.vbr);
@@ -260,8 +311,16 @@ impl UnicornTier {
             uc_reg_read(self.uc, REG_SR, &mut sr as *mut u32 as *mut c_void);
             cpu.sr = sr as u16;
             for i in 0..8 {
-                uc_reg_read(self.uc, REG_A0 + i as i32, &mut cpu.a[i] as *mut u32 as *mut c_void);
-                uc_reg_read(self.uc, REG_D0 + i as i32, &mut cpu.d[i] as *mut u32 as *mut c_void);
+                uc_reg_read(
+                    self.uc,
+                    REG_A0 + i as i32,
+                    &mut cpu.a[i] as *mut u32 as *mut c_void,
+                );
+                uc_reg_read(
+                    self.uc,
+                    REG_D0 + i as i32,
+                    &mut cpu.d[i] as *mut u32 as *mut c_void,
+                );
             }
             uc_reg_read(self.uc, REG_PC, &mut cpu.pc as *mut u32 as *mut c_void);
             cpu.vbr = uc_digikit_vbr_get(self.uc);
@@ -279,7 +338,14 @@ impl UnicornTier {
     fn invalidate_host_writes(&mut self, bus: &mut ProbeBus) {
         bus.take_host_writes(&mut self.dirty);
         for (start, end) in self.dirty.drain(..) {
-            let status = unsafe { uc_ctl(self.uc, UC_CTL_WRITE_TB_REMOVE_CACHE, u64::from(start), u64::from(end)) };
+            let status = unsafe {
+                uc_ctl(
+                    self.uc,
+                    UC_CTL_WRITE_TB_REMOVE_CACHE,
+                    u64::from(start),
+                    u64::from(end),
+                )
+            };
             debug_assert_eq!(status, 0);
             self.invalidated += 1;
         }
@@ -304,7 +370,10 @@ impl UnicornTier {
             limit.min(counter)
         };
         let begun = usize::from(self.shared.begun);
-        bus.retire_external(executed.saturating_sub(self.shared.credited + begun), executed.saturating_sub(self.shared.credited));
+        bus.retire_external(
+            executed.saturating_sub(self.shared.credited + begun),
+            executed.saturating_sub(self.shared.credited),
+        );
         if std::env::var_os("DT2_UNICORN_TRACE").is_some() {
             let mut pc_after = 0u32;
             unsafe { uc_reg_read(self.uc, REG_PC, &mut pc_after as *mut u32 as *mut c_void) };
@@ -372,7 +441,11 @@ fn run_with(
             let pending = bus.pending_interrupt();
             // Tell the engine which request is held back, so that an SR change (RTE, MOVE to
             // SR) that unmasks it ends the slice there.
-            tier.set_irq_level(pending.filter(|r| r.level <= mask).map_or(0, |r| u32::from(r.level)));
+            tier.set_irq_level(
+                pending
+                    .filter(|r| r.level <= mask)
+                    .map_or(0, |r| u32::from(r.level)),
+            );
             if let Some(request) = pending {
                 if request.level > mask {
                     if let Err(error) = cpu.take_interrupt(bus, request.level, request.vector) {
@@ -420,10 +493,18 @@ fn run_with(
         // One instruction through the Rust interpreter: hooks are on, an injection is due, or
         // Unicorn raised an exception / rejected an opcode.
         if status != 0 && status != ERR_INSN_INVALID && tier.shared.intr.is_none() {
-            eprintln!("unicorn tier: engine status {status} at pc {:#010x}", cpu.pc);
+            eprintln!(
+                "unicorn tier: engine status {status} at pc {:#010x}",
+                cpu.pc
+            );
         }
         if std::env::var_os("DT2_UNICORN_DEBUG").is_some() {
-            eprintln!("fallback pc={:#010x} op={:04x} status={status} intr={:?}", cpu.pc, bus.read16(cpu.pc).unwrap_or(0), tier.shared.intr);
+            eprintln!(
+                "fallback pc={:#010x} op={:04x} status={status} intr={:?}",
+                cpu.pc,
+                bus.read16(cpu.pc).unwrap_or(0),
+                tier.shared.intr
+            );
         }
         tier.shared.intr = None;
         tier.fallback_steps += 1;
@@ -441,7 +522,12 @@ fn run_with(
             Err(error) => break RunStop::Error(error),
         }
     };
-    if std::env::var_os("DT2_UNICORN_TRACE").is_some() { eprintln!("run_with end: limit={limit} done={done} instructions={instructions} count={}", bus.current_instruction_count); }
+    if std::env::var_os("DT2_UNICORN_TRACE").is_some() {
+        eprintln!(
+            "run_with end: limit={limit} done={done} instructions={instructions} count={}",
+            bus.current_instruction_count
+        );
+    }
     bus.end_run();
     RunReport {
         instructions,

@@ -224,7 +224,6 @@ impl Bus for Intc2 {
     }
 }
 
-
 impl Intc2 {
     pub fn save_state(&self, w: &mut crate::snapshot::Writer) {
         for v in [self.imrh, self.imrl, self.intfrch, self.intfrcl] {
