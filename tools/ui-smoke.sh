@@ -60,27 +60,17 @@ check_sha256 out/shots/main-after-load.png \
 check_sha256 out/shots/main-after-load.snap \
   225760283abcf448018f924c3eb71890666694e5b0c5d2825df7d545efa297a6
 
-run_input() {
-  local name=$1 message=$2
-  tools/run-section3.sh "$BIN" 100000000 \
-    RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=out/run-card.img \
-    INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP \
-    DTIM3_TICKS_PER_INSTRUCTION=16 \
-    SNAPSHOT_LOAD=out/shots/main-after-load.snap \
-    UART8_TX_FILE="$OUT/$name.tx" \
-    "UART8_RX_PERIODIC=3000000:$message" \
-    >"$OUT/$name.log" 2>&1
-  grep -q '^stop: instruction limit$' "$OUT/$name.log"
-  python3 tools/render-uart-frames.py --base out/shots/main-after-load.png \
-    "$OUT/$name.tx" "$OUT/$name-frame"
-}
-
-run_input encoder 3005,3000
-check_sha256 "$OUT/encoder-frame-input-000-final.png" \
-  e1a74aa4668f4a1ba7863cb787d929e3291aa756f531214fce4a055876dcb7f2
-run_input fltr 2004,2000
-check_sha256 "$OUT/fltr-frame-input-000-final.png" \
-  754122aa73411057148ae3c8dfc78eb5f8f9a15243310dcd1544e831d43fbfb8
+tools/ui-turn-encoder.sh \
+  out/shots/main-after-load.snap out/shots/main-after-load.png \
+  "$OUT/encoder" \
+  3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a "$BIN"
+tools/ui-change-page.sh FLTR \
+  out/shots/main-after-load.snap out/shots/main-after-load.png \
+  "$OUT/fltr" \
+  20b7b62611a13133779f3da6e452591182fc7ff5bc37c2b9b3ada5e16b7133c3 "$BIN"
+tools/ui-open-sample-page.sh \
+  "$OUT/fltr.snap" "$OUT/fltr-frame-final.png" "$OUT/sample-page" \
+  18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b "$BIN"
 
 # Load and trigger the sample through the opt-in modeled DSP, then check the
 # deterministic WAV hash and exact sample segment in the companion runner.

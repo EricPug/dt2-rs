@@ -6,6 +6,7 @@ BIN=${1:-target/release/dt2-cli}
 OUT=out/modeled-dsp
 LIMIT=300000000
 EXPECTED_WAV_SHA256=7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200
+EXPECTED_UI_SHA256=a449e4f800b8032ab1de7f2423d90f8e676cb4a75c0644edce60a528c081674e
 required=(
   out/section3-pre-entry-image.bin
   out/section3-panel-discovery-pre-entry-ddr.bin
@@ -13,6 +14,7 @@ required=(
   out/dt2-os-1.17-container-nor.bin
   out/run-card.img
   out/shots/action-down.snap
+  out/shots/action-down.png
 )
 for path in "${required[@]}"; do
   if [[ ! -f "$path" ]]; then
@@ -33,17 +35,15 @@ elif [[ ! -x "$BIN" ]]; then
 fi
 mkdir -p "$OUT"
 
-messages=(
-  2104,2100,2104,2100,2104,2100,2104,2100,2102,2100
-  -,-,-,-,2102,2100
-  -,-,-,-,2301,2300,2208,2200
-)
-message_list=$(IFS=,; echo "${messages[*]}")
+load_messages=$(tools/ui-load-sample.sh --messages)
+trigger_messages=$(tools/ui-trigger-track.sh --messages 1)
+message_list="$load_messages,-,-,-,-,$trigger_messages"
 if ! tools/run-section3.sh "$BIN" "$LIMIT" \
   RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=out/run-card.img \
   INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP \
   DTIM3_TICKS_PER_INSTRUCTION=16 SNAPSHOT_LOAD=out/shots/action-down.snap \
-  UART8_RX_ONCE "UART8_RX_PERIODIC=6000000:$message_list" DSP_LINK \
+  UART8_TX_FILE="$OUT/ui.tx" UART8_RX_ONCE \
+  "UART8_RX_PERIODIC=6000000:$message_list" DSP_LINK \
   "MODELED_DSP_WAV=$OUT/sample.wav" \
   "DUMP_RAM_FILE=0x4060d770:0x8000:$OUT/sample-first.bin" \
   "DUMP_RAM_FILE=0x40605770:0x1c00:$OUT/sample-tail.bin" \
@@ -59,6 +59,15 @@ grep -q '12 RGPIO upload call(s)' "$OUT/run.log" || {
   echo "modeled-DSP run did not capture all 12 RGPIO upload calls; see $OUT/run.log" >&2
   exit 1
 }
+
+python3 tools/render-uart-frames.py --base out/shots/action-down.png \
+  "$OUT/ui.tx" "$OUT/ui-frame" >"$OUT/ui-render.log"
+ui_sha256=$(sha256sum "$OUT/ui-frame-final.png" | cut -d' ' -f1)
+if [[ "$ui_sha256" != "$EXPECTED_UI_SHA256" ]]; then
+  echo "FAIL modeled-DSP UI frame: expected $EXPECTED_UI_SHA256, got $ui_sha256" >&2
+  exit 1
+fi
+echo "PASS modeled-DSP UI frame sha256=$ui_sha256"
 
 python3 - "$OUT" "$EXPECTED_WAV_SHA256" <<'PY'
 import hashlib
