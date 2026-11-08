@@ -18,7 +18,7 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 | CPU or modeled eDMA reads/writes the loaded sample during trigger/play | No accesses observed in this run | The two channel-59 eMMC transfers wrote adjacent 32 KiB windows spanning `0x40605770..0x40615770`. Replaying trigger/play from the loaded snapshot with an exact span watch produced zero CPU-bus or modeled eDMA accesses. This excludes only the emulator-observable access paths, not an external DSP or other unmodeled hardware reader. |
 | The OS 1.17 accesses at `0x8c000000..0x8c00000f` carry sample-page descriptors | Ruled out for the observed accesses | With `RGPIOBAR=0x8c000035`, this 16-byte window is decoded as RGPIO in the current OS 1.17 trace. The sample-load capture records 135,300 RGPIO events, including repeated reads at `+0x2` and writes at `+0x2`/`+0xa`, consistent with GPIO polling and strobes rather than descriptor memory. The runner enables `RGPIO_READY_MODEL`, so the modeled pin-0 ready response is synthetic; the access addresses and operations are firmware-observed. Digiemu's OS 1.15C/1.16 findings label `0x8c000000` as a sample-page/slot-header region; that older-version clue does not establish the OS 1.17 decode or handoff. This conclusion is limited to the RGPIO window, not the surrounding address space. |
 | The DSPI1 response buffer at `0x4fe79340..0x4fe79640` is populated or consumed during sample load | inconclusive | A repeat sample-load run starts with all `0x300` bytes zero and records zero overlapping CPU-bus reads and writes. The channel-14 TCD is configured for two 16-bit reads from DSPI1 POPR into the buffer, but the emulator's synthetic DSPI diagnostic does not execute eDMA channels 14/15. Therefore the empty buffer is evidence about this emulator run, not evidence that real hardware returns no response. |
-| DSP reads the sample directly from shared DDR/FlexBus, or receives a descriptor through another path | Unresolved | The sample bytes are present in DDR, while the DSPI2 stream has no sample address. No trace yet identifies a firmware descriptor or a hardware-side shared-memory read. Do not infer the physical bus or peer from the emulated MMIO model. |
+| DSP reads the sample directly from shared DDR/FlexBus, or receives a descriptor through another path | Unresolved | The sample bytes are present in ColdFire DDR, while the DSPI2 stream has no sample address. The OS 1.17 SHARC loader contains no literal `0x40605770`/adjacent sample address and no recognizable voice/sample descriptor table was identified by the raw scan. It remains possible that firmware computes or relocates the address, or uses another interface; do not infer a physical bus or peer from the emulated MMIO model. |
 | `SYNTH_VOICE` output demonstrates firmware playback | Rejected as progress evidence | It injects sample bytes directly into the SSI TX source and creates nonzero output, but does not exercise the firmware's handoff. Keep it diagnostic-only; the trigger/play SSI capture remains zero. |
 
 ## 32-byte sample signature scan
@@ -64,6 +64,44 @@ Channel 59 is the important qualification: a TCD still points *to* the original
 sample because the eMMC loader's completed descriptor remains in the register
 map. It is not a second copy or a trigger-time transfer. No observed TRIG/PLAY
 SERQ points at the sample, and the source-window access watch is empty.
+
+## OS 1.17 SHARC loader scan
+
+Extracted ELE3 section 7 from `firmware/Digitakt_II_OS1.17.syx` with the
+repository's `dt2-cli`; the 321,016-byte result is
+`out/sharc-os117/section_7.bin` (SHA-256
+`0f514a12a2255f5c081e292c47f1f29462003177658da4bbae0a22fd737fffa2`). It
+parses as 104 16-byte little-endian loader records: each header XOR is zero,
+the fill records carry no payload, and the final record ends exactly at EOF.
+The header layout and fill handling match the public
+[ADI `adsp-ldr` SC5xx loader parser](https://github.com/analogdevicesinc/adsp-ldr/blob/main/src/ldr/lfd_sc589.c).
+
+The encoded target ranges below are envelopes; the 0x2824/0x2838/0x8000
+envelopes contain sparse data and fill blocks, not one continuous initialized
+region. The `0x00120230` and `0x001c1338` values occur in header-only loader
+records, not as payload ranges.
+
+| Loader target range | Record shape |
+|---|---|
+| `0x20000000..0x2001ab7c` | One data block |
+| `0x28240000..0x282d7564` | Sparse data and fill blocks |
+| `0x28380000..0x2839c000` | Sparse data and fill blocks |
+| `0x80000000..0x8055e890` | Sparse data and fill blocks |
+| `0x80a00000..0x82a001c4` | One fill-only block |
+
+A two-endian scan of all block payloads found no literal `0x40605770`,
+`0x4060d770`, or `0x40615770`. The few aligned `0x4060xxxx` values do not
+resemble that pointer: for example, `0x40602f3d` and `0x406066c0` sit in
+smooth numeric tables and decode as floating-point values near 3.5. Raw
+`0x40000000`/`0x80000000` bit patterns elsewhere are not by themselves evidence
+of ColdFire DDR/SRAM references; the loader's `0x80000000` targets belong to
+the DSP image's encoded target-address space.
+
+No sample/voice descriptor list was recognizable from the literal-address
+scan. This is a static negative result, not proof the SHARC never reads the
+sample: an address can be computed, relocated, or supplied through an indirect
+descriptor or interface. The memory map and exact consumer path remain
+unresolved; this result does not justify implementing a SHARC core or eDMA.
 
 ## Latest reproducible trace
 
