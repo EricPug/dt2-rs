@@ -21,6 +21,50 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 | DSP reads the sample directly from shared DDR/FlexBus, or receives a descriptor through another path | Unresolved | The sample bytes are present in DDR, while the DSPI2 stream has no sample address. No trace yet identifies a firmware descriptor or a hardware-side shared-memory read. Do not infer the physical bus or peer from the emulated MMIO model. |
 | `SYNTH_VOICE` output demonstrates firmware playback | Rejected as progress evidence | It injects sample bytes directly into the SSI TX source and creates nonzero output, but does not exercise the firmware's handoff. Keep it diagnostic-only; the trigger/play SSI capture remains zero. |
 
+## 32-byte sample signature scan
+
+The signature `010e0110010a010300fb00fb00fe00ff00f900f200ec00ec00db00ce00cb00c7`
+was taken from `0x40605770`, the loaded sample's first 32 bytes. All sparse
+snapshot pages for emulated RAM (`0x40000000..0x4fffffff` and
+`0x80000000..0x8000ffff`) were searched; omitted pages are zero and cannot
+contain this nonzero signature. Checkpoints:
+
+| Checkpoint | Instruction count | Exact matches |
+|---|---:|---|
+| Right after load | 9,400,000,000 | `0x40605770` only |
+| 200k instructions after TRIG | 9,406,200,000 | `0x40605770` only |
+| 200k instructions after PLAY | 9,418,200,000 | `0x40605770` only |
+
+No second copy appeared at these checkpoints. A `SAMPLE_ACCESS_TRACE` on the
+source window `0x40605770..0x40605790` across the full 20M-instruction
+TRIG/PLAY replay recorded zero CPU or modeled-DMA accesses. This exact-signature
+test does not detect transformed copies or an external DSP's memory reads.
+
+The saved TCD map at the TRIG checkpoint and the `EDMA_TRACE` SERQ records show
+the following relevant configurations and requests. Length is `NBYTES ×
+CITER`; “requests” counts SERQs in the indicated 1M-instruction window.
+Channel 28/29 handling is the synthetic `DSP_LINK` diagnostic, not physical
+eDMA execution.
+
+| Channel | SADDR → DADDR | Length | TRIG / PLAY observation |
+|---:|---|---:|---|
+| 14 | `0xfc03c03a` → `0x4fe79340` | 4 B | Retained DSPI1 TCD; no request |
+| 15 | `0x4fe7a340` → `0xfc03c034` | 8 B | Retained DSPI1 TCD; no request |
+| 28 | `0xec03803a` → `0x80001000` | 2,748 B (`2 × 0x55e`) | 10 requests in each TRIG and PLAY window; synthetic reply fill |
+| 29 | `0x80001bc0` → `0xec038034` | 5,496 B (`4 × 0x55e`) | 10 requests in each window; outgoing block capture |
+| 34 | `0xec07000c` → `0x00000000` in saved TCD map | 1 B | UART8 input is specially injected by the emulator: the TRIG packet wrote two bytes to `0x4fe3a042..0x4fe3a043`; no SERQ/TCD transfer is modeled |
+| 35 | `0x4fe3b21f..0x4fe3b243` (TRIG), `0x4fe3b49a..0x4fe3b4e1` (PLAY) → `0xec07000c` | `NBYTES=1`, variable `CITER` | 13 requests / 38 B in the TRIG window; 23 requests / 72 B in the PLAY window |
+| 36 | `0xec07400c` → `0x4fe30000` | 1 B | Retained TCD; no request |
+| 37 | `0x00000000` → `0xec07400c` | 1 B | Retained TCD; no request |
+| 48 | `0xfc0bc008` → `0x4fe57100` | 2,048 B (`0x20 × 0x40`) | Retained TCD; no request |
+| 50 | `0x4fe58100` → `0xfc0bc000` | 2,048 B (`0x20 × 0x40`) | SSI timer diagnostic only; not a firmware SERQ |
+| 59 | `0xfc0cc020` → `0x40605770` | 32,768 B (`0x10 × 0x800`) | The prior eMMC sample-load TCD remains configured, but no request occurred near TRIG or PLAY |
+
+Channel 59 is the important qualification: a TCD still points *to* the original
+sample because the eMMC loader's completed descriptor remains in the register
+map. It is not a second copy or a trigger-time transfer. No observed TRIG/PLAY
+SERQ points at the sample, and the source-window access watch is empty.
+
 ## Latest reproducible trace
 
 Run:
@@ -80,14 +124,16 @@ transport unproven, so the labels narrow what to trace but do not establish an
 audio handoff.
 
 In the 100M-instruction trigger/play phase, the firmware makes 999 requests on
-each DSPI2 channel (28 and 29); no DSPI1 or other SERQ channel is observed.
-SSI TX captures 999 blocks / 2,045,952 bytes, all zero. The emulator's synthetic
-SSI channel-50 servicing is outside the firmware SERQ trace.
+each DSPI2 channel (28 and 29), plus 1,775 synthetic panel-input channel-35
+requests; no DSPI1 SERQ is observed. SSI TX captures 999 blocks / 2,045,952
+bytes, all zero. The emulator's synthetic SSI channel-50 servicing is outside
+the firmware SERQ trace.
 
 ## Next trace
 
-Trace the sample-page descriptor/shared-memory path beyond the RGPIO register
-window, then determine how a real DSPI1 channel-14 response would populate or
-be consumed from `0x4fe79340`. Keep both direct shared-memory and descriptor
-paths open; do not model an unverified peripheral or count synthetic audio as
+No second exact sample signature or active trigger-time eDMA transfer to the
+sample was observed. The only sample-address TCD is channel 59's completed
+eMMC-load descriptor, retained in the snapshot. Further firmware-side tracing
+should wait for a deliberate decision about the unresolved DSP-visible/shared
+memory path; do not model an unverified peripheral or count synthetic audio as
 playback progress.
