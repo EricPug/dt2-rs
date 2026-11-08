@@ -1127,6 +1127,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("DSP_LINK_REPLY=")
             || assignment == "EDMA_TRACE"
             || assignment == "NONRAM_BULK_TRACE"
+            || assignment == "FLEXBUS_TRACE"
             || assignment.starts_with("SYNTH_VOICE=")
             || assignment == "PIT0_ONESHOT"
             || assignment == "PIT2_PERIODIC"
@@ -1350,6 +1351,10 @@ fn run_binary(args: &[String]) {
     if args[6..].iter().any(|a| a == "NONRAM_BULK_TRACE") {
         bus.nonram_bulk_trace_enabled = true;
         println!("diagnostic: non-RAM bulk I/O trace enabled (minimum 1024 bytes)");
+    }
+    if args[6..].iter().any(|a| a == "FLEXBUS_TRACE") {
+        bus.flexbus_trace_enabled = true;
+        println!("diagnostic: full FlexBus window trace enabled");
     }
     for seed in args[6..]
         .iter()
@@ -1739,6 +1744,7 @@ fn run_binary(args: &[String]) {
     bus.print_watched_reads();
     bus.print_firmware_write_trace();
     bus.print_nonram_bulk_trace();
+    bus.print_flexbus_trace();
     bus.print_sample_access_trace();
     bus.print_register_trace();
     bus.print_instruction_trace_tail();
@@ -2714,6 +2720,9 @@ struct ProbeBus {
     nonram_bulk_trace_enabled: bool,
     nonram_bulk_transfers: Vec<NonRamBulkTransfer>,
     cpu_nonram_write_run: Option<CpuNonRamWriteRun>,
+    flexbus_trace_enabled: bool,
+    flexbus_trace_count: u64,
+    flexbus_trace: Vec<FlexbusTraceEntry>,
     synth_voice: Option<(u32, u32)>,
     synth_pos: Option<u32>,
     dsp_link_blocks: u32,
@@ -2819,6 +2828,7 @@ const MAX_CONVERSION_TRACE_EVENTS: usize = 4096;
 const PIT1_PCSR: u32 = 0xFC08_4000;
 const NONRAM_BULK_TRACE_MIN_BYTES: u64 = 1024;
 const NONRAM_BULK_TRACE_PREFIX_BYTES: usize = 16;
+const FLEXBUS_TRACE_RANGE: (u32, u32) = (0x8C00_0000, 0x8D00_0000);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AccessSource {
@@ -2847,6 +2857,17 @@ struct RgpioTraceEntry {
     pc: u32,
     event: AccessEvent,
     sp: u32,
+    repeats: usize,
+}
+
+struct FlexbusTraceEntry {
+    instruction: usize,
+    pc: u32,
+    address: u32,
+    width_bits: u8,
+    write: bool,
+    value: Option<u32>,
+    unmapped: bool,
     repeats: usize,
 }
 
@@ -3241,6 +3262,9 @@ impl ProbeBus {
             nonram_bulk_trace_enabled: false,
             nonram_bulk_transfers: Vec::new(),
             cpu_nonram_write_run: None,
+            flexbus_trace_enabled: false,
+            flexbus_trace_count: 0,
+            flexbus_trace: Vec::new(),
             synth_voice: None,
             synth_pos: None,
             dsp_link_blocks: 0,
@@ -4049,6 +4073,47 @@ impl ProbeBus {
         }
     }
 
+    fn record_flexbus_access(
+        &mut self,
+        address: u32,
+        width_bits: u8,
+        write: bool,
+        value: Option<u32>,
+        unmapped: bool,
+    ) {
+        if !self.flexbus_trace_enabled {
+            return;
+        }
+        let start = u64::from(address);
+        let end = start + u64::from(width_bits / 8);
+        if start >= u64::from(FLEXBUS_TRACE_RANGE.1) || end <= u64::from(FLEXBUS_TRACE_RANGE.0) {
+            return;
+        }
+        self.flexbus_trace_count = self.flexbus_trace_count.saturating_add(1);
+        let same = self.flexbus_trace.last().is_some_and(|last| {
+            last.pc == self.current_pc
+                && last.address == address
+                && last.width_bits == width_bits
+                && last.write == write
+                && last.value == value
+                && last.unmapped == unmapped
+        });
+        if same {
+            self.flexbus_trace.last_mut().unwrap().repeats += 1;
+        } else {
+            self.flexbus_trace.push(FlexbusTraceEntry {
+                instruction: self.current_instruction_count,
+                pc: self.current_pc,
+                address,
+                width_bits,
+                write,
+                value,
+                unmapped,
+                repeats: 1,
+            });
+        }
+    }
+
     fn record_esdhc_dma_event(
         &mut self,
         channel: u8,
@@ -4315,6 +4380,47 @@ impl ProbeBus {
         }
     }
 
+    fn print_flexbus_trace(&self) {
+        if !self.flexbus_trace_enabled {
+            return;
+        }
+        let mut low_offset_count = 0u64;
+        let mut high_offset_count = 0u64;
+        for entry in &self.flexbus_trace {
+            if entry.address < FLEXBUS_TRACE_RANGE.0 + 0x10 {
+                low_offset_count += entry.repeats as u64;
+            } else {
+                high_offset_count += entry.repeats as u64;
+            }
+        }
+        println!(
+            "FlexBus trace: {} access(es); offset <0x10={} offset >=0x10={}",
+            self.flexbus_trace_count, low_offset_count, high_offset_count
+        );
+        for entry in &self.flexbus_trace {
+            let operation = if entry.write { "write" } else { "read" };
+            let category = if entry.address < FLEXBUS_TRACE_RANGE.0 + 0x10 {
+                "low"
+            } else {
+                "high"
+            };
+            let value = entry.value.map_or_else(
+                || "unavailable".to_owned(),
+                |value| format!("{value:#010x}"),
+            );
+            println!(
+                "  FLEXBUS n={} x{} PC={:#010x} offset={} {operation}{} address={:#010x} value={value}{}",
+                entry.instruction,
+                entry.repeats,
+                entry.pc,
+                category,
+                entry.width_bits,
+                entry.address,
+                if entry.unmapped { " result=unmapped" } else { "" }
+            );
+        }
+    }
+
     fn print_watched_reads(&self) {
         let Some((start, end)) = self.watch_read_range else {
             return;
@@ -4374,13 +4480,17 @@ impl ProbeBus {
             );
             for (trace, stack) in self.register_trace.iter().zip(&self.register_trace_stack) {
                 println!(
-                    "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
+                    "  PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} D4={:#010x} D5={:#010x} D6={:#010x} D7={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
                     trace.pc,
                     trace.sr,
                     trace.d[0],
                     trace.d[1],
                     trace.d[2],
                     trace.d[3],
+                    trace.d[4],
+                    trace.d[5],
+                    trace.d[6],
+                    trace.d[7],
                     trace.a[0],
                     trace.a[1],
                     trace.a[2],
@@ -4399,13 +4509,17 @@ impl ProbeBus {
         if let (Some((start, end)), Some(trace)) = (self.trace_a0_range, &self.first_a0_range_trace)
         {
             println!(
-            "first snapshot with A0 in {start:#010x}..{end:#010x}: PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
+            "first snapshot with A0 in {start:#010x}..{end:#010x}: PC={:#010x} SR={:#06x} D0={:#010x} D1={:#010x} D2={:#010x} D3={:#010x} D4={:#010x} D5={:#010x} D6={:#010x} D7={:#010x} A0={:#010x} A1={:#010x} A2={:#010x} A3={:#010x} A4={:#010x} A5={:#010x} A6={:#010x} A7={:#010x}",
                 trace.pc,
                 trace.sr,
                 trace.d[0],
                 trace.d[1],
                 trace.d[2],
                 trace.d[3],
+                trace.d[4],
+                trace.d[5],
+                trace.d[6],
+                trace.d[7],
                 trace.a[0],
                 trace.a[1],
                 trace.a[2],
@@ -6858,15 +6972,27 @@ impl Bus for ProbeBus {
 
     fn read8(&mut self, address: u32) -> Result<u8, BusError> {
         if self.in_fast_ram(address, 1) {
-            return self.ram.read8(address);
+            let value = self.ram.read8(address)?;
+            self.record_flexbus_access(address, 8, false, Some(u32::from(value)), false);
+            return Ok(value);
         }
         if self.in_fast_sram(address, 1) {
-            return self.sram_overlay.as_mut().unwrap().read8(address);
+            let value = self.sram_overlay.as_mut().unwrap().read8(address)?;
+            self.record_flexbus_access(address, 8, false, Some(u32::from(value)), false);
+            return Ok(value);
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 1);
-        match self.read8_inner(address) {
+        let result = self.read8_inner(address);
+        self.record_flexbus_access(
+            address,
+            8,
+            false,
+            result.as_ref().ok().copied().map(u32::from),
+            result.is_err(),
+        );
+        match result {
             Ok(value) => {
                 self.record_sample_access(
                     SampleAccessActor::Cpu,
@@ -6896,15 +7022,27 @@ impl Bus for ProbeBus {
 
     fn read16(&mut self, address: u32) -> Result<u16, BusError> {
         if self.in_fast_ram(address, 2) {
-            return self.ram.read16(address);
+            let value = self.ram.read16(address)?;
+            self.record_flexbus_access(address, 16, false, Some(u32::from(value)), false);
+            return Ok(value);
         }
         if self.in_fast_sram(address, 2) {
-            return self.sram_overlay.as_mut().unwrap().read16(address);
+            let value = self.sram_overlay.as_mut().unwrap().read16(address)?;
+            self.record_flexbus_access(address, 16, false, Some(u32::from(value)), false);
+            return Ok(value);
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 2);
-        match self.read16_inner(address) {
+        let result = self.read16_inner(address);
+        self.record_flexbus_access(
+            address,
+            16,
+            false,
+            result.as_ref().ok().copied().map(u32::from),
+            result.is_err(),
+        );
+        match result {
             Ok(value) => {
                 self.record_sample_access(
                     SampleAccessActor::Cpu,
@@ -6931,15 +7069,27 @@ impl Bus for ProbeBus {
 
     fn read32(&mut self, address: u32) -> Result<u32, BusError> {
         if self.in_fast_ram(address, 4) {
-            return self.ram.read32(address);
+            let value = self.ram.read32(address)?;
+            self.record_flexbus_access(address, 32, false, Some(value), false);
+            return Ok(value);
         }
         if self.in_fast_sram(address, 4) {
-            return self.sram_overlay.as_mut().unwrap().read32(address);
+            let value = self.sram_overlay.as_mut().unwrap().read32(address)?;
+            self.record_flexbus_access(address, 32, false, Some(value), false);
+            return Ok(value);
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 4);
-        match self.read32_inner(address) {
+        let result = self.read32_inner(address);
+        self.record_flexbus_access(
+            address,
+            32,
+            false,
+            result.as_ref().ok().copied(),
+            result.is_err(),
+        );
+        match result {
             Ok(value) => {
                 self.record_sample_access(SampleAccessActor::Cpu, address, 4, false, value);
                 self.record_watched_read(address, 4, value);
@@ -6964,19 +7114,23 @@ impl Bus for ProbeBus {
             self.ram.write8(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
             self.record_nonram_cpu_write(address, 1, u32::from(value));
+            self.record_flexbus_access(address, 8, true, Some(u32::from(value)), false);
             return Ok(());
         }
         if self.in_fast_sram(address, 1) {
             self.sram_overlay.as_mut().unwrap().write8(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
             self.record_nonram_cpu_write(address, 1, u32::from(value));
+            self.record_flexbus_access(address, 8, true, Some(u32::from(value)), false);
             return Ok(());
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 1);
         let old = self.watched_old_bytes(address, 1)?;
-        self.write8_inner(address, value)?;
+        let result = self.write8_inner(address, value);
+        self.record_flexbus_access(address, 8, true, Some(u32::from(value)), result.is_err());
+        result?;
         self.record_firmware_write(FirmwareWriteActor::Cpu, address, 8, u32::from(value));
         self.record_nonram_cpu_write(address, 1, u32::from(value));
         self.record_sample_access(SampleAccessActor::Cpu, address, 1, true, u32::from(value));
@@ -7002,6 +7156,7 @@ impl Bus for ProbeBus {
             self.ram.write16(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
             self.record_nonram_cpu_write(address, 2, u32::from(value));
+            self.record_flexbus_access(address, 16, true, Some(u32::from(value)), false);
             return Ok(());
         }
         if self.in_fast_sram(address, 2) {
@@ -7011,13 +7166,16 @@ impl Bus for ProbeBus {
                 .write16(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
             self.record_nonram_cpu_write(address, 2, u32::from(value));
+            self.record_flexbus_access(address, 16, true, Some(u32::from(value)), false);
             return Ok(());
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 2);
         let old = self.watched_old_bytes(address, 2)?;
-        self.write16_inner(address, value)?;
+        let result = self.write16_inner(address, value);
+        self.record_flexbus_access(address, 16, true, Some(u32::from(value)), result.is_err());
+        result?;
         self.record_firmware_write(FirmwareWriteActor::Cpu, address, 16, u32::from(value));
         self.record_nonram_cpu_write(address, 2, u32::from(value));
         self.record_sample_access(SampleAccessActor::Cpu, address, 2, true, u32::from(value));
@@ -7040,6 +7198,7 @@ impl Bus for ProbeBus {
             self.ram.write32(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
             self.record_nonram_cpu_write(address, 4, value);
+            self.record_flexbus_access(address, 32, true, Some(value), false);
             return Ok(());
         }
         if self.in_fast_sram(address, 4) {
@@ -7049,13 +7208,16 @@ impl Bus for ProbeBus {
                 .write32(address, value)?;
             self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
             self.record_nonram_cpu_write(address, 4, value);
+            self.record_flexbus_access(address, 32, true, Some(value), false);
             return Ok(());
         }
         self.irq_dirty = true;
         self.flush_timers();
         let source = self.source_for_access(address, 4);
         let old = self.watched_old_bytes(address, 4)?;
-        self.write32_inner(address, value)?;
+        let result = self.write32_inner(address, value);
+        self.record_flexbus_access(address, 32, true, Some(value), result.is_err());
+        result?;
         self.record_firmware_write(FirmwareWriteActor::Cpu, address, 32, value);
         self.record_nonram_cpu_write(address, 4, value);
         self.record_sample_access(SampleAccessActor::Cpu, address, 4, true, value);
