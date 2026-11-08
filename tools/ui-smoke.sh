@@ -82,4 +82,10 @@ run_input fltr 2004,2000
 check_sha256 "$OUT/fltr-frame-input-000-final.png" \
   754122aa73411057148ae3c8dfc78eb5f8f9a15243310dcd1544e831d43fbfb8
 
-echo "UI SMOKE PASS"
+# Load and trigger the sample through the opt-in modeled DSP, then check the
+# deterministic WAV hash and exact sample segment in the companion runner.
+tools/modeled-dsp-sample.sh "$BIN"
+check_sha256 out/modeled-dsp/sample.wav \
+  7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200
+
+echo "UI + MODELED DSP SMOKE PASS"

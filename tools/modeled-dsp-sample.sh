@@ -5,6 +5,7 @@ cd "$(dirname "$0")/.."
 BIN=${1:-target/release/dt2-cli}
 OUT=out/modeled-dsp
 LIMIT=300000000
+EXPECTED_WAV_SHA256=7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200
 required=(
   out/section3-pre-entry-image.bin
   out/section3-panel-discovery-pre-entry-ddr.bin
@@ -59,7 +60,7 @@ grep -q '12 RGPIO upload call(s)' "$OUT/run.log" || {
   exit 1
 }
 
-python3 - "$OUT" <<'PY'
+python3 - "$OUT" "$EXPECTED_WAV_SHA256" <<'PY'
 import hashlib
 import re
 import struct
@@ -68,6 +69,7 @@ import wave
 from pathlib import Path
 
 out = Path(sys.argv[1])
+expected_sha256 = sys.argv[2]
 log = (out / "run.log").read_text(encoding="utf-8", errors="replace")
 uploads = re.findall(
     r"^MODELED_DSP RGPIO call=(\d+) prefix=([0-9a-f]{8}) (header|page=(\d+))",
@@ -120,9 +122,13 @@ if not any(actual) or not any(segment):
     raise SystemExit("WAV or played sample segment is all zero")
 if list(segment) != expected:
     raise SystemExit("played WAV segment does not exactly match the loaded sample waveform")
+wav_sha256 = hashlib.sha256((out / "sample.wav").read_bytes()).hexdigest()
+if wav_sha256 != expected_sha256:
+    raise SystemExit(f"WAV SHA-256 differs: expected {expected_sha256}, got {wav_sha256}")
 
 print(
     f"PASS modeled DSP: {len(expected)} exact sample frames at WAV frame {start}; "
-    f"trigger instruction={instruction}; waveform SHA-256={hashlib.sha256(source).hexdigest()}"
+    f"trigger instruction={instruction}; WAV SHA-256={wav_sha256}; "
+    f"waveform SHA-256={hashlib.sha256(source).hexdigest()}"
 )
 PY
