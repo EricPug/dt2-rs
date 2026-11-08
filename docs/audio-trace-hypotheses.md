@@ -23,6 +23,24 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 | Physical DSP receives and consumes the confirmed RGPIO pages | Unresolved | Firmware serializes the sample pages to RGPIO, but the emulator has no physical DSP peer. The per-block DSPI2 stream has no sample address, and the OS 1.17 SHARC loader contains no literal `0x40605770`/adjacent address or recognizable voice/sample descriptor table. Computed or relocated addresses and DSP-side consumption remain possible; the modeled WAV is not physical-device evidence. |
 | `SYNTH_VOICE` output demonstrates firmware playback | Rejected as progress evidence | It injects sample bytes directly into the SSI TX source and creates nonzero output, but does not exercise the firmware's handoff. Keep it diagnostic-only; the trigger/play SSI capture remains zero. |
 
+### Candidate DSPI2 slot/state field (inconclusive)
+
+TX data offset `0xe0` is copied into the channel-29 PUSHR buffer at
+`0x80001d82` by PC `0x400cd564`, from the SRAM word at `0x80005428`. In the
+clap-to-Track-01 run, that source word was repeatedly updated by PC
+`0x401363a4` and advanced from `0x0007` to `0x012c`; the transmit-frame writes
+read the same changing values. The Track-01 kick and clap traces both reached
+`0x012c`, while the clap-to-Track-02 trace remained at `0x0007`.
+
+This is a real per-run state difference, but its meaning is not established:
+the source producer's caller and the field's relationship to a track/sample
+assignment are unresolved, and both RGPIO sample headers still contain slot
+`300`. Do not treat `0xe0` as a confirmed selector or use it for modeled
+per-track routing yet. Logs: `out/modeled-dsp/clap-track1-slot-watch-word.log`,
+`out/modeled-dsp/clap-track1-source-watch.log`,
+`out/modeled-dsp/clap-track1-source-read.log`, and
+`out/modeled-dsp/clap-track2-loaded.log`.
+
 ## OS 1.17 FlexBus/RGPIO and helper trace
 
 The Digiemu OS 1.15C/1.16 report is a useful lead, but its `0x8c000000`
