@@ -49,7 +49,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE EDMA_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address WATCH_READ=address|start:end WRITE_TRACE=start:end TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE EDMA_TRACE DSP_LINK_REPLY=word PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address WATCH_READ=address|start:end WRITE_TRACE=start:end TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -409,7 +409,7 @@ fn uart_records_bitmap_ppm(bytes: &[u8]) -> Result<Vec<u8>, String> {
 
 fn run_binary(args: &[String]) {
     if args.len() < 6 {
-        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE EDMA_TRACE PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value WRITE_TRACE=start:end TRACE_TAIL=n ...]");
+        eprintln!("usage: dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_TRACE EDMA_TRACE DSP_LINK DSP_LINK_REPLY=word PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value WRITE_TRACE=start:end TRACE_TAIL=n ...]");
         eprintln!("SSI_TX_RAW=<path> captures channel-50 SSI TX DMA bytes");
         std::process::exit(2);
     }
@@ -491,6 +491,20 @@ fn run_binary(args: &[String]) {
     let dspi2_bootstrap = args[6..]
         .iter()
         .any(|assignment| assignment == "DSPI2_BOOTSTRAP");
+    let dsp_link_reply = args[6..]
+        .iter()
+        .find_map(|assignment| assignment.strip_prefix("DSP_LINK_REPLY="))
+        .map(|value| {
+            let parsed = parse_address(value).unwrap_or_else(|error| {
+                eprintln!("invalid DSP_LINK_REPLY value: {error}");
+                std::process::exit(2)
+            });
+            u16::try_from(parsed).unwrap_or_else(|_| {
+                eprintln!("invalid DSP_LINK_REPLY value: expected a 16-bit word");
+                std::process::exit(2)
+            })
+        })
+        .unwrap_or(0xFFFF);
     let esdhc_file = args[6..]
         .iter()
         .find_map(|assignment| assignment.strip_prefix("ESDHC_FILE="))
@@ -1110,6 +1124,7 @@ fn run_binary(args: &[String]) {
             || assignment == "DSPI1_BOOTSTRAP"
             || assignment == "DSPI2_BOOTSTRAP"
             || assignment == "DSP_LINK"
+            || assignment.starts_with("DSP_LINK_REPLY=")
             || assignment == "EDMA_TRACE"
             || assignment.starts_with("SYNTH_VOICE=")
             || assignment == "PIT0_ONESHOT"
@@ -1318,7 +1333,14 @@ fn run_binary(args: &[String]) {
         // The firmware only starts a DSP exchange once the previous one reported EOQF.
         dspi2.set_eoq_flag();
         bus.dsp_link = true;
-        println!("diagnostic: DSP link (DSPI2 + eDMA 28/29) enabled");
+        bus.dsp_link_reply = dsp_link_reply;
+        println!(
+            "diagnostic: DSP link (DSPI2 + eDMA 28/29), reply={:#06x}",
+            bus.dsp_link_reply
+        );
+    } else if args[6..].iter().any(|a| a.starts_with("DSP_LINK_REPLY=")) {
+        eprintln!("DSP_LINK_REPLY requires DSP_LINK");
+        std::process::exit(2);
     }
     if args[6..].iter().any(|a| a == "EDMA_TRACE") {
         bus.edma_trace_enabled = true;
@@ -2680,6 +2702,7 @@ struct ProbeBus {
     trace_pc_range: Option<(u32, u32)>,
     synthetic_mcf_mmio: bool,
     dsp_link: bool,
+    dsp_link_reply: u16,
     edma_trace_enabled: bool,
     synth_voice: Option<(u32, u32)>,
     synth_pos: Option<u32>,
@@ -3173,6 +3196,7 @@ impl ProbeBus {
             trace_pc_range: None,
             synthetic_mcf_mmio: false,
             dsp_link: false,
+            dsp_link_reply: 0xFFFF,
             edma_trace_enabled: false,
             synth_voice: None,
             synth_pos: None,
@@ -5160,7 +5184,7 @@ impl ProbeBus {
     }
 
     // Diagnostic DSP link: ch29 feeds DSPI2 PUSHR, ch28 drains POPR. Each block is traced and then
-    // completes with EOQF set and 0xffff replies (no DSP model).
+    // completes with EOQF set and the selected placeholder reply (no DSP model).
     fn run_dsp_link_channel(&mut self, channel: u8) -> Result<(), BusError> {
         let base = 0xFC04_5000 + 0x20 * u32::from(channel);
         let source = self.tcd_value(base, 4);
@@ -5199,8 +5223,13 @@ impl ProbeBus {
         } else {
             for offset in (0..total).step_by(2) {
                 let address = destination.wrapping_add(offset);
-                self.write16_inner(address, 0xFFFF)?;
-                self.record_firmware_write(FirmwareWriteActor::Dma(channel), address, 16, 0xFFFF);
+                self.write16_inner(address, self.dsp_link_reply)?;
+                self.record_firmware_write(
+                    FirmwareWriteActor::Dma(channel),
+                    address,
+                    16,
+                    u32::from(self.dsp_link_reply),
+                );
                 self.record_sample_access(
                     SampleAccessActor::Dma {
                         channel,
@@ -5209,7 +5238,7 @@ impl ProbeBus {
                     address,
                     2,
                     true,
-                    0xFFFF,
+                    u32::from(self.dsp_link_reply),
                 );
             }
         }
@@ -7254,6 +7283,28 @@ mod tests {
         assert_eq!(write.address, 0x1010);
         assert_eq!(write.width_bits, 16);
         assert_eq!(write.value, 0x1234);
+    }
+
+    #[test]
+    fn dsp_link_reply_value_is_written_to_the_modeled_rx_buffer() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x8000_1000, 0x100));
+        bus.dsp_link_reply = 0;
+        let tcd = 0xFC04_5000 + 0x20 * 28;
+        for (offset, value, width) in [
+            (0x08_u32, 2_u32, 4_u32),
+            (0x10, 0x8000_1000, 4),
+            (0x14, 1, 2),
+        ] {
+            let bytes = value.to_be_bytes();
+            for index in 0..width {
+                bus.edma_tcd
+                    .insert(tcd + offset + index, bytes[(4 - width + index) as usize]);
+            }
+        }
+
+        bus.run_dsp_link_channel(28).unwrap();
+
+        assert_eq!(bus.ram.read16(0x8000_1000).unwrap(), 0);
     }
 
     #[test]

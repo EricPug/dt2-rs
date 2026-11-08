@@ -69,6 +69,10 @@ current TCB, mapped task entry, registers, and raw TCB/live/saved stack words.
 `WRITE_TRACE=start:end` records CPU bus writes and modeled eDMA destination writes
 for the half-open instruction-offset window relative to the restored snapshot (or
 run start), including actor, PC, width, address, and value.
+`DSP_LINK` opens the diagnostic DSPI2/eDMA 28/29 exchange; its channel-28 reply
+defaults to `0xffff`. `DSP_LINK_REPLY=word` selects another 16-bit placeholder
+reply (for example, `DSP_LINK_REPLY=0x0000`) and requires `DSP_LINK`. This does not
+model a DSP or establish physical-device behavior.
 `CONVERT_TRACE` records the conversion output index and the outer CMP/BGT flags
 and branch result around `0x401811d2`.
 Run logs list DSPI0/DSPI1 PUSHR words first, with instruction count, PC, PCS mask,
