@@ -31,7 +31,7 @@ fi
 mkdir -p "$OUT"
 
 run_trace() {
-  local name=$1 snapshot=$2 limit=$3 messages=$4 raw_capture=${5:-} watch_range=${6:-} trace_pc=${7:-}
+  local name=$1 snapshot=$2 limit=$3 messages=$4 raw_capture=${5:-} watch_range=${6:-} trace_pc=${7:-} read_range=${8:-}
   local -a options=(
     RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=out/run-card.img
     INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP
@@ -49,6 +49,9 @@ run_trace() {
   fi
   if [[ -n "$trace_pc" ]]; then
     options+=("TRACE_REGS=$trace_pc")
+  fi
+  if [[ -n "$read_range" ]]; then
+    options+=("WATCH_READ=$read_range")
   fi
   tools/run-section3.sh "$BIN" "$limit" \
     "${options[@]}" \
@@ -87,6 +90,9 @@ grep -q '^EDMA_TRACE request channel=28 .*NBYTES=0x00000002 .*DADDR=0x80001000 .
   "$OUT/sample-load.log"
 grep -q '^DSP_LINK block 0 len=5496 8001 ' "$OUT/sample-load.log"
 echo "PASS sample-load DSPI2 frames=1374 RX_bytes=2748 PUSHR_source_bytes=5496"
+grep -q '^RGPIO trace: 135300 events, showing first 32' "$OUT/sample-load.log"
+grep -q 'read16 0x8c000002' "$OUT/sample-load.log"
+grep -q 'write16 0x8c00000a' "$OUT/sample-load.log"
 grep -q 'write watch at 0x43176a30..0x43176a40:' "$OUT/sample-load.log"
 grep -q 'PC=0x40033160 address=0x43176a3c .*new=0000012c' \
   "$OUT/sample-load.log"
@@ -98,6 +104,17 @@ grep -q '^register trace at PC=0x4003314e: [1-9][0-9]* hit(s)' \
   "$OUT/sample-load.log"
 grep -q 'stack(A7)=\[4019fc7e, 0000012c, 4525722c' \
   "$OUT/sample-load.log"
+
+run_trace sample-load-buffer out/shots/action-down.snap 200000000 \
+  2104,2100,2104,2100,2104,2100,2104,2100,2102,2100,-,-,-,-,2102,2100 \
+  "" 0x4fe79340:0x4fe79640 "" 0x4fe79340:0x4fe79640
+check_requests sample-load-buffer 14 1
+check_requests sample-load-buffer 15 1
+grep -q '^write watch at 0x4fe79340..0x4fe79640: 0 matching writes' \
+  "$OUT/sample-load-buffer.log"
+grep -q '^read watch at 0x4fe79340..0x4fe79640: 0 matching reads' \
+  "$OUT/sample-load-buffer.log"
+grep -Eq '^  initial=0+$' "$OUT/sample-load-buffer.log"
 
 run_trace trig-play out/shots/main-after-load.snap 100000000 \
   2301,2300,2208,2200 "$OUT/trig-play.ssi.raw"

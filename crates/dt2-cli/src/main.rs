@@ -49,7 +49,7 @@ fn main() {
 
     let path = args.first().unwrap_or_else(|| {
         eprintln!("usage: dt2-cli <firmware.syx> [outdir]");
-        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE EDMA_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
+        eprintln!("       dt2-cli run-bin <image.bin> <ram-base> <ram-size> <image-address> <entry-pc|SBF_RESET_VECTOR> <instruction-limit> [MCF5441X_SRAM|MCF5441X_SBF_BOOT MCF5441X_SRAM_OVERLAY DDR_BOOTSTRAP PIT_BOOTSTRAP PIT_FIRST_TICK_DELAY=n INTC2_BOOTSTRAP DTIM1_BOOTSTRAP DTIM1_TICKS_PER_INSTRUCTION=n DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=n DSPI1_BOOTSTRAP DSPI2_BOOTSTRAP ESDHC_EMMC ESDHC_FILE=path ESDHC_TRACE EDMA_TRACE PIT0_ONESHOT PIT2_PERIODIC PIT_TICKS_PER_INSTRUCTION=n LOOP_DETECT SCHED_TRACE CONVERT_TRACE STOP_PC=pc INJECT_IRQ=count:level:vector UART8_TX UART8_TX_READY UART8_RX=hex PANEL_STUB SYNTHETIC_MCF_MMIO INSPECT_TRAP0 DUMP_RAM=address:length DUMP_RAM_FILE=address:length:path WATCH_WRITE=address WATCH_READ=address|start:end TRACE_REGS=pc TRACE_TAIL=n TRACE_PC_RANGE=start:end TRACE_A0_RANGE=start:end RAM_REMAP=from:to:length RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end D0=value A0=value SR=value RAM32@address=value MMIO8@address=value MMIO16@address=value MMIO32@address=value ...]");
         eprintln!("       dt2-cli render-pattern <output.ppm>");
         eprintln!("       dt2-cli build-flash <firmware.syx> <output.bin> [container-offset]");
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
@@ -546,6 +546,30 @@ fn run_binary(args: &[String]) {
             (start, end)
         })
     });
+    let watch_read_range = args[6..].iter().find_map(|assignment| {
+        assignment.strip_prefix("WATCH_READ=").map(|spec| {
+            let parsed = (|| -> Result<(u32, u32), String> {
+                if let Some((start, end)) = spec.split_once(':') {
+                    Ok((parse_address(start)?, parse_address(end)?))
+                } else {
+                    let start = parse_address(spec)?;
+                    start
+                        .checked_add(1)
+                        .map(|end| (start, end))
+                        .ok_or_else(|| format!("WATCH_READ address overflows: {start:#010x}"))
+                }
+            })();
+            let (start, end) = parsed.unwrap_or_else(|error| {
+                eprintln!("invalid WATCH_READ range: {error}");
+                std::process::exit(2)
+            });
+            if start >= end {
+                eprintln!("invalid WATCH_READ range: start must be less than exclusive end");
+                std::process::exit(2)
+            }
+            (start, end)
+        })
+    });
     let trace_register_pc = args[6..].iter().find_map(|assignment| {
         assignment.strip_prefix("TRACE_REGS=").map(|pc| {
             parse_address(pc).unwrap_or_else(|error| {
@@ -923,6 +947,9 @@ fn run_binary(args: &[String]) {
     if let Some(range) = watch_write_range {
         bus.watch_write_range(range);
     }
+    if let Some(range) = watch_read_range {
+        bus.watch_read_range(range);
+    }
     if let Some(pc) = trace_register_pc {
         bus.trace_registers_at(pc);
     }
@@ -1066,6 +1093,7 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("DUMP_CALL=")
             || assignment.starts_with("STOP_PC=")
             || assignment.starts_with("WATCH_WRITE=")
+            || assignment.starts_with("WATCH_READ=")
             || assignment.starts_with("TRACE_REGS=")
             || assignment.starts_with("STATE_HASH=")
             || assignment == "DECODE_CACHE=off"
@@ -1628,6 +1656,7 @@ fn run_binary(args: &[String]) {
         println!("eSDHC backing image: {path} (raw 4 GiB, sparse; synthetic card semantics)");
     }
     bus.print_watched_writes();
+    bus.print_watched_reads();
     bus.print_register_trace();
     bus.print_instruction_trace_tail();
     bus.print_scheduler_trace();
@@ -2569,6 +2598,9 @@ struct ProbeBus {
     watched_writes: VecDeque<WatchedWrite>,
     watched_initial_bytes: Option<Vec<u8>>,
     watched_completion_tail: Option<(usize, Vec<u8>)>,
+    watch_read_range: Option<(u32, u32)>,
+    watched_read_count: usize,
+    watched_reads: VecDeque<WatchedRead>,
     trace_register_pc: Option<u32>,
     register_trace_count: usize,
     register_trace: VecDeque<RegisterTrace>,
@@ -2686,6 +2718,7 @@ const MAX_LOOP_TRACKED_PCS: usize = 4096;
 const MAX_LOOP_HISTORY: usize = 4096;
 const MAX_RTE_HISTORY: usize = 16;
 const MAX_WATCHED_WRITES: usize = 16_384;
+const MAX_WATCHED_READS: usize = 16_384;
 const MAX_REGISTER_TRACE: usize = 192;
 const REGISTER_TRACE_STACK_WORDS: usize = 12;
 const MAX_SCHED_TRACE_EVENTS: usize = 1024;
@@ -2874,6 +2907,14 @@ struct WatchedWrite {
     sr: u16,
 }
 
+struct WatchedRead {
+    instruction_count: usize,
+    pc: u32,
+    address: u32,
+    width_bits: u8,
+    value: u32,
+}
+
 struct RegisterTrace {
     instruction_count: usize,
     pc: u32,
@@ -3014,6 +3055,9 @@ impl ProbeBus {
             watched_writes: VecDeque::new(),
             watched_initial_bytes: None,
             watched_completion_tail: None,
+            watch_read_range: None,
+            watched_read_count: 0,
+            watched_reads: VecDeque::new(),
             trace_register_pc: None,
             register_trace_count: 0,
             register_trace: VecDeque::new(),
@@ -3073,6 +3117,10 @@ impl ProbeBus {
 
     fn watch_write_range(&mut self, range: (u32, u32)) {
         self.watch_write_range = Some(range);
+    }
+
+    fn watch_read_range(&mut self, range: (u32, u32)) {
+        self.watch_read_range = Some(range);
     }
 
     fn watched_memory_byte(&mut self, address: u32) -> Result<u8, BusError> {
@@ -3292,6 +3340,27 @@ impl ProbeBus {
         }
     }
 
+    fn record_watched_read(&mut self, address: u32, width_bytes: u8, value: u32) {
+        let Some((watch_start, watch_end)) = self.watch_read_range else {
+            return;
+        };
+        let read_end = address.saturating_add(u32::from(width_bytes));
+        if address >= watch_end || read_end <= watch_start {
+            return;
+        }
+        self.watched_read_count += 1;
+        if self.watched_reads.len() == MAX_WATCHED_READS {
+            self.watched_reads.pop_front();
+        }
+        self.watched_reads.push_back(WatchedRead {
+            instruction_count: self.current_instruction_count,
+            pc: self.current_pc,
+            address,
+            width_bits: width_bytes * 8,
+            value,
+        });
+    }
+
     fn enable_synthetic_mcf_mmio(&mut self) {
         self.synthetic_mcf_mmio = true;
     }
@@ -3346,6 +3415,8 @@ impl ProbeBus {
             Some("RAM_SNAPSHOT active")
         } else if self.watch_write_range.is_some() {
             Some("WATCH_WRITE active")
+        } else if self.watch_read_range.is_some() {
+            Some("WATCH_READ active")
         } else if self.synth_voice.is_some() {
             Some("SYNTH_VOICE active")
         } else if self.loop_detection {
@@ -3839,6 +3910,23 @@ impl ProbeBus {
             println!(
                 "  first write reaching range end at instruction={instruction_count}: tail64={}",
                 hex_bytes(bytes)
+            );
+        }
+    }
+
+    fn print_watched_reads(&self) {
+        let Some((start, end)) = self.watch_read_range else {
+            return;
+        };
+        println!(
+            "read watch at {start:#010x}..{end:#010x}: {} matching reads (showing most recent {})",
+            self.watched_read_count,
+            self.watched_reads.len()
+        );
+        for read in &self.watched_reads {
+            println!(
+                "  read{} instruction={} PC={:#010x} address={:#010x} value={:#010x}",
+                read.width_bits, read.instruction_count, read.pc, read.address, read.value
             );
         }
     }
@@ -6251,6 +6339,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 1);
         match self.read8_inner(address) {
             Ok(value) => {
+                self.record_watched_read(address, 1, u32::from(value));
                 if Uart8::contains(address) {
                     self.record_uart8_event(address, value, false, false, 0);
                 }
@@ -6281,6 +6370,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 2);
         match self.read16_inner(address) {
             Ok(value) => {
+                self.record_watched_read(address, 2, u32::from(value));
                 self.record_dspi_pop(address, 16, u32::from(value));
                 self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
@@ -6308,6 +6398,7 @@ impl Bus for ProbeBus {
         let source = self.source_for_access(address, 4);
         match self.read32_inner(address) {
             Ok(value) => {
+                self.record_watched_read(address, 4, value);
                 self.record_dspi_pop(address, 32, value);
                 self.record_loop_access(address, false);
                 self.record_access(AccessEvent {
@@ -7532,6 +7623,32 @@ mod tests {
         assert_eq!(instruction_count, 1);
         assert_eq!(tail.len(), 0x40);
         assert_eq!(tail[0x3F], 0xA5);
+    }
+
+    #[test]
+    fn read_watch_records_overlapping_cpu_reads_and_disables_fast_ram() {
+        let mut bus = ProbeBus::new(FlatRam::new(0x10000, 0x100));
+        bus.ram.write32(0x10000, 0xAABB_CCDD).unwrap();
+        bus.watch_read_range((0x10002, 0x10005));
+        assert_eq!(
+            bus.enable_fast_ram(0x10000, 0x100),
+            Some("WATCH_READ active")
+        );
+
+        bus.begin_instruction(0x2000);
+        assert_eq!(bus.read32(0x10000).unwrap(), 0xAABB_CCDD);
+        bus.begin_instruction(0x2004);
+        assert_eq!(bus.read16(0x10004).unwrap(), 0);
+
+        assert_eq!(bus.watched_read_count, 2);
+        assert_eq!(bus.watched_reads.len(), 2);
+        assert_eq!(bus.watched_reads[0].pc, 0x2000);
+        assert_eq!(bus.watched_reads[0].instruction_count, 1);
+        assert_eq!(bus.watched_reads[0].address, 0x10000);
+        assert_eq!(bus.watched_reads[0].width_bits, 32);
+        assert_eq!(bus.watched_reads[0].value, 0xAABB_CCDD);
+        assert_eq!(bus.watched_reads[1].address, 0x10004);
+        assert_eq!(bus.watched_reads[1].width_bits, 16);
     }
 
     #[test]
