@@ -12,11 +12,11 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 | Missing SSI worker/service call | Ruled out for the recorded trigger/play run | The active SSI worker is called each block and clears its 2 KiB TX source. With the mode-2 path, its USB-list pointer is null and it skips list processing. This does not explain or rule out sample-voice activation. |
 | Per-block DSPI2 eDMA 28/29 stream carries PCM or the sample address | Ruled out for the observed stream | `DSP_LINK` captured a 5,496-byte source block of 1,374 32-bit PUSHR entries; each entry carries a tag/control halfword and one transmitted data halfword. The receive TCD reads 1,374 16-bit words (2,748 bytes). Values change at key events, but no sample address or sample-data n-gram appears in trigger/play or sample-load captures. A version-labeled Digiemu analysis independently identifies the same 1,374-frame / 2,748-byte full-duplex DSPI2 exchange. This is a parameter/state path; direct shared-memory reads are not excluded. |
 | Fixed DSPI2 RX reply gates sample playback | No requested behavior change observed | Channel 28 writes 1,374 reply halfwords to `0x80001000`; caller `0x400cd448` copies `0xabc` bytes to `0x8000488c` through helper `0x40136388`. The helper reads/writes 16-byte chunks at `0x4013639e`/`0x401363a4`, with a length-driven loop at `0x401363ac`. The copied values are subsequently read at `0x4002f0e6` (eight halfwords at `0x80005328..0x80005336`) and `0x4002f10e` (`0x800048a2`). The scan loop at `0x4002f0f0` is index-driven. The `TST.L D0` at `0x4002f126` saw the same D0 sequence (0, 1 alternating) for both replies; the following `BGE` at `0x4002f128` therefore takes the same path. Matched 25M-instruction runs with `0xffff` and `0x0000` had 226,398 CPU writes each and 249 DSPI2 blocks each (10 channel-28 reply blocks in offsets 6M..7M); the sample-span watch recorded zero accesses in both. SSI captures were both 509,952 zero bytes with identical SHA-256 `53f1414830fecff40fcea5e308a74d60e2c6b655c469d16992fa5d0ae4797fd6`. The word values do change in the copied SRAM, but CPU write volume, DSPI2 block count, sample access, and SSI output do not. This only tests the emulator's synthetic reply path, not physical DSP behavior. Logs: `out/dspi2-reply-experiment/ffff.log`, `out/dspi2-reply-experiment/0000.log`, and the matched consumer traces. |
-| TRIG/PLAY input is dead before the audio handoff | Ruled out for trigger delivery; audio handoff unresolved | Matched idle and TRIG/PLAY runs from `main-after-load.snap` traced the same 1,000,000-instruction window after the TRIG packet. The input arrived by UART8 DMA; the triggered window had 20,315 CPU writes, 2 UART RX DMA writes, and two DSPI2 blocks, while idle had 110 CPU writes and no DSPI2 blocks. After subtracting the identical 21,120 synthetic SSI channel-50 writes, trigger-added writes were the sequencer/UI activity plus two channel-28 receive blocks (2,748 words). The two DSPI2 data payloads changed from the prior idle block only at counter halfword indices 270 and 462. Neither payload contains `0x4060`, `0x5770`, `0x8000`, `0xd770`, or `0xd776`; `0x012c`, `0x0006`, and six `0001 0000` pairs occur unchanged in the prior idle payload. These are not evidence of a sample address, sample offset, or trigger-dependent length. `DSP_LINK` supplies fixed `0xffff` replies, so this confirms firmware activity in the diagnostic path, not physical DSP behavior or audible playback. Logs: `out/trigger-window-experiment/idle.log` and `out/trigger-window-experiment/trig-play.log`. |
+| TRIG/PLAY input is dead before the audio handoff | Ruled out for trigger delivery; audio handoff unresolved | The matched 1,000,000-instruction window immediately after TRIG had 20,315 CPU writes, 2 UART RX DMA writes, and two DSPI2 blocks; idle had 110 CPU writes and no DSPI2 blocks. In that narrow window, the two DSPI2 payloads differed from the prior idle block at counter halfword indices 270 and 462. This does not characterize the longer trigger state: the 999-block comparison later found note-dependent fields at TX data offsets `0x02`/`0x06` (see below), superseding any broader “only counters change” conclusion. Neither immediate payload contained the searched sample address/offset values, and `DSP_LINK` still supplies fixed `0xffff` replies. This confirms firmware activity in the diagnostic path, not physical DSP behavior or audible playback. Logs: `out/trigger-window-experiment/idle.log` and `out/trigger-window-experiment/trig-play.log`. |
 | A separate bulk eDMA transfer carries sample PCM during sample load or trigger/play | No bulk transfer observed in these runs | `EDMA_TRACE` saw channels 14, 15, 28, 29, 35, and 59 during sample load; only 28, 29, and synthetic panel RX channel 35 during trigger/play. Channel 59 performed two 32 KiB eMMC reads into `0x4060d770` and `0x40605770`. Channel 50 SSI TX is scheduled by the emulator's timer diagnostic rather than an observed firmware SERQ request. This only rules out other eDMA request starts in these exact diagnostic runs. |
 | The post-load DSPI1 eDMA 14/15 transfer is sample payload | Ruled out as bulk PCM; role unresolved | It runs once after the eMMC reads. Channel 15 sends 8 framed bytes from `0x4fe7a340` to DSPI1 PUSHR (`8001 0001 0801 012c`); channel 14 is configured for two 16-bit reads. Disassembly traces the request through `0x4003314e` to helper `0x40012562`, which constructs the 4-byte request `0001 012c`: word `0001` is set by the helper, and `012c` is copied from a caller argument. Related OS 1.16 research labels this helper `small` and describes the packet as two big-endian `u16` fields (`kind`, `slot`), suggesting kind 1 / slot 300; the same source warns that the waveform cache had not yet been shown calling this transport. The entry trace shows caller return `0x4019fc7e`, argument `0x012c`, and pointer `0x4525722c`; that caller is in a routine iterating over `0x64400` bytes in `0x191`-byte strides, but its context is not yet identified. The helper passes request length 4 and response length `0x300` to `0x400124a0`, using response buffer `0x4fe79340`; the observed channel-14 transfer reads only two halfwords. Digiemu's older-version notes likewise classify DSPI1 channels 14/15 as short opcode request/reply transactions, probably to a codec. These are useful cross-checks, not proof this exchange is an audio handoff. The watched `0x43176a34` and `0x43176a38` writes are the saved A6 from `LINK` and return address from `JSR`, not additional request fields. |
-| CPU or modeled eDMA reads/writes the loaded sample during trigger/play | No accesses observed in this run | The two channel-59 eMMC transfers wrote adjacent 32 KiB windows spanning `0x40605770..0x40615770`. Replaying trigger/play from the loaded snapshot with an exact span watch produced zero CPU-bus or modeled eDMA accesses. This excludes only the emulator-observable access paths, not an external DSP or other unmodeled hardware reader. |
-| OS 1.17 sample-load traffic through the `0x8c` window is a sample-page transfer | Candidate transfer path observed; payload association unresolved | Sample load makes 135,300 16-bit accesses, all within the RGPIO register window at offsets `0x2` and `0xa`; trigger/play makes none. The active bit-bang routines and their caller are identified below. Their source pointers are in `0x450fxxxx`/`0x450exxxx`, not `0x40605770`; a captured frame includes `0x9c00`, matching the loaded sample byte count, but the contents were not compared. Do not equate this with the 1.15C/1.16 FlexBus map or claim sample delivery without payload evidence. |
+| CPU or modeled eDMA reads/writes the loaded sample during trigger/play | No accesses observed in that trigger/play run; sample-load CPU-read question remains inconclusive | Replaying trigger/play from the loaded snapshot with an exact watch on `0x40605770..0x40615770` produced zero CPU-bus or modeled-eDMA accesses. That watch did not cover sample load, so it says nothing about CPU reads during loading. The separate staging-buffer watch below is not a direct watch of the `0x406...` source span. |
+| OS 1.17 GPIO serial traffic carries sample bytes | Sample bytes confirmed in some serialized payloads; downstream handoff inconclusive | Each of the 12 helper calls emitted a 4,096-byte body after its 4-byte prefix. Call 2 exactly matches the 16-bit-byte-swapped sample dump at offset `0x8000`; call 10 matches the same conversion at offset `0`. Calls 4, 5, and 11 match the 16-bit-byte-swapped `0x450ecc40` buffer at offsets `0x7000`, `0x8000`, and `0x6000`. The other seven bodies have no full-body match among the tested raw, 16-bit, and standard 24-bit/shift variants; their association is inconclusive. This confirms bytes in the GPIO stream, not what an external device does with them. |
 | The DSPI1 response buffer at `0x4fe79340..0x4fe79640` is populated or consumed during sample load | inconclusive | A repeat sample-load run starts with all `0x300` bytes zero and records zero overlapping CPU-bus reads and writes. The channel-14 TCD is configured for two 16-bit reads from DSPI1 POPR into the buffer, but the emulator's synthetic DSPI diagnostic does not execute eDMA channels 14/15. Therefore the empty buffer is evidence about this emulator run, not evidence that real hardware returns no response. |
 | DSP reads the sample directly from shared DDR/FlexBus, or receives a descriptor through another path | Unresolved | The sample bytes are present in ColdFire DDR, while the DSPI2 stream has no sample address. The OS 1.17 SHARC loader contains no literal `0x40605770`/adjacent sample address and no recognizable voice/sample descriptor table was identified by the raw scan. It remains possible that firmware computes or relocates the address, or uses another interface; do not infer a physical bus or peer from the emulated MMIO model. |
 | `SYNTH_VOICE` output demonstrates firmware playback | Rejected as progress evidence | It injects sample bytes directly into the SSI TX source and creates nonzero output, but does not exercise the firmware's handoff. Keep it diagnostic-only; the trigger/play SSI capture remains zero. |
@@ -69,17 +69,120 @@ zero-count is in `out/audio-edma-trace/trig-play.log`. `RGPIO_READY_MODEL`
 synthesizes the pin-ready response, so read values are emulator-model
 responses; the firmware accesses and write values are traced.
 
-The note comparison uses the data-only TX payload offsets `0x02` and `0x06`
+### 1. Reassembled GPIO payloads
+
+The `0x8c000002` write stream contains 12 groups of 8,200 16-bit writes. Each
+byte is strobed twice with the same high byte; taking one high byte from each
+pair reconstructs 4,100 bytes per call: a 4-byte prefix followed by 4,096
+payload bytes. The sample and helper-buffer inputs are the 39,936-byte dumps
+from `0x40605770` and `0x450ecc40`. Exact body matches, after stripping the
+prefix, are:
+
+| Call | Prefix | Exact 4 KiB body match |
+|---:|---|---|
+| 1 | `ffffffff` | No exact match; inconclusive |
+| 2 | `00000000` | 16-bit-byte-swapped sample at `0x40605770 + 0x8000` |
+| 3 | `01000000` | No exact match; inconclusive |
+| 4 | `02000000` | 16-bit-byte-swapped helper buffer at `0x450ecc40 + 0x7000` |
+| 5 | `03000000` | 16-bit-byte-swapped helper buffer at `0x450ecc40 + 0x8000` |
+| 6 | `04000000` | No exact match; inconclusive |
+| 7 | `05000000` | No exact match; inconclusive |
+| 8 | `06000000` | No exact match; inconclusive |
+| 9 | `07000000` | No exact match; inconclusive |
+| 10 | `08000000` | 16-bit-byte-swapped sample at `0x40605770` |
+| 11 | `09000000` | 16-bit-byte-swapped helper buffer at `0x450ecc40 + 0x6000` |
+| 12 | `ffffffff` | No exact match; inconclusive |
+
+The unmatched bodies have no exact 4 KiB match under the tested raw,
+16-bit-byte-swap, or standard 24-bit/shift conversions. Their payload
+association is **inconclusive**; this is not evidence that they contain no
+sample-derived data. The confirmed sample-byte matches show that OS 1.17
+serializes sample data through the RGPIO data register, but the trace does not
+identify the receiving device or prove DSP-side consumption.
+
+### 2. Staging-buffer accesses
+
+The sample-load watch covered the half-open range
+`0x450ecc40..0x450f6840`, including the later `0x450f1c40` staging pages.
+It retained all 15,683 matching CPU accesses (no truncation): 8,982 `read32`
+and 6,701 `write32`; there were no 8- or 16-bit accesses and no eDMA endpoint
+in the range. Let C1 be channel-59 completion to `0x4060d770` at instruction
+8,489,477,206 and C2 completion to `0x40605770` at 8,497,412,556. Each table
+cell is the first-to-last instruction delta from that completion.
+
+| Access site | Address range | Count | Delta from C1 | Delta from C2 |
+|---|---|---:|---:|---:|
+| `read32` at `0x400cd7d0` | `0x450ecc40..0x450f683c` | 8,960 | -870,937..+10,436,471 | -8,806,287..+2,501,121 |
+| `read32` at `0x4013639e` | `0x450f1c40..0x450f1c7c` | 16 | +513,908..+513,926 | -7,421,442..-7,421,424 |
+| `read32` at `0x4011ea7e` | `0x450ecc48..0x450f1c48` | 4 | -871,087..+9,888,124 | -8,806,437..+1,952,774 |
+| `read32` at `0x4011e844` | `0x450edc3c..0x450f1c3c` | 2 | +10,713,261..+11,236,099 | +2,777,911..+3,300,749 |
+| `write32` at `0x401363a4` | `0x450f1c40..0x450f683c` | 6,676 | +236..+8,200,170 | -7,935,114..+264,820 |
+| `write32` at `0x4011e916` | `0x450ecc48..0x450f1c48` | 4 | -10,785..+11,236,128 | -7,946,135..+3,300,778 |
+| `write32` at `0x4011e91e` | `0x450ecc44..0x450f1c44` | 4 | -10,782..+11,236,131 | -7,946,132..+3,300,781 |
+| `write32` at `0x4011e922` | `0x450ecc40..0x450f1c40` | 4 | -10,781..+11,236,132 | -7,946,131..+3,300,782 |
+| `write32` at `0x4011e924` | `0x450edc3c..0x450f1c3c` | 3 | -10,780..+10,713,295 | -7,946,130..+2,777,945 |
+| `write32` at `0x40153e8c` | `0x450ecc40` | 2 | -871,018..+9,888,193 | -8,806,368..+1,952,843 |
+| `write32` at `0x40153e90` | `0x450ecc50` | 2 | -871,017..+9,888,194 | -8,806,367..+1,952,844 |
+| `write32` at `0x40153e96` | `0x450ecc44` | 2 | -871,016..+9,888,195 | -8,806,366..+1,952,845 |
+| `write32` at `0x40153e9a` | `0x450ecc4c` | 2 | -871,015..+9,888,196 | -8,806,365..+1,952,846 |
+| `write32` at `0x40153ea0` | `0x450ecc48` | 2 | -871,014..+9,888,197 | -8,806,364..+1,952,847 |
+
+The bulk copy site `0x401363a4` first writes the watched staging range 236
+instructions after C1 and continues through C2+264,820. In the corresponding
+100M-instruction TRIG/PLAY run, the same staging-range watch recorded zero
+reads and zero writes. That run does not establish whether the CPU reads the
+`0x406...` sample span during loading; it was not watched there. Logs:
+`out/audio-edma-trace/sample-load-watch-ecc.log` and
+`out/audio-edma-trace/trig-play-watch-ecc.log`.
+
+### 3. Dispatcher and high-window behavior
+
+Disassembly of `0x400cd79c` shows a function-pointer dispatcher: it calls
+`0x400ccf04`, tests D2, and branches at `0x400cd7ce`. Nonzero D2 selects the
+supplied function pointer in A2; zero selects `0x400ccf90`. The selected
+routine processes the `0x1000`-byte buffer from A3 in 4-byte steps. This
+condition selects a routine, not a sample-page address range. The dispatcher
+itself does not access `0x8c000010+`; the RGPIO trace contains only offsets
+`0x2` and `0xa`. Whether an unexecuted helper branch can access the higher
+window remains inconclusive.
+
+The emulator routes `0x8c000000..0x8c00000f` to RGPIO. Addresses from
+`0x8c000010` onward are not dropped as unmapped writes: with the MCF SRAM
+overlay active they route through the 64 KiB SRAM alias in
+`0x80000000..0x8fffffff`. No trace touched that alias at `0x8c`, so the
+Digiemu sample-page path at higher offsets remains **untested**, not ruled out.
+
+### 4. Trigger-dependent DSPI2 fields and helper-call timing
+
+The longer 999-block comparison uses data-only TX offsets `0x02` and `0x06`
 (raw PUSHR halfword positions 3 and 7). For trigger `2301`, the pairs are
 `0000/0000` for blocks 0–63, `3c00/0000` for 64–633, and `3c00/2d00` for
 634–998. For trigger `2302`, they are `0000/0000` for 0–645 and
-`0000/2d00` for 646–998. Thus the `0x02` value depends on the selected trigger,
-and `0x2d00` at `0x06` appears after each trigger; their block onset follows
-the input timing. They are distinct from the previously identified
-free-running counter fields at data halfword indices 270 and 462. The
-repeatable comparison is checked by `tools/audio-edma-trace.sh`; logs are
-`out/audio-edma-trace/trig-play.log` and
+`0000/2d00` for 646–998. These are note/track state fields, not the
+free-running counters at data halfword indices 270 and 462. The earlier
+“only two counters change” result applies only to its short immediate window
+and is superseded as a broader description. The comparison is checked by
+`tools/audio-edma-trace.sh`; logs are `out/audio-edma-trace/trig-play.log` and
 `out/audio-edma-trace/trig-play-note2.log`.
+
+The `action-down.snap` snapshot restores the cumulative instruction counter
+at 8,400,000,000, so these call counts are cumulative since boot. Deltas are
+relative to C1 and C2 above.
+
+| Call | Instruction count | Delta from C1 | Delta from C2 |
+|---:|---:|---:|---:|
+| 1 | 8,488,606,197 | -871,009 | -8,806,359 |
+| 2 | 8,489,991,179 | +513,973 | -7,421,377 |
+| 3 | 8,490,804,426 | +1,327,220 | -6,608,130 |
+| 4 | 8,491,664,866 | +2,187,660 | -5,747,690 |
+| 5 | 8,492,489,291 | +3,012,085 | -4,923,265 |
+| 6 | 8,493,312,634 | +3,835,428 | -4,099,922 |
+| 7 | 8,494,397,994 | +4,920,788 | -3,014,562 |
+| 8 | 8,495,497,246 | +6,020,040 | -1,915,310 |
+| 9 | 8,496,584,405 | +7,107,199 | -828,151 |
+| 10 | 8,497,677,495 | +8,200,289 | +264,939 |
+| 11 | 8,498,496,112 | +9,018,906 | +1,083,556 |
+| 12 | 8,499,365,408 | +9,888,202 | +1,952,852 |
 
 ## 32-byte sample signature scan
 
@@ -197,8 +300,10 @@ The runner repeats sample load with CPU read/write watches on the `0x300`-byte
 response buffer. It starts as all zeroes, with no overlapping CPU reads or
 writes. Since the emulator does not execute the DSPI1 channel-14/15 DMA
 transaction, this does not establish what a hardware response contains. The
-same capture's RGPIO trace shows the 16-byte `0x8c000000` window being used for
-GPIO polling/strobes, not sample-page data.
+RGPIO window is also used to serialize sample bytes: reassembly of the 12
+sample-load calls found five exact 4 KiB matches to sample/helper-buffer data.
+This confirms bytes sent through the GPIO data register, not the older
+high-offset sample-page map or downstream DSP consumption.
 
 ## Cross-project checks
 
