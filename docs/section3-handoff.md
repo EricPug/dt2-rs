@@ -268,6 +268,22 @@ DTIM3 = 16 enabled from startup reached no display or card commands by 1.5B;
 its final PC was the DSPI2 RX-count poll `0x400cd3b2`. It is not equivalent to
 the successful smoke-test startup and does not establish a general boot cause.
 
+#### Interactive confirmation
+
+The user ran the panel from the fresh-boot snapshot and paired writable card
+copy. They reported that the first attempt was affected by holding FUNC, then
+worked after correcting it. The UART-rendered sequence shows `1 SAMPLE LOADED`,
+and its final frame has the clap row highlighted with the kick marked `C044`;
+the final recorded input was DOWN. The frame SHA-256 matches the headless
+post-load frame above. The app recorded 250,121 RGPIO accesses and its
+cumulative eSDHC command count increased from 3,720 to 3,729. Detailed card
+command tracing and upload packet capture were not enabled, so those counters
+alone do not establish the number or contents of individual uploads. The app
+remained running until the user closed it. This confirms the manual first-load
+and subsequent browser movement, not the earlier `LOAD TO PROJECT` or
+repeat-load cases, nor physical DSP or firmware SSI audio. The saved log,
+UART capture, frame and snapshot are under `out/first-kick-navigation/manual-*`.
+
 ### Clap load diagnostic
 
 The clap replay started at `out/ui-frames/26-down-release.snap` before the
