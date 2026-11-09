@@ -195,16 +195,108 @@ in all sample-playback states. See the [hypothesis log](./audio-trace-hypotheses
 | Option | Value | Cost and gate |
 |---|---|---|
 | [ADI CCES 2.9.1](https://download.analog.com/tools/CrossCoreEmbeddedStudio/Releases/Release_2.9.1/CrossCoreEmbeddedStudio_2.9.1_Release_Notes.pdf) | Manufacturer's release notes list ADSP-21569 support and functional/cycle-accurate simulators. | Tool availability, licensing, Linux/command-line support, loading the section-7 records, external I/O and automation have not been verified here. Check those before designing a harness; never assume a simulator models the board. |
-| [Digikit SHARC+ core](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/packages/emulator/sharc/src/lib.rs) | Existing interpreter and generated native execution are concrete prior art, so “no open SHARC+ emulator exists” is too broad. Its [README](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/README.md) claims ColdFire and SHARC emulation with audio, supports DT2 1.17, and says DSP audio is slower than real time. | Those project claims were not reproduced here and do not by themselves establish hardware-equivalent output. Check licensing and dependencies, supported instructions/peripherals, reproducibility and hardware validation before considering reuse. The native runtime alone traps without generated code. |
+| [Digikit SHARC+ core](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/packages/emulator/sharc/src/lib.rs) | Existing interpreter and generated native execution are concrete prior art, so “no open SHARC+ emulator exists” is too broad. A bounded stock 1.17 sampler test was reproduced locally, as detailed below. | Its board models and timings remain assumptions, not hardware proof. Licensing, supported instructions/peripherals and hardware validation require review before considering reuse. The native runtime alone traps without generated code. |
 | Bounded interpreter from scratch | Can target a measured, minimal execution slice and integrate with this Rust project. | Highest implementation and validation burden; instruction semantics, loader, timing and peripherals all need test oracles. Do not start before comparing the existing tools and identifying a bounded acceptance test. |
 
 No option is selected and no SHARC/eDMA implementation is authorized by this
-assessment. The highest-value next comparison is a bounded, non-invasive
-evaluation of Digikit's stated DT2 1.17 path and its evidence, including
-licensing and whether a locally reproducible stock-firmware slice reaches a
-non-synthetic audio output. A later proposal should compare that with CCES,
-measure inputs and output against a trustworthy oracle, and state what remains
-synthetic.
+assessment. The Digikit evaluation below supports using it as a separate
+software comparison, not counting its output as playback by this project.
+CCES availability and a hardware audio oracle remain unverified.
+
+### Digikit stock-sampler evaluation (2026-11-09)
+
+**Observed here:** In an isolated checkout of
+[Digikit `c6da26dd`](https://github.com/ElekLabs/digikit/tree/c6da26dd8f7b6f61750a01746686972f28dbecae),
+its generic generated SHARC core and coupled runner booted the local unmodified
+DT2 1.17 SysEx (`26c22f6652625ac2cfd47f7ee970d388ed8b6427dae3563c0a6a2f2d334350d5`)
+with a newly generated one-sample +Drive image. Its
+[`dt2-sample-trig`](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/tests/scenarios/dt2.json)
+scenario sent NO, then TRIG 1; no DSP patch or guest function call was
+requested. The source was a generated one-second 1 kHz mono PCM16 WAV, not
+our kick. The Digikit-generated card prepopulates a project; this is not our
+fresh-load UI path.
+
+| Measurement | TRIG 1 | Matched no-trigger control |
+|---|---:|---:|
+| Output | 1.6 s, stereo 48 kHz float | Same |
+| Nonzero float values | 109,760 / 153,600 | 0 / 153,600 |
+| Peak / RMS | 0.036459 / 0.016139 | 0 / 0 |
+| DSP halt / missing blocks / non-finite values | none / 0 / 0 | none / 0 / 0 |
+| WAV SHA-256 | `34332fe70135ea1feef8aea079a0e63f6dddaa1412db6fab891696444d9226b1` | `19082019a2f6bddeaddc8a3f86eed77deb1592575cad7d22d9e409324710b301` |
+| PCM SHA-256 | `927513e1566f46efdbee67ff520cece8166ce2981d987cc4118f46a0595473b3` | `68d56523c2f8cc487372644121b31048edec9437776093a208007f32af496c7c` |
+
+Digikit's spectrum analysis of the triggered left channel reported onset
+0.4567 s, peak 1007.8 Hz at 2048-point resolution, and 0.99995 of spectral
+power near that peak. Both runners exited zero; their guards reported OK.
+The control used the same ready state, NO inputs and duration, omitting only
+TRIG down/up. The generic interpreter took 112 s for the 1.6 s triggered run
+on this host; this is not a benchmark of Digikit's optional AOT core.
+This is evidence of firmware-driven output **in Digikit's modeled machine**,
+not output from dt2-rs, a hardware comparison, exact sample fidelity, or proof
+of the physical wiring. No audio was injected in the invoked run; the sample
+itself was supplied as input on the generated card.
+
+**Model boundaries:** Digikit flattens the section-7 loader stream rather than
+executing SHARC boot ROM, seeds reset values from the SHARC hardware-reference
+table, and uses an SSI diagnostic. Its coupled loop forwards modeled
+ColdFire sample traffic to modeled LP0 DMA and takes output from a modeled
+SPORT4A DMA block, with zero SPORT input. The peer schedules blocks at 1.5 kHz
+and assumes a 1 GHz DSP period; its idle optimization skips modeled idle
+instructions. The ready boot used `DIGI_INTC_FORCE=0`; the two restored
+scenario processes used the default enabling delivery of guest-forced INTC
+sources. The boot report also records seven flash HLE calls. These choices do
+not prove how the real bridge, clock or codec is connected.
+Sources: [ready generation](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/tools/emulator/ready.py),
+[peer and timing](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/packages/emulator/boot/src/sharc_peer.rs),
+[LP0/SPORT model](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/packages/emulator/sharc/src/lib.rs),
+and [interrupt model](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/packages/emulator/machine/src/time.rs).
+Digikit also documents a separate
+[unpatched 1.17 sampler experiment](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/docs/findings/82-stock-sampler-lifetime.md);
+that upstream report is not an independent hardware capture.
+
+**Reproduction provenance:** The isolated checkout and generated ready inputs
+are under the session's `files/digikit-eval/`; generated WAVs, reports, the
+control scenario and boot log are retained under ignored `out/digikit-eval/`.
+The source WAV SHA-256 is
+`aa63ae6d0e964cde0e7f06b65d1cd2c6f181eeb2d82fb0c475e977fa5d67e1af`;
+the card SHA-256 is
+`1c1fed346ea91bc0c1720fe24e5cc7499c5002e5f6b49341ca85a91d38cd02b2`.
+The ready CF snapshot and DSP sidecar hashes are
+`c8cee4d7227a408d5fe740f526081439b5ab68606abe1aa478b894650044b88e`
+and `7b9ba8644f3e7378ba424977e56f80d3d213cc80bde209d6acc9fbd228f15077`.
+Setup required Python 3.12, Digikit's declared Python dependencies including
+the dev dependency `mypy`, Rust 1.98.1, and its firmware-independent
+`gen:core` generation. `ready.py` additionally required an extracted ADSP
+hardware reference at `out/refs/adsp-2156x-hwr/all.txt`, despite the
+README's terse ready command. The official download failed here; the public
+mirror copy had SHA-256
+`e56b2e4e18af9e34c82a9596af377d8d0f3e37ebb02e7b1eae489c7f285930ec`
+and Poppler `pdftotext -layout` yielded 3,558 parsed reset rows. It was not
+compared with the vendor copy.
+
+The sample-check helper created the card but hid the initial `ready.py`
+error in a captured subprocess. After preparing the manual, the ready task
+was run directly and the coupled runner was built with `coupled build
+--device dt2`. The triggered invocation used the built `coupled-run` with
+`--syx`, `--card-image`, `--dsp-image`, `--dsp-state`, `--cf-snapshot`,
+`--scenarios tests/scenarios/dt2.json --scenario dt2-sample-trig --seconds
+1.6 --wav ... --out ...` and `SHARC_FAST_REGIONS=`. The control changed only
+the scenario file/name and output paths. The helper's spectral pass criterion
+checks peak share, not exact pitch or the runner's exit status; here the
+runner was invoked directly and its exit status and reports were checked.
+
+**License and next decision:** Digikit states
+[AGPL-3.0-or-later with additional NOTICE terms](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/NOTICE);
+dt2-rs declares MIT. Reusing or linking its implementation therefore needs
+licensing review, including the NOTICE, before any code is imported; this is
+not a legal conclusion about a particular integration. A separate-process
+comparison is an investigation option, not an automatic licensing exemption.
+The recommended next bounded experiment is to compare the same source sample,
+trigger and serialized upload at both emulator boundaries, retaining hashes and
+an explicit list of modeled inputs; vary the sample as a negative control.
+This can test compatibility with Digikit's model but still needs hardware
+evidence before establishing the physical handoff. No integration or new
+SHARC/peripheral implementation has been started.
 
 ## Milestone order
 
