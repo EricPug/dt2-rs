@@ -61,6 +61,33 @@ explicitly stop at an unverified external boundary. Do not invent RX audio,
 force USB events, assume a DSP-to-SSI route, or pursue SHARC/eDMA
 implementation based on the mk1 analogy.
 
+### Board and interface evidence follow-up
+
+The public sources checked do **not** identify the physical ColdFire SSI
+peer or establish the direction of audio on that connection:
+
+| Source | Scope and evidence | What it establishes or leaves open |
+|---|---|---|
+| [Digitakt II PCB photos](https://www.elektronauts.com/t/digitakt-ii-pcb/212504) | User-posted board photos, April 2024; firmware version not specified. | Physical board imagery, not a schematic or a traceable BGA netlist. The local photo readings in `research/digitakt-ii-1.17.md` identify the processors, but do not establish SSI wiring. |
+| [Teardown discussion](https://www.elektronauts.com/t/digitakt-ii-teardown/212476/23) | User discussion of the board; firmware version not specified. | The suggestion that SHARC handles audio and converter connections is explicitly speculation in the post, not a measurement of those connections. |
+| [1.15C architecture overview, pinned](https://github.com/lalzart/digitakt-ii-firmware-research-public/blob/b2f93c11abc6f2051af3fabdf60d8370be2d5494/docs/architecture-overview.md) and [sample lifecycle](https://github.com/lalzart/digitakt-ii-firmware-research-public/blob/b2f93c11abc6f2051af3fabdf60d8370be2d5494/docs/architecture/sample-resource-lifecycle.md) | External firmware analysis, bounded simulator work and board photos, not a device capture. Digiemu cites the same research, so this is not independent confirmation of Digiemu. | Reports a SHARC sample receiver at LP0/DMA30 and an output path to SPORT4A/DMA10. The authors leave the physical sample bridge, paired transfer, codec endpoint and sound unproved. Neither report identifies the ColdFire SSI peer. |
+| [Elektron support page](https://www.elektron.se/support-downloads/digitakt-ii) | Manufacturer's downloads and user manual; not a service schematic. | No board-level SSI wiring or audio-direction evidence was found on the page. This is not proof that no service documentation exists. |
+
+These are useful leads, not verified OS 1.17 hardware behavior. The external
+1.15C receiver and output claims have not been independently reproduced here;
+the resemblance between its Rapid GPIO description and our captured 1.17
+upload is not evidence that a physical transfer reached that receiver. The
+strongest available next evidence would be an attributable schematic/netlist
+or a documented, appropriately qualified hardware continuity or signal
+measurement identifying the SSI nets, clock source and data direction. Board
+photos alone cannot resolve the BGA connections. Do not prescribe probing
+unknown live nodes: electrical limits and access must first be established.
+
+**Result:** no justified new CPU-side playback test or non-silent SSI target
+emerged from this search. Retain the existing regressions and leave the
+external boundary unresolved; no new peripheral, SHARC or eDMA implementation
+is warranted by these sources.
+
 ## Milestone order
 
 1. **Complete:** format the workspace, resolve Clippy findings, and align the
