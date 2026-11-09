@@ -167,6 +167,22 @@ per-track slot table, so changing the model to route by that assumed stride
 would break the known WAV comparison and is not justified. No Track 1 modeled
 playback was established by the previous smoke test.
 
+### Manual LOAD TO PROJECT attempt
+
+The user opened the card browser from `out/shots/main-after-load.snap`,
+selected `LOAD TO PROJECT`, and reported the loading overlay remained and the
+UI stopped responding. The preserved UART-rendered final frame
+`out/hand-test-project/frame-final.png` shows the `incoming` list with clap
+highlighted and `LOADING 1 SAMPLE`. The app continued at about 40–43M
+instructions/s. The run recorded zero RGPIO events across 3.8996B
+instructions. Its cumulative eSDHC command count was 3,734, equal to a
+one-instruction restore of the starting snapshot, so no additional command was
+counted in the run; detailed eSDHC tracing was not enabled. The selected menu
+action comes from the user's report, not from the final frame. This is a
+different action from the successful pinned `LOAD TO TRK 01` checkpoint; it does
+not demonstrate a successful load or explain the stall. The saved log, UART
+capture, and final snapshot are under `out/hand-test-project/`.
+
 ### Clap load diagnostic
 
 The clap replay started at `out/ui-frames/26-down-release.snap` before the
