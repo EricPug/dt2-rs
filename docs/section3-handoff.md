@@ -291,12 +291,104 @@ dt2-rs declares MIT. Reusing or linking its implementation therefore needs
 licensing review, including the NOTICE, before any code is imported; this is
 not a legal conclusion about a particular integration. A separate-process
 comparison is an investigation option, not an automatic licensing exemption.
-The recommended next bounded experiment is to compare the same source sample,
-trigger and serialized upload at both emulator boundaries, retaining hashes and
-an explicit list of modeled inputs; vary the sample as a negative control.
-This can test compatibility with Digikit's model but still needs hardware
-evidence before establishing the physical handoff. No integration or new
-SHARC/peripheral implementation has been started.
+The same-sample boundary comparison below is now complete. No integration or
+new SHARC/peripheral implementation has been started.
+
+### Same-sample cross-emulator comparison (2026-11-09)
+
+**Observed here:** The native kick and clap from the existing card were tested
+in dt2-rs and in the isolated Digikit checkout above. The comparator checks the
+64-byte native header and the declared PCM bytes against complete uploads
+bracketed by start and finish sentinel records. It permits different slots and
+additional indexed pages, but requires consecutive page indices beginning at
+zero and checks the finish record's slot, offsets, rate and PCM length. It
+reports whole-page equality separately; it does not require unused page padding
+or whole sentinel bodies to match.
+
+| Input | Native file SHA-256 | Declared PCM | Complete meaningful pages equal |
+|---|---|---:|---:|
+| Kick | `1f001acdf18e15c1901dd75101aec94a0fa791ffb522457214560fd4fcc6e285` | 39,936 bytes | 10/10 |
+| Clap | `fc4138ca0334cdb909d9646e2701c25a7e122d97c067eef5bd064726c46a1576` | 12,322 bytes | 4/4 |
+
+Both native headers declare 46,875 Hz, big-endian PCM16; the 16-byte native
+trailers are not included in the meaningful-byte check. Each page comparison
+above includes the entire 4,100-byte packet, including tag and padding. Both
+dt2-rs sequences used slot 300 and both Digikit sequences used slot 7. The
+clap's dt2-rs sequence had ten indexed pages versus Digikit's four: the local
+capture used a kick-file substitution workflow, and the cause of the six extra
+pages is not established. The first six sentinel words agree after accounting
+for slot; the remaining sentinel bodies are not identical. A cross-sample
+negative control correctly rejected the clap source against the kick captures.
+
+The dt2-rs side records CPU-observed RGPIO writes, whereas the Digikit-side
+instrumentation records modeled accepted LP0 transfers. These are two
+software boundaries, not independent measurements of the physical bridge or
+DSP receipt. Digikit's seeded project and the dt2-rs UI route differ. Its
+card builder normally rejects these 46,875 Hz fixtures; a test-only predicate
+change in the isolated checkout accepted the exact existing bytes without
+resampling. Both generated cards were read back and verified by hash. A second
+test-only change saved accepted LP0 units. The isolated changes are retained
+in ignored `out/digikit-eval/reference-instrumentation.patch` (SHA-256
+`f21ac33216fca9c1cd2fc8d7b8ea48c647e3768ab4a621e1fd28cdb3b2c5b5d0`);
+no Digikit implementation code was imported into dt2-rs.
+
+The separate restored Digikit TRIG 1 runs produced finite, nonzero stereo
+48 kHz float output for both inputs, with no DSP halt or missing blocks. Kick:
+1.600 s, 69,320 nonzero values, peak 0.049550, RMS 0.006055, WAV SHA-256
+`dd50570f60ecbe9efc707161b9ceb8691c1eb8e47e0471e63cc7a0e668476d18`.
+Clap: 1.601 s, 53,018 nonzero values, peak 0.037947, RMS 0.001606, WAV
+SHA-256 `01e2b6e5b412907fef826200ce4596a316802c7eb7a091676fddec71a929848f`.
+The differing outputs are consistent with sample-dependent rendering but these
+two runs did not have their own matched no-trigger controls or an exact PCM
+fidelity check. The earlier sine experiment did have a matched silent control.
+This remains firmware-driven output in Digikit's modeled machine, not dt2-rs
+playback or a hardware recording.
+
+**Control-frame comparison:** The Digikit kick and clap runs respectively
+logged 2,400 and 2,401 consecutive full-duplex frames, each with 2,748 TX and
+2,748 reply bytes, no partial trailing record, and no reported missing blocks.
+At frame 683 each had a zero-to-`0x3c00` transition in TX halfword 1
+(zero-based track field 0). In the separately replayed dt2-rs kick trace,
+block 2662 had a zero-to-`0x2d00` transition in TX halfword 3 (track field 2);
+other note and state fields also changed. The raw dt2-rs PUSHR block is
+5,496 bytes, with alternate halfwords carrying the 2,748-byte TX data.
+Different tracks, values and project state preclude claiming equal trigger
+frames or identical note semantics. The dt2-rs capture used synthetic DSP
+replies, unlike the coupled Digikit run.
+
+**Reproduce the saved comparisons** (requires the ignored captures and native
+files from these experiments; they are not distributed with the repository):
+
+```sh
+python3 tools/test_compare_sample_uploads.py
+python3 tools/compare_sample_uploads.py out/digikit-eval/kick-input/sample \
+  out/ui-smoke/fresh-kick/run.rdlgCeb8/modeled/packets out/digikit-eval/kick-lp0
+python3 tools/compare_sample_uploads.py out/digikit-eval/clap-input/sample \
+  out/modeled-dsp/clap/packets out/digikit-eval/clap-lp0
+```
+
+The Digikit cards are `out/digikit-eval/kick-card.img` and `clap-card.img`
+with respective SHA-256
+`c9b26b712e7a4712a9c63a30b6b32e2b6f59680e7899105c2321b606bd7cdeae` and
+`27e361ad503c8c20fb9f8b67dbd7983767787905287c3986441f815dca108fdf`.
+The ready boots, captured transfers, WAVs, reports, DSPI logs and comparison
+summaries are retained in ignored `out/digikit-eval/`. Both ready boots used
+`DIGI_INTC_FORCE=0` and ended with no halt or missing blocks; restored trigger
+runs used the default interrupt setting and `SHARC_FAST_REGIONS=`. For each
+card, run the built `coupled-run` from the isolated Digikit checkout with the
+matching card-specific ready snapshot, DSP image and DSP state, the same
+firmware and `--scenarios tests/scenarios/dt2.json --scenario dt2-sample-trig
+--seconds 1.6 --wav <output> --out <report>`, setting `DIGI_DSPI_LOG` to a
+fresh output file. Do not set the LP0 capture directory when restoring a
+scenario: its numbering restarts and could overwrite the boot capture.
+
+**Next decision:** The existing independent modeled handoff has a stronger
+two-sample software comparison, but cannot execute the actual DSP firmware.
+Before implementing a DSP, weigh a separately licensed CCES simulator harness
+against an independently designed bounded SHARC+ interpreter, including
+availability, instruction/peripheral coverage, test oracles, licensing and
+cost. A physical bridge or audio capture remains necessary to validate the
+hardware assumptions.
 
 ## Milestone order
 
