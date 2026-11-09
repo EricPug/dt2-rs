@@ -57,6 +57,7 @@ fn main() {
         eprintln!("       dt2-cli render-uart-records <run.log> <output.ppm>");
         eprintln!("       run-bin option: SSI_TX_RAW=<path> captures channel-50 SSI TX DMA bytes");
         eprintln!("       run-bin MODELED_DSP_WAV=<path> requires DSP_LINK and writes the modeled DSP's mono 48 kHz WAV");
+        eprintln!("       run-bin MODELED_DSP_CAPTURE=<directory> saves modeled DSP upload packets");
         eprintln!("       dt2-cli trace-depack <packed-section.bin>");
         std::process::exit(2)
     });
@@ -1133,6 +1134,7 @@ fn run_binary(args: &[String]) {
             || assignment == "FLEXBUS_TRACE"
             || assignment.starts_with("SYNTH_VOICE=")
             || assignment.starts_with("MODELED_DSP_WAV=")
+            || assignment.starts_with("MODELED_DSP_CAPTURE=")
             || assignment == "PIT0_ONESHOT"
             || assignment == "PIT2_PERIODIC"
             || assignment.starts_with("SNAPSHOT_SAVE=")
@@ -1351,10 +1353,35 @@ fn run_binary(args: &[String]) {
             eprintln!("MODELED_DSP_WAV needs DSPI2_BOOTSTRAP or a snapshot with DSPI2");
             std::process::exit(2)
         }
-        bus.modeled_dsp = Some(modeled_dsp::ModeledDsp::new(PathBuf::from(path)));
+        let capture_dir = args[6..]
+            .iter()
+            .find_map(|a| a.strip_prefix("MODELED_DSP_CAPTURE="))
+            .map(|capture| {
+                if capture.is_empty() {
+                    eprintln!("MODELED_DSP_CAPTURE path must not be empty");
+                    std::process::exit(2)
+                }
+                std::fs::create_dir_all(capture).unwrap_or_else(|error| {
+                    eprintln!("cannot create MODELED_DSP_CAPTURE directory {capture}: {error}");
+                    std::process::exit(2)
+                });
+                PathBuf::from(capture)
+            });
+        bus.modeled_dsp = Some(modeled_dsp::ModeledDsp::new(
+            PathBuf::from(path),
+            capture_dir,
+        ));
         println!(
             "diagnostic: MODELED_DSP_WAV uses RGPIO uploads and DSPI2 note edges; modeled DSP only, not a SHARC implementation"
         );
+    }
+    if bus.modeled_dsp.is_none()
+        && args[6..]
+            .iter()
+            .any(|a| a.starts_with("MODELED_DSP_CAPTURE="))
+    {
+        eprintln!("MODELED_DSP_CAPTURE requires MODELED_DSP_WAV");
+        std::process::exit(2)
     }
     if args[6..].iter().any(|a| a == "DSP_LINK") {
         let Some(dspi2) = bus.dspi2.as_mut() else {

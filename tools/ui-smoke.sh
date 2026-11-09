@@ -72,10 +72,8 @@ tools/ui-open-sample-page.sh \
   "$OUT/fltr.snap" "$OUT/fltr-frame-final.png" "$OUT/sample-page" \
   18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b "$BIN"
 
-# Load and trigger the sample through the opt-in modeled DSP, then check the
-# deterministic WAV hash and exact sample segment in the companion runner.
+# Load and trigger both samples through the opt-in modeled DSP, checking each
+# complete upload and WAV segment against its converted original WAV.
 tools/modeled-dsp-sample.sh "$BIN"
-check_sha256 out/modeled-dsp/sample.wav \
-  7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200
 
 echo "UI + MODELED DSP SMOKE PASS"

@@ -25,9 +25,9 @@ The canonical project status, evidence, current blockers, and next-step order ar
 source of truth for implementation status; this README is a user-facing overview.
 
 `tools/ui-smoke.sh` checks the boot-to-SAMPLE screen, page changes, the Tune
-readout after sixteen separate single-step encoder inputs, and a load-plus-trigger
-modeled-DSP WAV against deterministic frame and audio hashes. It requires the
-local ignored firmware/card assets documented in the handoff.
+readout after sixteen separate single-step encoder inputs, and load-plus-trigger
+modeled-DSP WAVs for kick and clap against their complete converted source audio.
+It requires the local ignored firmware/card assets documented in the handoff.
 
 ```sh
 cargo test

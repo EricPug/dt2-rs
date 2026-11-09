@@ -25,16 +25,16 @@ and must point here rather than maintain competing status reports.
   This is a modeled playback milestone, not a SHARC implementation or evidence
   of physical DSP reception or hardware audio. The first SAMPLE-page encoder
   sweep found no confirmed tune, start, length, or level mapping in DSPI2, so the
-  stand-in uses nominal pitch and gain. In the later clap-as-kick substitution
-  control, its output includes part of the on-card header and truncates the
-  clap tail, so that run is not clean sample playback.
+  stand-in uses nominal pitch and gain. The kick and clap upload pages contain
+  64-byte file headers; the corrected stand-in excludes them and uses the
+  complete PCM byte length.
 - The latest sample-load and trigger/play trace found no qualifying CPU bulk
   write to non-RAM. Its only >=1 KiB transfers are the synthetic DSPI2 `DSP_LINK`
   path and the emulator's timer-scheduled SSI service, not evidence of physical
   sample delivery; see the [hypothesis log](./audio-trace-hypotheses.md).
 - Current quality gates pass: `cargo fmt --check`, warning-free
   `cargo clippy --workspace --all-targets -- -D warnings`, and
-  `cargo test --workspace` (317 passed, 1 ignored).
+  `cargo test --workspace` (324 passed, 1 ignored).
 
 ## Milestone order
 
@@ -46,9 +46,10 @@ and must point here rather than maintain competing status reports.
    smoke test. Firmware parameter state remains unverified.
 3. **Complete:** trace and document the CPU-visible RGPIO sample-page upload and
    DSPI2 note fields. Physical DSP receipt/consumption remains unverified.
-4. **Complete, modeled only:** load one sample, trigger it from the observed
-   DSPI2 note edge, and verify a nonzero 48 kHz WAV segment against source bytes.
-   The runner and WAV hash are part of the smoke gate; no injected audio counts.
+4. **Complete, modeled only:** load kick and clap in separate runs, trigger each
+   from the observed DSPI2 note edge, and verify the full 48 kHz WAV segment
+   against converted source bytes. The runner is part of the smoke gate; no
+   injected audio counts.
 5. **In progress:** distinct sample slots assigned to two tracks and
    two-track playback are unverified. The earlier clap upload reported slot
    300, the same as the first sample, and did not establish independent
@@ -88,8 +89,9 @@ and must point here rather than maintain competing status reports.
    would be replaced is inconclusive. Frames and logs:
    `out/ui-frames/17-yes-press.png` through `26-down-release.png`,
    `27-load-yes-press.png`, `28-load-yes-release.png`, and
-   `29-load-wait.png` through `126-load-wait.png`. Retire synthetic startup
-   assumptions individually when evidence replaces them.
+   `29-load-wait.png` through `126-load-wait.png`. The user has closed the
+   idle-loop and Track 2 stall investigations; do not pursue them further.
+   Retire synthetic startup assumptions individually when evidence replaces them.
 
 ### Clap load diagnostic
 
@@ -196,6 +198,47 @@ UI capture and final frame are `out/load-diagnostic/clap-as-kick.log`,
 `clap-as-kick-ui.tx`, and `clap-as-kick-final.png`. This replacement control
 does not establish a second slot or explain the Track 2 load stall.
 
+#### Corrected modeled sample format
+
+The original model's six-byte-prefix assumption was wrong for **both** samples:
+the first six bytes are the first four zero bytes and the upper two bytes of
+the big-endian length in the 64-byte on-card sample-file header, not a
+separately identified prefix. After reversing each 16-bit pair,
+all of each converted source's PCM matches the upload starting at page-stream
+offset `0x40`. The sentinel lengths `0x9c00` and `0x3022` match PCM **bytes**,
+not frames or header-inclusive lengths: 19,968 kick and 6,161 clap frames.
+The file header's big-endian length and rate match the final sentinel's
+little-endian fields. Its two `0x40` words at body offsets `0x04` and `0x08`
+both coincide with the observed PCM start. The model treats the first as the
+offset and requires both to match, but their general protocol meanings remain
+assumptions. The sample-file rate is 46,875 Hz; the modeled 48 kHz output
+still uses one source sample per frame without pitch/rate conversion.
+
+The clap page stream has 98 PCM bytes at the start of page 3, followed by
+the 16-byte zero trailer and zeros through the rest of page 3. Pages 4–8 are
+all zero. Page 9 is zero through offset `0xc4f`; the remaining `0x3b0` bytes
+include 776 nonzero bytes of unidentified staging data. They are not a
+same-offset match for the kick capture, and none of the 59 aligned 16-byte
+chunks matches anywhere in that captured kick stream; their origin remains
+inconclusive. The
+page-count difference from the earlier four-page clap run is also unexplained.
+The 12 complete raw packets per run (4-byte prefix plus 4 KiB body) are in
+`out/load-diagnostic/kick-packets/call-01.bin` through `call-12.bin` and
+`out/load-diagnostic/clap-packets/call-01.bin` through `call-12.bin`. These
+are emulator captures, not evidence of physical DSP reception.
+
+The corrected `tools/modeled-dsp-sample.sh` replay verified every converted
+source PCM frame in both the captured upload and the modeled WAV, and silence
+outside the played segment. Both begin at WAV frame 58,336. The kick output
+`out/modeled-dsp/kick/sample.wav` has 19,968 matching PCM frames and SHA-256
+`4ee07fe598517c46ac1835cd132d2ec8635c00f6a5fefb124ceaad66af337cf2`;
+the clap output `out/modeled-dsp/clap/sample.wav` has 6,161 matching PCM
+frames and SHA-256
+`020ba60f091c27ff740bf6108cf48b11dc1228a01c2e37974bcdb9b6d2670dac`.
+The runner copies the card for each run, replaces the kick on the clap copy,
+and leaves the original unchanged. Its checks compare the complete converted
+WAV source, rather than relying solely on these output hashes.
+
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
 separate `+1` rotations visibly changed its readout to `-30.0`. D's `+16`
@@ -221,8 +264,8 @@ load-plus-trigger regression. The single-`+16` gesture is not asserted because
 its final frame matches no-turn.
 
 The script requires local ignored assets: the section-3 image/RAM/NOR files,
-`out/run-card.img`, and the sample-loaded `out/shots/main-after-load.snap` plus
-`out/shots/main-after-load.png`. It verifies the snapshot and baseline screenshot
+`out/run-card.img`, both source WAVs in `samples/`, and the sample-loaded
+`out/shots/main-after-load.snap` plus `out/shots/main-after-load.png`. It verifies the snapshot and baseline screenshot
 hashes before injecting input. Upright 512x256 screenshots and logs are written under ignored `out/ui-smoke/`.
 These are deterministic emulator regression artifacts, not hardware-faithful outputs.
 
@@ -235,7 +278,6 @@ Expected SHA-256 frame hashes:
 | Tune after sixteen separate encoder-A `+1` inputs | `0121a4cf0880c5892dabd094dbc7cf4caf6d14fd9d93cfd5b276d37981a74368` |
 | FLTR page (`2004,2000`, once at 3M spacing) | `20b7b62611a13133779f3da6e452591182fc7ff5bc37c2b9b3ada5e16b7133c3` |
 | Return to SAMPLE (`2002,2000`, once at 3M spacing) | `18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b` |
-| Modeled-DSP load + trigger WAV (mono 16-bit, 48 kHz) | `7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200` |
 
 This gate confirms the expected diagnostic path and modeled WAV only; it does
 not establish hardware reset/peripheral behavior, a SHARC ABI, or physical DSP
@@ -1551,23 +1593,22 @@ write-window tracer is documented in the README.
 ### Sample load and the per-block DSPI2 stream
 
 - Load replay (from `out/shots/action-down.snap`, cursor on RENAME in the `incoming` action menu): `UP UP UP UP YES wait wait YES` with `ESDHC_FILE=out/run-card.img DSPI2_BOOTSTRAP DSP_LINK ESDHC_TRACE`, 200M instructions, log `out/dsp-load.log`. The browser shows `008 kick verb` with `C044` afterwards, so the load happened. (`UP` x4 then one `YES` alone leaves the Destination dialog open; a second `YES` confirms.)
-- Two CMD18 reads, each 64 sectors (32 KiB) on eDMA ch59 (TCD DADDR/value `0x4060d770` then `0x40605770`), CMDARG last `0x5f0200`; the first read (sector `0x5f01c0`) lands at `0x4060d770`, the second (`0x5f0200`) at `0x40605770`. That explains the loud block at `0x4060d776` (first read, 6 bytes in) and the quieter data at `0x40605770`.
+- Two CMD18 reads, each 64 sectors (32 KiB) on eDMA ch59 (TCD DADDR/value `0x4060d770` then `0x40605770`), CMDARG last `0x5f0200`; the first read (sector `0x5f01c0`) lands at `0x4060d770`, the second (`0x5f0200`) at `0x40605770`. The earlier inference that PCM begins six bytes into the first read was incorrect; the verified file-header offset is `0x40`.
 - Across the sample-load run (1999 DSPI2 blocks), the two free-running counters (indices 270, 462) and a UI-animation field (112/113/114) change. No descriptor, address or sample data reaches that DSPI2 stream during loading. This is separate from the note-dependent fields found in the longer TRIG/PLAY comparison. A 3-halfword n-gram search of the TRIG+PLAY blocks (`out/dsp-c.log`) for kick samples also finds no sample data.
 - Sample data is not delivered over the per-block DSPI2 eDMA 28/29 stream; its TCDs exchange 1,374 frames per block. Digiemu's 1.15C/1.16 findings describe the same frame count, while related OS 1.16 research labels the separate DSPI1 request `0001 012c` as plausible `kind,slot` fields. The DSPI1 transaction's connection to the waveform cache remains unproven; the synthetic diagnostic does not execute channels 14/15, so its zeroed response buffer is not hardware evidence.
 - Digiemu's older notes identify `0x8c000000` as a sample-page/slot-header region, but OS 1.17 sets `RGPIOBAR=0x8c000035`: the first 16 bytes decode as RGPIO. The sample-load trace records 135,300 CPU accesses there, all 16-bit and below offset `0x10`; trigger/play records none, and no eDMA source/destination points into `0x8c`. The hooked calls use sources in `0x450fxxxx`; D7 is `0x8000` in ten captures, and another frame has source `0x450ecc40` with size `0x9c00`. No captured D/A register or stack word contains sample address `0x40605770` or length `0x10000`; the `0x9c00` argument alone does not identify payload contents. The RGPIO ready response is synthetic. The full payload comparison and limits are in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
 - The `0x8c000000..0x8c00000f` RGPIO window is distinct from the rest of the `0x8c` range. With the MCF SRAM overlay active, higher addresses route through the 64 KiB SRAM alias rather than being dropped, but no access at offset `>=0x10` occurred. The helper's `0x300`-byte DSPI1 response buffer at `0x4fe79340` starts zero with no overlapping CPU reads or writes in the repeat run; channel-14/15 DMA is not executed by the synthetic DSPI diagnostic.
 - So sample memory is not delivered over the per-block DSPI2 eDMA 28/29 stream. The local TCDs request 1,374 frames per block (channel 29: 32-bit PUSHR entries; channel 28: 16-bit receives), matching the fixed exchange in Digiemu's older-version findings. The one-time DSPI1 request `0001 012c` may be a `kind,slot` command, but its connection to the waveform cache remains unproven; its synthetic response buffer is not hardware evidence. OS 1.17 uses `RGPIOBAR=0x8c000035`, so `0x8c000000..0x8c00000f` is RGPIO. The sample-load trace records 135,300 CPU accesses there, all 16-bit and below offset `0x10`; trigger/play has none. No eDMA endpoint points into the `0x8c` window.
-- **Payload follow-up:** Reassembling all 12 calls to `0x400cd79c` confirms indexed pages 0–9 reconstruct the converted `0x9c00`-byte sample: `0x8000` bytes from `0x4060d770` followed by `0x1c00` bytes from `0x40605770`. Calls 4, 5, and 11 also match staging-buffer pages; call 11's final `0x400` bytes are padding/other staging data. Calls 1 and 12 are sentinel header/control packets. This confirms serialized bytes at RGPIO, not downstream DSP receipt or consumption. Full per-call results and timing are in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
+- **Payload follow-up:** Reassembling all 12 calls to `0x400cd79c` confirms indexed pages 0–9 reconstruct the converted file bytes. An earlier comparison of only `0x9c00` bytes began with the header and missed the PCM tail; the later full comparison above establishes the correct offset and length. Calls 4, 5, and 11 also match staging-buffer pages; call 11 includes the final `0x40` PCM bytes. Calls 1 and 12 are sentinel header/control packets. This confirms serialized bytes at RGPIO, not downstream DSP receipt or consumption. Full per-call results and timing are in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
 - **Staging-buffer follow-up:** The CPU watch of `0x450ecc40..0x450f6840` during sample load retained 8,982 32-bit reads and 6,701 32-bit writes; bulk copy writes at `0x401363a4` begin 236 instructions after channel-59 completion to `0x4060d770` and continue until 264,820 instructions after completion to `0x40605770`. The matching TRIG/PLAY watch saw zero accesses. The earlier zero-access result for `0x40605770..0x40615770` was a TRIG/PLAY-only watch; CPU reads from that source during sample load remain inconclusive because that span was not watched then.
 - **Dispatcher and high window:** Disassembly of `0x400cd79c` shows a D2-controlled function-pointer choice: nonzero D2 selects A2, zero selects `0x400ccf90`; the selected routine walks the `0x1000`-byte A3 buffer in 4-byte steps. The dispatcher itself does not access the higher `0x8c` window, and the trace did not access offsets `>=0x10`. Whether an unexecuted helper branch can access that window remains inconclusive. The emulator routes `0x8c000000..0x8c00000f` to RGPIO and higher addresses through the 64 KiB SRAM alias, so higher-offset writes are not silently dropped. Digiemu's sample-page path remains untested, not ruled out.
 
 ### Modeled DSP stand-in (not SHARC or hardware playback)
 
 - The 12 `0x400cd79c` calls each contain a little-endian 4-byte prefix and a 4 KiB body. Calls 1 and 12 use `0xffffffff` as metadata/control packets; calls 2–11 use indices 0–9. Call 1 precedes the first channel-59 completion and begins with `0x12c, 0xfffffc00, 0xfffffc00`. The final header identifies slot `0x12c` and sample length `0x9c00`.
-- The indexed pages reconstruct exactly: pages 0–7 match the first `0x8000`-byte channel-59 source at `0x4060d770`; page 8 matches the first `0x1000` bytes from `0x40605770`; page 9 has a `0xc00`-byte source match at offset `0x1000`, with the last `0x400` bytes matching staging data/padding. Reversing each byte pair and concatenating pages 0–9 gives the converted `0x9c00`-byte sample (SHA-256 `5f84301e6021dd5530e71614a3c4b04cf61d88ee4bcf4bfba0fb12865fc7d2a4`). Per-call qualifications are in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
+- The indexed pages reconstruct the full file header and PCM after reversing each byte pair. PCM begins at `0x40`, with length `0x9c00` for kick and `0x3022` for clap. The original truncated `0x9c00`-byte file-prefix comparison has SHA-256 `5f84301e6021dd5530e71614a3c4b04cf61d88ee4bcf4bfba0fb12865fc7d2a4`. Per-call qualifications are in the [audio handoff hypothesis log](./audio-trace-hypotheses.md).
 - `MODELED_DSP_WAV=<path>` is separate from `SYNTH_VOICE`. It consumes those RGPIO uploads and channel-29 DSPI2 frames, using note fields at `0x02 + 2*i`, machine fields at `0x94 + 2*i`, and a zero-to-nonzero note edge on observed machine type 2 to start a 16-bit PCM sample.
-- **Measured run:** `tools/modeled-dsp-sample.sh` replayed the saved load plus TRIG/PLAY sequence to the 300M-instruction limit. It captured 12 upload calls and 2,999 DSPI2 blocks. Track 2's `0x2d00` note edge occurred at cumulative instruction 8,582,436,295 / block 1,823. The generated mono 48 kHz WAV contains 95,968 frames; its 19,965-frame sample segment begins at frame 58,336 and exactly matches the concatenated channel-59 source ranges after excluding the first six bytes. The source waveform SHA-256 is `d9781f776139a7d97d42d89616f5b976803696fa2f03ede416688103166a99fb`.
-- **Frame-count correction:** header length `0x9c00` is 39,936 bytes, or 19,968 16-bit words. The first six bytes (three words) are the observed non-audio prefix, leaving `19,968 - 3 = 19,965` emitted PCM frames. So the six-byte prefix accounts exactly for the difference; it is not truncated playback.
-- **Second-sample and track trial (inconclusive for slot selection):** selecting `303 clap real` and choosing `LOAD TO TRK 02` produced four indexed RGPIO pages and a final header with slot `300`, length `0x3022`; the first sample's header also names slot `300` with length `0x9c00`. Thus these header fields distinguish length but did not identify a different slot for the second sample. The modeled-DSP path successfully played the clap upload as a single sample (6,158 PCM frames), but two distinct samples playing on two tracks are not demonstrated.
+- **Measured run:** `tools/modeled-dsp-sample.sh` checks both full source WAVs using the saved load plus TRIG/PLAY sequence. The former 19,965-frame kick and 6,158-frame clap results included header bytes and omitted PCM tails; those results are superseded by the corrected format comparison above.
+- **Second-sample and track trial (inconclusive for slot selection):** selecting `303 clap real` and choosing `LOAD TO TRK 02` produced four indexed RGPIO pages and a final header with slot `300`, length `0x3022`; the first sample's header also names slot `300` with length `0x9c00`. Thus these header fields distinguish length but did not identify a different slot for the second sample. Two distinct samples playing on two tracks are not demonstrated.
 - **Note-field trial (inconclusive for same-track pitch):** in the Track 02 capture, note data at offset `0x06` is `0x2d00` while machine data at `0x98` is type 2. A keyboard/TRIG 16 attempt changed note data at offset `0x02` from `0x3c00` to `0x4800`, while offset `0x06` stayed `0x2d00`; machine data at `0x94` remained zero. The test therefore changed a different, non-sample-machine track and did not produce note 60 on the sample track. A possible equal-tempered rate rule is `rate(n) = rate(60) * 2^((n - 60) / 12)` (so note 45 is about 0.42045x note 60), but this is a proposal, not measured DSP behavior.
-- **Assumptions:** the first six bytes are non-audio prefix; the remainder is signed 16-bit big-endian mono PCM; one sample per 48 kHz frame is nominal pitch; each DSPI2 block advances 32 audio frames; sample-machine type 2 and a zero-to-nonzero edge are the trigger; no pitch mapping, gain, envelope, mixing, or polyphony is modeled. These assumptions are not a decoded SHARC ABI. The successful WAV comparison validates only this modeled path; no SHARC core, eDMA behavior, physical DSP reception, or hardware audio has been established.
+- **Assumptions:** the sentinel's first `0x40` field represents the PCM offset for the supported format; one sample per 48 kHz frame is nominal pitch; each DSPI2 block advances 32 audio frames; sample-machine type 2 and a zero-to-nonzero edge are the trigger; no pitch mapping, gain, envelope, mixing, or polyphony is modeled. The tested uploaded PCM matches the converted signed 16-bit big-endian mono source. These assumptions are not a decoded SHARC ABI. The WAV comparison validates only this modeled path; no SHARC core, additional eDMA behavior, physical DSP reception, or hardware audio has been established.
