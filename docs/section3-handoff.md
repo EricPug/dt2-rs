@@ -93,6 +93,51 @@ and must point here rather than maintain competing status reports.
    idle-loop and Track 2 stall investigations; do not pursue them further.
    Retire synthetic startup assumptions individually when evidence replaces them.
 
+### Interactive assignment freeze: matched DTIM3 replay
+
+Two interactive runs from `out/shots/main-after-load.snap` with a copy of
+`out/run-card.img`, `DSP_LINK`, and DTIM3 = 4 reached `ASSIGN SAMPLE > C001`
+with `008 kick verb` highlighted and the separate `C044` marker beside it.
+After YES the user reported that the UI stopped responding; the second run's
+final UART-rendered frame and RX DMA log support that observation. The app
+continued running. Its run files are overwritten when the same command is
+rerun, so these two hand tests are not preserved as independent recordings.
+
+The test was reconstructed from the loaded snapshot at DTIM3 = 4: send
+`33e2` twice in separate 30M-instruction runs, then `33e2` six times at 3M
+intervals in a 60M run, and twelve times at 6M intervals in a 110M run. This
+reaches `000 OFF`; `2120,2100,2102,2100` at 6M intervals in each of two
+60M runs selects empty slot 001 and enters `incoming`. Each run used
+`RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=<card-copy>
+INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP
+DTIM3_TICKS_PER_INSTRUCTION=4 DSP_LINK`. The original hand-input log contains
+only a bounded RX DMA trace, not the entire navigation transcript; this is a
+reconstruction, not an exact replay of all mouse timings. The shared checkpoint
+and screenshot are `out/assign-yes-diagnostic/06-before-yes.snap` and
+`06-before-yes.png`.
+
+From that snapshot, matched 300M-instruction runs sent `UART8_RX_LATE=2102`
+and released with `UART8_RX_ONCE UART8_RX_PERIODIC=6000000:2100`, changing
+only DTIM3 = 4 versus 16 (using separate identical card copies). Both kept the
+same screen and issued zero eSDHC commands. Both generated 22,550 RGPIO
+accesses, while a 300M no-input control generated zero. Separate 60M DOWN
+controls from the pre-YES checkpoint moved the highlight to clap at both rates;
+DOWN delivered after either YES run did not change the screen. Thus changing
+the rate before YES did not prevent the observed loss of navigation in this
+test. The reports' 28,430 storage writes are a restored cumulative counter.
+
+An additional 100M rate-4 replay using the existing modeled-DSP packet capture
+identified two `ffffffff` sentinel packets and no indexed pages. Both contain
+header slot `257` (`0x101`); the final packet has length `0x9c00`, offsets
+`0x40`/`0x40` and rate 46,875. The capture intentionally ends with the model's
+`no complete sample image` error: it starts empty and received no indexed pages.
+The packet slot is not proven equivalent to screen slot C001
+or C044, and no new sample playback is established. The independently loaded
+kick's action-menu checkpoint instead produced two card reads, ten indexed
+pages and sentinel slot `300`; the different route and starting state prevent
+attributing the difference to DTIM3. Full logs, PNGs, captures, and snapshots are
+under `out/assign-yes-diagnostic/` and are ignored firmware-derived artifacts.
+
 ### Clap load diagnostic
 
 The clap replay started at `out/ui-frames/26-down-release.snap` before the
