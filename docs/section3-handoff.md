@@ -51,14 +51,20 @@ and must point here rather than maintain competing status reports.
    two-track playback are unverified. The earlier clap upload reported slot
    300, the same as the first sample, and did not establish independent
    assignment. The card-browser `LOAD TO TRK 02` route was the wrong workflow
-   for that goal and produced zero RGPIO events twice. Following the corrected
-   SRC-page flow, the screen showed `SMP 1`; one encoder-D `+1` left it
-   unchanged, so the attempt stopped before selecting an empty slot or loading.
-   No new header, page count, length, or `0xe0` comparison was produced. The
-   candidate DSPI2 field at `0xe0` has no confirmed per-track layout. Note 60/45
-   fields are visible in DSPI2, but a note-60 input on the sample-machine track
-   and its rate mapping remain inconclusive. Retire synthetic startup
-   assumptions individually when evidence replaces them.
+   for that goal and produced zero RGPIO events twice. The SRC page showed
+   `SMP 1`; the TRK+TRIG chord was sent from a frame already showing `SMP 1`,
+   so its effect is untested, not failed. DOWN and four spaced D `+4` turns
+   left the SRC frame unchanged; no empty slot was identified. The earlier D
+   `+16` image shows sample names but does not conclusively identify the
+   browser as +Drive. Separately, +Drive was verified by its `SAMPLES` /
+   `+DRIVE` entry; its `incoming` folder contains `008 kick verb` and
+   `SDE clap real`. One DOWN and YES from that listing produced no screen
+   change or RGPIO events; no sample replacement occurred. No new upload
+   header, page count, length, or `0xe0` comparison is available. The candidate
+   DSPI2 field at `0xe0` has no confirmed per-track layout. Note 60/45 fields
+   are visible in DSPI2, but a note-60 input on the sample-machine track and
+   its rate mapping remain inconclusive. Retire synthetic startup assumptions
+   individually when evidence replaces them.
 
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
