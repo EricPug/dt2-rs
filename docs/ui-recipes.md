@@ -87,6 +87,9 @@ An uninterrupted first-load run from a fresh card-attached boot subsequently
 loaded the kick and accepted DOWN afterward; see the fresh-boot comparison and
 exact reproduction in the canonical handoff. This does not resolve the
 previously loaded or manual `LOAD TO PROJECT` cases.
+Run `tools/ui-fresh-kick.sh target/release/dt2-cli` to check this first-load
+route, its post-load browser frame, and the uploaded PCM. The full UI smoke
+gate also runs it.
 
 Select by the visible label rather than blindly sending four UP presses:
 `LOAD TO PROJECT` is above `LOAD TO TRK 01` and is a different action. In a
