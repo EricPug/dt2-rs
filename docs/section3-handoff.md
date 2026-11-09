@@ -117,6 +117,95 @@ reference-design comparison cannot yet be made. A generic development-board
 schematic would not identify this product's wiring. The conclusion above is
 unchanged: stop at the unverified external boundary.
 
+### Section 8 and SHARC execution assessment
+
+Evidence labels below distinguish bytes observed locally from interpretations;
+none of this is a physical-device capture.
+
+**[Observed]** Re-extracting the local 1.17 SysEx (SHA-256
+`26c22f6652625ac2cfd47f7ee970d388ed8b6427dae3563c0a6a2f2d334350d5`)
+with `target/release/dt2-cli firmware/Digitakt_II_OS1.17.syx
+out/section8-osint-20261109` yields section 8 as 159,948 bytes, SHA-256
+`6943b2f27773f40f1e7857ea6fa7a121269e930bd403098e6b6c00002327dc20`,
+identical to the earlier local extraction. Its stored size is 103,416 bytes.
+At file offset `0x1000`, little-endian words include `0x60042000`; at
+`0x2000`, the first two words are `0x20010000` and `0x6004220d`. Starting
+at `0x1a650`, NUL-terminated strings include `USB PD Task`, `USB task`,
+`USB dev task`, `MIDI task`, `Main task`, `GPI task`, `Audio task`, and
+`Tmr Svc`. The file also contains `Invalid vid/pid` and version string
+`1.00E` / release `0018`. Full extracted firmware stays under ignored `out/`.
+
+**[Inferred]** The header, stack-like address and odd reset-like pointer are
+consistent with a Cortex-M image; task names strongly suggest a USB/MIDI
+controller and `Tmr Svc` is consistent with FreeRTOS. Digiemu's
+[mk1 analysis](https://github.com/elekloader/digiemu/blob/6f2d619fd1bc9579a62868688fc6bdd1dcf844db/docs/mk1/11-audio.md)
+reports the same layout and task/version strings in its mk1 section 8. This
+is a stronger match than size alone, but no mk1 binary or independent 1.16
+image was available here for a byte comparison. Static signatures do not
+establish which chip runs this image, when 1.17 executes it, its physical
+connections, or whether the component was newly added in 1.16.
+
+**[Observed: 1.17 SSI setup bytes and diagnostic writes]** The SSI-init
+instructions in the freshly extracted section 3 match the saved entry image
+over `0x400d3226..0x400d346f`. A direct-entry replay, with PC forced to
+`0x400d323e` and interrupts masked, captured these CPU writes; this is a
+controlled slice, **not** a natural boot or physical-device trace:
+
+| SSI0 register | CPU write(s) | Interpretation |
+|---|---:|---|
+| CR (`0xfc0bc010`) | `0x38`, then `0x01` | The second instruction is read/OR/write. The synthetic SSI read returns zero rather than retaining the first write, so `0x01` is an emulator artifact, not a trustworthy final hardware CR value. |
+| TCR (`0xfc0bc01c`) | `0x82` | Per the [MCF54418 manual](https://www.nxp.com/docs/en/reference-manual/MCF54418RM.pdf), `TXDIR=0` and `TFDIR=0` select an externally supplied bit clock and frame sync. |
+| RCR (`0xfc0bc020`) | `0x482` | Configuration write; it does not identify the external device. |
+| CCR (`0xfc0bc024`) | `0x16f00` | Configures 24-bit words and a 16-word frame in network mode. |
+| IER / FCSR | `0x00500000` / `0x88` | DMA-enable and FIFO configuration writes. |
+| TMASK / RMASK | `0xffff0000` / `0xffff0000` | Transmit and receive slot masks. |
+
+These TCR/RCR/CCR/mask values match Digiemu's
+[1.16 checkpoint](https://github.com/elekloader/digiemu/blob/6f2d619fd1bc9579a62868688fc6bdd1dcf844db/docs/FINDINGS.md)
+but that is not an independent hardware measurement. This establishes what
+the 1.17 initialization instructions request, not the identity of the clock
+source, pin wiring or actual physical signal. The separate `SSI_CLKIN` baud
+source and SSI bit-clock/frame direction must not be conflated.
+
+The attempted natural boot to a `0x400d3226` breakpoint instead reached its
+800M instruction limit at `0x400cc912`; it is not evidence that the initializer
+ran. For the direct slice, an 800M snapshot was copied and patched only in
+the diagnostic copy (PC and SR), and 35 instructions were traced. The log is
+`out/section8-osint-20261109/ssi-register-writes.log`; static disassembly is
+`out/section8-osint-20261109/ssi-static-disassembly.log`. One earlier
+unbounded direct-entry attempt returned through an invalid stack and stopped
+on an unsupported opcode; it is not used as a successful boot result.
+Neither replay changed a real device or the source card image.
+
+For comparison, Digiemu identifies **mk1** SSI1 at `0xfc0c8000` and its
+DMA52/54 stereo buffer path; that is a different product and SSI instance,
+not evidence of the II peer or clock owner.
+
+**[Inferred, not established]** The SHARC is a plausible SSI peer and clock
+source, and the USB-stream-list observation makes USB host audio a plausible
+contributor to SSI TX. Separate 1.15C firmware analysis locates DSP sample
+processing and SPORT4A output. These observations do not prove the SSI peer,
+clock owner, TX's exclusive purpose, RX content, or a particular SPORT/codec
+connection in 1.17. In the tested no-host-stream case, silence on SSI TX is
+consistent with the empty USB list; it is not proof that TX must remain silent
+in all sample-playback states. See the [hypothesis log](./audio-trace-hypotheses.md).
+
+**Execution options, proposal only:**
+
+| Option | Value | Cost and gate |
+|---|---|---|
+| [ADI CCES 2.9.1](https://download.analog.com/tools/CrossCoreEmbeddedStudio/Releases/Release_2.9.1/CrossCoreEmbeddedStudio_2.9.1_Release_Notes.pdf) | Manufacturer's release notes list ADSP-21569 support and functional/cycle-accurate simulators. | Tool availability, licensing, Linux/command-line support, loading the section-7 records, external I/O and automation have not been verified here. Check those before designing a harness; never assume a simulator models the board. |
+| [Digikit SHARC+ core](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/packages/emulator/sharc/src/lib.rs) | Existing interpreter and generated native execution are concrete prior art, so “no open SHARC+ emulator exists” is too broad. Its [README](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/README.md) claims ColdFire and SHARC emulation with audio, supports DT2 1.17, and says DSP audio is slower than real time. | Those project claims were not reproduced here and do not by themselves establish hardware-equivalent output. Check licensing and dependencies, supported instructions/peripherals, reproducibility and hardware validation before considering reuse. The native runtime alone traps without generated code. |
+| Bounded interpreter from scratch | Can target a measured, minimal execution slice and integrate with this Rust project. | Highest implementation and validation burden; instruction semantics, loader, timing and peripherals all need test oracles. Do not start before comparing the existing tools and identifying a bounded acceptance test. |
+
+No option is selected and no SHARC/eDMA implementation is authorized by this
+assessment. The highest-value next comparison is a bounded, non-invasive
+evaluation of Digikit's stated DT2 1.17 path and its evidence, including
+licensing and whether a locally reproducible stock-firmware slice reaches a
+non-synthetic audio output. A later proposal should compare that with CCES,
+measure inputs and output against a trustworthy oracle, and state what remains
+synthetic.
+
 ## Milestone order
 
 1. **Complete:** format the workspace, resolve Clippy findings, and align the
