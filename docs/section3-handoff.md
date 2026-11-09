@@ -53,13 +53,15 @@ and must point here rather than maintain competing status reports.
    inconclusive. Retire synthetic startup assumptions individually when evidence
    replaces them.
 
-The SAMPLE parameter sweep tried one +5-count detent on tune (encoder A),
-start (encoder B), length (encoder C), and level (LEVEL encoder), then triggered
-the sample. Against a cadence-matched no-turn baseline, tune, length, and level
-produced identical DSPI2 payloads. Start produced repeatable transient changes,
-but no persistent value that could be interpreted as a sample offset. No
-parameter mapping was added to the modeled DSP; details and exact offsets are
-in the [hypothesis log](./audio-trace-hypotheses.md).
+The SAMPLE parameter sweep tried +5 and +20 counts on tune (encoder A), start
+(encoder B), length (encoder C), and level (LEVEL encoder). The full-run screen
+hashes are identical, so no changed on-screen value was confirmed. In aligned
+2,299-block captures, tune, length, and level had no DSPI2 or SRAM differences.
+Start had repeatable but unclassified DSPI2 changes and 22 changed SRAM bytes
+outside the older per-track mirror layout; the OS 1.17 parameter-state
+equivalent remains unidentified. No parameter mapping or WAV comparison was
+added to the modeled DSP. Results remain inconclusive; details are in the
+[hypothesis log](./audio-trace-hypotheses.md).
 
 ## UI smoke regression
 
