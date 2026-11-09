@@ -79,9 +79,12 @@ instructions apart and a 2,000,000,000-instruction budget. The final screen
 still showed `LOADING 1 SAMPLE`; its frame SHA-256 was
 `bcc8d1f1ad4f05c2c73cc22413c1f77ff589508cf4fcee4d6b8ed5566a1c4626`. A second
 attempt selected Track 2 first and reached a menu labeled `LOAD TO TRK 02`,
-but running the load gestures from that visually similar state produced zero
-RGPIO events and left the watched sample-selection word unchanged. Neither
-continuous route is a verified load.
+but running the load gestures from that state produced zero RGPIO events. One
+retry from its saved menu snapshot again produced zero RGPIO events and no UART
+display updates; the captured word at `0x80005428` remained `0x012c` (300).
+Neither continuous route is a verified load. Captures:
+`out/modeled-dsp/two-track-loaded.log` and
+`out/modeled-dsp/two-track-loaded-retry.log`.
 
 Keep the pinned load recipe until a replacement is shown to produce the RGPIO
 page stream. Its screen assertion checks the resulting incoming-list selection,
