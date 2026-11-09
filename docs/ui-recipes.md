@@ -86,11 +86,31 @@ Neither continuous route is a verified load. Captures:
 `out/modeled-dsp/two-track-loaded.log` and
 `out/modeled-dsp/two-track-loaded-retry.log`.
 
-Keep the pinned load recipe until a replacement is shown to produce the RGPIO
-page stream. Its screen assertion checks the resulting incoming-list selection,
-while the modeled-DSP runner verifies the RGPIO upload and played waveform. Its
-combined load-plus-trigger sequence remains in one emulator run so the modeled
-DSP retains its uploaded sample.
+## Shared-pool, two-track load flow (not yet verified)
+
+For two independently playable samples, select each destination track with a
+latched TRK+TRIG chord, then use the SRC page's encoder D to choose a distinct
+empty shared-pool slot. Press YES on that slot to open the +Drive browser, choose
+a sample, and press YES to load it. Do not use the card-browser `LOAD TO TRK`
+action: that route was not the intended shared-pool assignment flow. A plain
+TRIG tap is not a track selection.
+
+The emulator's Track 1 chord input was sent as `2180,2301,2300,2100,-`; the
+display showed `SMP 1`, but the starting frame already showed `SMP 1`, so this
+does not isolate the chord's effect. The starting frame was already on SRC; the
+SRC input left the sample controls visible. One slow encoder D `+1`
+(`3301,3300`) then left the display unchanged on
+`SMP 1`; the expected empty-slot screen was not reached. The run stopped here:
+no DOWN, YES, browser navigation, or sample load was sent. Screens:
+`out/modeled-dsp/menu-track1-src.png` and
+`out/modeled-dsp/menu-track1-slot-step1.png`; both have SHA-256
+`55abfbeb226ddc8f2e61392be564c604aec7a1f72085a550b8339a81ee6204fb`.
+
+This is not a verified recipe. Do not claim a second sample assignment or
+compare its RGPIO header / DSPI2 `0xe0` until an empty slot visibly changes,
+the load completes, and a distinct upload is captured. Keep the existing pinned
+load recipe for the one-sample regression only; its combined load-plus-trigger
+run preserves the modeled DSP's uploaded sample.
 
 ## Run the scripts
 
