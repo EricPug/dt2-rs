@@ -58,24 +58,36 @@ and must point here rather than maintain competing status reports.
    `+16` image shows sample names but does not conclusively identify the
    browser as +Drive. Separately, +Drive was verified by its `SAMPLES` /
    `+DRIVE` entry; its `incoming` folder contains `008 kick verb` and
-   `SDE clap real`. Per Elektron's FAQ, factory samples do not occupy +Drive
+   `303 clap real`. Per Elektron's FAQ, factory samples do not occupy +Drive
    space, so an empty Factory tree is expected and is not an emulator issue to
-   investigate. One DOWN and YES from the incoming listing produced no screen
-   change or RGPIO events; no sample replacement occurred. No new upload
+   investigate. DOWN moved the white highlight from kick to clap in the
+   incoming listing; an earlier YES left the resulting frame unchanged and
+   produced no RGPIO events. No sample replacement occurred. No new upload
    header, page count, length, or `0xe0` comparison is available. The candidate
    DSPI2 field at `0xe0` has no confirmed per-track layout. Note 60/45 fields
    are visible in DSPI2, but a note-60 input on the sample-machine track and
    its rate mapping remain inconclusive. A later Route A attempt held raw DOWN
    (`2120`) for 3M instructions, released it with `2100`, then observed 3M
-   chunks through 51M instructions after the press. The Incoming listing
-   remained on kick `C044`; clap was not selected, so no YES/RIGHT/action-menu
-   input or load was attempted. The settled frame was stable and RGPIO reported
-   zero events. Frames: `out/ui-frames/00-start.png`,
+   chunks through 51M instructions after the press. The white highlight moved
+   to clap and stayed there; the prior report mistook the kick's `C044` marker
+   for the cursor. No YES/RIGHT/action-menu input or load was attempted in
+   that run, and RGPIO reported zero events. Frames: `out/ui-frames/00-start.png`,
    `out/ui-frames/01-down.png`, and `out/ui-frames/02-wait.png` through
    `out/ui-frames/16-wait.png`; logs: `out/ui-frames/01-down.log` and
-   `out/ui-frames/16-wait.log`. No new upload header, page count, length, or
-   `0xe0` comparison is available. Retire synthetic startup assumptions
-   individually when evidence replaces them.
+   `out/ui-frames/16-wait.log`. Continuing from that state, YES check-marked
+   clap, RIGHT opened its action menu, and a latched TRK+TRIG 2 chord changed
+   the menu entry from `LOAD TO TRK 01` to `LOAD TO TRK 02`. DOWN highlighted
+   that entry before YES. `LOADING 1 SAMPLE` appeared after 69M instructions
+   and remained through a 300M-instruction wait. All 100 post-confirmation
+   3M chunks reported zero RGPIO events; the popup obscured the clap row, so
+   its loaded mark could not be checked. The SRAM word associated with DSPI2
+   offset `0xe0` remained `0x012c`, not a direct DSPI2-frame capture. No new
+   upload header, page count, or length was obtained; whether the kick slot
+   would be replaced is inconclusive. Frames and logs:
+   `out/ui-frames/17-yes-press.png` through `26-down-release.png`,
+   `27-load-yes-press.png`, `28-load-yes-release.png`, and
+   `29-load-wait.png` through `126-load-wait.png`. Retire synthetic startup
+   assumptions individually when evidence replaces them.
 
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
