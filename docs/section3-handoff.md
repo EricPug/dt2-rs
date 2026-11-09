@@ -20,7 +20,9 @@ and must point here rather than maintain competing status reports.
   receives the traced sample bytes over RGPIO, uses DSPI2 note/machine fields for
   triggering, and produces a WAV whose played segment matches the loaded sample.
   This is a modeled playback milestone, not a SHARC implementation or evidence
-  of physical DSP reception or hardware audio.
+  of physical DSP reception or hardware audio. The first SAMPLE-page encoder
+  sweep found no confirmed tune, start, length, or level mapping in DSPI2, so the
+  stand-in still plays the full sample at nominal pitch and gain.
 - The latest sample-load and trigger/play trace found no qualifying CPU bulk
   write to non-RAM. Its only >=1 KiB transfers are the synthetic DSPI2 `DSP_LINK`
   path and the emulator's timer-scheduled SSI service, not evidence of physical
@@ -41,13 +43,23 @@ and must point here rather than maintain competing status reports.
 4. **Complete, modeled only:** load one sample, trigger it from the observed
    DSPI2 note edge, and verify a nonzero 48 kHz WAV segment against source bytes.
    The runner and WAV hash are part of the smoke gate; no injected audio counts.
-5. **In progress:** the second sample upload is confirmed, but its header still
-   reports slot 300, the same slot as the first sample. The UI can select
-   `LOAD TO TRK 02`, but distinct per-track sample-slot association and
-   two-track playback remain unverified. Note 60/45 fields are visible in DSPI2,
+5. **In progress:** the second sample's RGPIO upload is confirmed, but its
+   header reports slot 300, the same slot as the first sample. A Track 2 menu
+   can be reached, but the follow-up load from that visually similar browser
+   state produced zero RGPIO events; distinct per-track assignment and
+   two-track playback remain unverified. The candidate DSPI2 field at `0xe0`
+   has no confirmed per-track layout. Note 60/45 fields are visible in DSPI2,
    but a note-60 input on the sample-machine track and its rate mapping remain
    inconclusive. Retire synthetic startup assumptions individually when evidence
    replaces them.
+
+The SAMPLE parameter sweep tried one +5-count detent on tune (encoder A),
+start (encoder B), length (encoder C), and level (LEVEL encoder), then triggered
+the sample. Against a cadence-matched no-turn baseline, tune, length, and level
+produced identical DSPI2 payloads. Start produced repeatable transient changes,
+but no persistent value that could be interpreted as a sample offset. No
+parameter mapping was added to the modeled DSP; details and exact offsets are
+in the [hypothesis log](./audio-trace-hypotheses.md).
 
 ## UI smoke regression
 
