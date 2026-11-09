@@ -4,11 +4,12 @@ An early-stage Digitakt II firmware emulator and analysis toolkit written in Rus
 Not affiliated with or endorsed by Elektron.
 
 It can inspect and unpack SysEx firmware containers and run firmware traces on a
-partial ColdFire V4e core with modeled and synthetic peripherals. The current OS 1.17
-diagnostic path reaches an interactive SAMPLE page: page input changes the screen
-and sample loading to RAM is observed, but encoder-driven parameter changes are
-not verified. These results depend on explicit diagnostic assumptions; this is
-not yet a hardware-faithful cold boot.
+partial ColdFire V4e core with modeled and synthetic peripherals. The current OS 1.17 diagnostic path reaches an interactive SAMPLE page: page
+input changes the screen and sample loading to RAM is observed. Sixteen separate
+single-step A/Tune inputs visibly change the Tune readout; a single +16 input
+does not. This screen response has not been matched to persistent firmware or
+DSP parameter state. These results depend on explicit diagnostic assumptions;
+this is not yet a hardware-faithful cold boot.
 
 Real firmware-driven audio playback is not implemented. SSI remains silent in the
 documented trigger/play trace. A separately labeled modeled-DSP path now consumes
@@ -23,11 +24,10 @@ The canonical project status, evidence, current blockers, and next-step order ar
 [docs/section3-handoff.md](docs/section3-handoff.md). That document is the single
 source of truth for implementation status; this README is a user-facing overview.
 
-`tools/ui-smoke.sh` checks the boot-to-SAMPLE screen, page changes, and a
-load-plus-trigger modeled-DSP WAV against deterministic frame and audio hashes.
-Its encoder mutation check is skipped because the expected frame also occurs
-without encoder input. It requires the local ignored firmware/card assets
-documented in the handoff.
+`tools/ui-smoke.sh` checks the boot-to-SAMPLE screen, page changes, the Tune
+readout after sixteen separate single-step encoder inputs, and a load-plus-trigger
+modeled-DSP WAV against deterministic frame and audio hashes. It requires the
+local ignored firmware/card assets documented in the handoff.
 
 ```sh
 cargo test

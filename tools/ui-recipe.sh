@@ -24,6 +24,15 @@ messages_for() {
     encoder)
       echo '3005,3000'
       ;;
+    encoder-tune-16)
+      local messages=() i
+      for ((i = 0; i < 16; i++)); do
+        messages+=('3001,3000')
+      done
+      messages+=('-')
+      local IFS=,
+      echo "${messages[*]}"
+      ;;
     page)
       case "$argument" in
         SRC|SAMPLE) echo '2002,2000' ;;
@@ -73,7 +82,7 @@ usage() {
 }
 
 case "$recipe" in
-  encoder|open-sample-page)
+  encoder|encoder-tune-16|open-sample-page)
     [[ $# -ge 4 && $# -le 5 ]] || usage
     snapshot=$1 base_png=$2 out_prefix=$3 expected=$4
     bin=${5:-target/release/dt2-cli}
