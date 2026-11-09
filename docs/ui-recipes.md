@@ -109,11 +109,23 @@ EncoderD` heading does not prove that it is the +Drive browser. The verified
 +Drive route starts from `out/shots/close-browser.snap`: its screen shows
 `SAMPLES` with `+DRIVE` selected. Entering +Drive shows `Factory A` and
 `incoming`; entering `incoming` shows `008 kick verb` and `SDE clap real`.
+Per Elektron's FAQ, factory samples do not occupy +Drive space, so the Factory
+tree appearing empty is expected; do not investigate it as an emulator issue.
 One DOWN from that listing and one YES left the same file list on screen,
 produced zero RGPIO events, and left the observed `0xe0` word at `0x012c`.
 The fallback did not load or replace a sample. Frames:
 `plusdrive-list.png`, `plusdrive-incoming-folder.png`,
 `plusdrive-clap-selected.png`, and `plusdrive-clap-load-result.png`.
+
+A bounded Route A retry started from
+`out/modeled-dsp/plusdrive-incoming-folder.snap` and sent DOWN as `2120` held
+for 3M instructions, then release `2100`. After another 51M instructions in
+3M chunks, the frame was stable but the kick `C044` row remained selected;
+the clap was not highlighted. No YES/RIGHT or action-menu/load input was sent.
+The run reported zero RGPIO events. Frames and logs are under `out/ui-frames/`
+(`00-start.png`, `01-down.png`, and `02-wait.png` through `16-wait.png`).
+Treat clap selection as inconclusive; no second upload or upload-field capture
+was produced.
 
 This remains inconclusive: no second upload, replacement, or WAV was confirmed.
 Do not compare sample headers or claim two-track playback until the sample load
