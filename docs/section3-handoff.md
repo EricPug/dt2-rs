@@ -288,6 +288,44 @@ The full `tools/ui-smoke.sh target/release/dt2-cli` run passed, including
 the boot, encoder, page-change, and both complete source-WAV comparisons;
 its log is `out/ui-smoke-full-parameter.log`.
 
+#### Tune turn-window DSPI2 comparison
+
+The hardware owner notes that the temporary Tune readout is a response to the
+turn and that earlier no-change conclusions for Tune, Start, Length and Level
+may have observed the screen too late. Those other parameters have not been
+retested here. Matched 105M-instruction runs started at
+`out/shots/main-after-load.snap` with `DSP_LINK`, synthetic replies and
+isolated card copies. The no-turn control used empty messages on the same
+3M schedule; the test runs sent eight or sixteen separate A `+1` messages
+(`3001,3000` pairs, 3M between messages). The encoded direction was **positive**;
+the temporary Tune label displayed `-3.00` for both turn counts. The first
+step was scheduled at +3M instructions and the last at +45M or +93M; the
+captures extend well beyond 20 DSPI2 blocks after the last step.
+
+All three runs captured 1,049 DSPI2 blocks. Comparing every data halfword at
+the same block index found **zero differences** for both turn counts against
+no-turn, including during the turns: `0x22`, `0x24`, `0x26`, and `0x28`
+were all `0000`; `0x21c` varied identically in all three runs; and `0x5ee`
+remained `5600`. Thus no captured DSPI2 field scaled with the step count.
+The result does not rule out events between blocks, a different state or
+transport, or a hardware response absent from the synthetic link. It does
+not identify a Tune/pitch field; no pitch model or WAV comparison was added.
+Logs, the per-offset comparison and frames are under `out/tune-transient/`:
+`no-turn.log`, `turn8.log`, `turn16.log`, `dspi-comparison.txt`,
+`turn8-frame-090.png`, and `turn16-settle-02-frame-final.png`.
+
+Two successive 3M settling frames matched for each test after masking the
+animated upper-left rectangle `(0,0)..(63,51)` on the 512x256 frame:
+`turn8-settle-01-masked.png` / `turn8-settle-02-masked.png`, and the
+corresponding `turn16` pair. The readout was already back to `TUNE` for
+eight steps but still showed `-3.00` for sixteen steps at those snapshots;
+two matching frames do not prove the transient has expired.
+
+The header word `0xb71b` equals 46,875 Hz, the WAV source sample rate for
+both kick and clap, and is preserved by the sample conversion. It is
+consistent with source-rate metadata, not evidence that the word itself is
+a fixed-point playback increment or a confirmed pitch multiplier.
+
 ## UI smoke regression
 
 Run `tools/ui-smoke.sh [path/to/dt2-cli]`. It performs the 1.5B-instruction
