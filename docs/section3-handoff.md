@@ -60,13 +60,15 @@ and must point here rather than maintain competing status reports.
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
 separate `+1` rotations visibly changed its readout to `-30.0`. D's `+16`
-event was also a rotation, and the screen changed to the Incoming sample list.
-Matched 64 KiB SRAM and 999 DSPI2-block captures showed no differences between
-the repeated-`+1` Tune run and no-turn; no trigger was sent. Thus there is a
-repeatable visible UI change but no confirmed persistent firmware/DSP parameter
-state or parameter model. The repeated-`+1` screen hash is asserted in the
-smoke test; the single-`+16` result and Start/length/level parameter sweeps are
-not. See the [hypothesis log](./audio-trace-hypotheses.md).
+event was also a rotation, and the screen changed to the Incoming sample list;
+sample selection itself is performed through menus, not by an encoder. The
+cause of D's screen transition is unclassified. Matched 64 KiB SRAM and 999
+DSPI2-block captures showed no differences between the repeated-`+1` Tune run
+and no-turn; no trigger was sent. Thus there is a repeatable visible UI change
+but no confirmed persistent firmware/DSP parameter state or parameter model.
+The repeated-`+1` screen hash is asserted in the smoke test; the single-`+16`
+result and Start/length/level parameter sweeps are not. See the
+[hypothesis log](./audio-trace-hypotheses.md).
 
 ## UI smoke regression
 

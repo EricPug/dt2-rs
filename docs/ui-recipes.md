@@ -40,7 +40,7 @@ Do not insert `2200` between `2201` and `2601`. No other recipe latches a key.
 |---|---|---|---|
 | Turn A/Tune by one count, 16 times | `out/shots/main-after-load.snap` and `.png` | `3001,3000` repeated 16 times; 3M between messages | Tune readout shows `-30.0`; frame SHA-256 `0121a4cf0880c5892dabd094dbc7cf4caf6d14fd9d93cfd5b276d37981a74368`. No-turn and single `+16` hash: `3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a`. |
 | Turn A/Tune once by 16 counts | same sample-loaded state | `3010`, 3M | Same hash as no-turn; no visible value change. |
-| Rotate D once by 16 counts | same sample-loaded state | `3310`, 3M | D is a rotation, not a press; SAMPLE changes to the Incoming sample list. Its action semantics are not otherwise classified. |
+| Rotate D once by 16 counts | same sample-loaded state | `3310`, 3M | D is a rotation, not a press; the observed screen changed to the Incoming sample list. Sample selection is menu-driven, so this is not a sample-selection gesture; the reason for the screen transition is unclassified. |
 | Change page to FLTR | same sample-loaded state | `2004,2000`, 3M | frame SHA-256 `20b7b62611a13133779f3da6e452591182fc7ff5bc37c2b9b3ada5e16b7133c3` |
 | Return to SAMPLE | snapshot and rendered frame from the FLTR recipe | `2002,2000`, 3M | frame SHA-256 `18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b` |
 | Select track 2 | sample-loaded main page | `2180,2100,2302,2300`, 3M | the `SMP 2` tile is selected; frame SHA-256 `e8940fe5181d7672ffe24a7f153f5fd7fcd0274c83da803fb21bf5c8602f4c04` |
