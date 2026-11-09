@@ -54,14 +54,29 @@ sample-matching WAV establish that modeled playback path.
 
 The card route is split into `ui-browse-sample.sh` and `ui-load-sample.sh`.
 The load recipe is pinned to `out/shots/action-down.snap`, where the selected
-sample's action menu is open. Although the browser recipe reaches a visually
-similar menu, using its resulting snapshot as the load recipe's input leaves a
-`LOADING 1 SAMPLE` overlay; that continuous route is therefore state-dependent
-and not claimed as a verified load. The pinned load recipe's screen assertion
-checks the resulting incoming-list selection, while the modeled-DSP runner
-verifies the RGPIO upload and played waveform. Its combined load-plus-trigger
-sequence remains in one emulator run so the modeled DSP retains its uploaded
-sample.
+sample's action menu is open. The known checkpoint shows `008 kick verb`
+selected, `LOAD TO TRK 01` in the menu, and the cursor on `RENAME`. Its
+cumulative instruction counter is 8,400,000,000. The original boot/input
+transcript that created this snapshot was not retained, so this is known
+state-level provenance, not a fully reproducible snapshot-generation recipe.
+It depends on the settled incoming-card browser state and its selected sample;
+a visually similar menu is not sufficient.
+
+The continuous browse-to-load route was replayed from
+`out/shots/main-after-load.snap` with the browser/load inputs spaced 6,000,000
+instructions apart and a 2,000,000,000-instruction budget. The final screen
+still showed `LOADING 1 SAMPLE`; its frame SHA-256 was
+`bcc8d1f1ad4f05c2c73cc22413c1f77ff589508cf4fcee4d6b8ed5566a1c4626`. A second
+attempt selected Track 2 first and reached a menu labeled `LOAD TO TRK 02`,
+but running the load gestures from that visually similar state produced zero
+RGPIO events and left the watched sample-selection word unchanged. Neither
+continuous route is a verified load.
+
+Keep the pinned load recipe until a replacement is shown to produce the RGPIO
+page stream. Its screen assertion checks the resulting incoming-list selection,
+while the modeled-DSP runner verifies the RGPIO upload and played waveform. Its
+combined load-plus-trigger sequence remains in one emulator run so the modeled
+DSP retains its uploaded sample.
 
 ## Run the scripts
 
