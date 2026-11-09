@@ -13,7 +13,7 @@ and must point here rather than maintain competing status reports.
   hardware-faithful cold boot.
 - The diagnostic run reaches the SAMPLE page. UART8 page input is confirmed.
   From the sample-loaded checkpoint, sixteen separate `+1` rotations on
-  encoder A (Tune) visibly change its readout to `-30.0`; a single `+16` does
+  encoder A (Tune) temporarily show `-3.00` in place of its label; a single `+16` does
   not. Matched SRAM and DSPI2 captures did not change, so the firmware parameter
   state and DSP mapping remain unconfirmed. A clickable front panel is
   available in the optional window build.
@@ -241,7 +241,7 @@ WAV source, rather than relying solely on these output hashes.
 
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
-separate `+1` rotations visibly changed its readout to `-30.0`. D's `+16`
+separate `+1` rotations temporarily showed `-3.00` in place of the Tune label. D's `+16`
 event was also a rotation, and the screen changed to the Incoming sample list;
 sample selection itself is performed through menus, not by an encoder. The
 cause of D's screen transition is unclassified. Matched 64 KiB SRAM and 999
@@ -251,6 +251,42 @@ but no confirmed persistent firmware/DSP parameter state or parameter model.
 The repeated-`+1` screen hash is asserted in the smoke test; the single-`+16`
 result and Start/length/level parameter sweeps are not. See the
 [hypothesis log](./audio-trace-hypotheses.md).
+
+#### Triggered Tune comparison
+
+From `out/shots/main-after-load.snap`, sixteen `3001,3000` pairs were sent at
+3M-instruction intervals. The composited screen showed `-3.00` in the Tune
+label area; a prior report misread this as `-30.0`. The no-turn control did
+not show that temporary readout. See `out/tune-observation/no-turn.png` and
+`out/tune-observation/after-input-final.png`. Seventeen subsequent 3M chunks
+were captured as `out/tune-observation/settle-01-frame-final.png` through
+`settle-17-frame-final.png`. No two consecutive full frames matched in 51M
+instructions; the top-left icon continued animating. By frame 16, the
+temporary readout had disappeared and the label again read `TUNE`.
+
+The turned and no-turn snapshots were both advanced 147M instructions before
+the same TRIG/PLAY sequence, then traced for 100M with `DSP_LINK`. Each
+capture contained 999 DSPI2 blocks; the only differing data offset was
+`0x39c` (halfword index 462), a previously identified free-running counter,
+in 997 blocks. Track-2 note (`0x06`) and machine (`0x98`) fields matched
+throughout, including the `0x2d00` trigger. The 64 KiB SRAM snapshots differed
+in 10 bytes; the four 64 MiB DDR snapshots differed in 1,127, 765, 0, and
+3,803 bytes respectively. Some differences include input-buffer contents and
+time-dependent state; no Tune parameter field has been identified or shown to
+change. These broad RAM differences are not evidence of a pitch mapping.
+Logs and RAM dumps: `out/tune-observation/turn-trigger.*`,
+`baseline-trigger.*`, and the corresponding `*-trigger-sram.bin` /
+`*-trigger-ddr0.bin` through `*-trigger-ddr3.bin`. Since no pitch field or
+firmware parameter state was identified, adding pitch would require guessing;
+the model remains unchanged and the mapping is inconclusive.
+
+The kick and clap on-card 64-byte headers differ only in the 32-bit
+big-endian PCM byte length at `0x04`: `0x00009c00` versus `0x00003022`.
+Both contain sample rate `0x0000b71b` at `0x08`, byte `0x7f` at `0x14`,
+and zeros elsewhere. Raw header dumps: `out/tune-observation/headers.txt`.
+The full `tools/ui-smoke.sh target/release/dt2-cli` run passed, including
+the boot, encoder, page-change, and both complete source-WAV comparisons;
+its log is `out/ui-smoke-full-parameter.log`.
 
 ## UI smoke regression
 
