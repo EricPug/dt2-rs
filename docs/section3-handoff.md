@@ -89,6 +89,61 @@ and must point here rather than maintain competing status reports.
    `29-load-wait.png` through `126-load-wait.png`. Retire synthetic startup
    assumptions individually when evidence replaces them.
 
+### Clap load diagnostic
+
+The clap replay started at `out/ui-frames/26-down-release.snap` before the
+confirmed `LOAD TO TRK 02` YES. `UART8_RX_LATE=2102` sent YES immediately;
+`UART8_RX_ONCE UART8_RX_PERIODIC=3000000:2100` released it 3M instructions
+later. A 119M-instruction run used `ESDHC_TRACE EDMA_TRACE` and
+`PC_SAMPLE=69000000:119000000:1000:out/load-diagnostic/clap-pc.txt`. There
+were zero eSDHC commands (including CMD17, CMD18, CMD25) and zero channel-59
+events in the entire replay, including the sampled 50M loading window. The
+final frame `out/load-diagnostic/clap-final.png` still shows the loading popup.
+No card-read job was observed starting; no clap sector request or card-data
+comparison exists. The trace's 28,430 completed storage writes are a restored
+cumulative device counter, not writes observed in this run.
+
+For comparison, a 140M-instruction kick replay started from the pinned
+`out/shots/action-down.snap` using the existing `UP` x4, YES, four waits, YES
+recipe (`UART8_RX_PERIODIC=6000000:2104,2100,2104,2100,2104,2100,2104,2100,2102,2100,-,-,-,-,2102,2100`).
+It used `DSP_LINK ESDHC_TRACE EDMA_TRACE` and
+`PC_SAMPLE=90000000:140000000:1000:out/load-diagnostic/kick-pc.txt`. The full
+replay issued two CMD18s and completed two 32 KiB channel-59 transfers:
+sector `0x5f01c0` at +89.477M and `0x5f0200` at +97.413M. The sampled
+90M–140M window includes only the second command and transfer. It recorded
+135,300 RGPIO events in the full replay and ended at the incoming list.
+Logs are `out/load-diagnostic/clap.log` and `out/load-diagnostic/kick.log`.
+
+The top 10 sampled PCs are below; counts are samples out of 50,000, not exact
+instruction hit counts. Both PC-sampled replays use the same Rust CPU sampling
+path, not the normal Unicorn execution path.
+
+| Rank | Clap PC | Samples | Kick PC | Samples |
+|---:|---|---:|---|---:|
+| 1 | `0x400cce3c` | 7929 | `0x401abac4` | 764 |
+| 2 | `0x401abac8` | 821 | `0x401abac8` | 743 |
+| 3 | `0x401abac4` | 718 | `0x401abac0` | 708 |
+| 4 | `0x401abac0` | 672 | `0x400cd55c` | 525 |
+| 5 | `0x4004611e` | 448 | `0x400cd564` | 525 |
+| 6 | `0x40053d00` | 445 | `0x400cd560` | 524 |
+| 7 | `0x40053d26` | 445 | `0x400cd55a` | 518 |
+| 8 | `0x40053cf8` | 440 | `0x400cd558` | 500 |
+| 9 | `0x40042772` | 439 | `0x400cd562` | 500 |
+| 10 | `0x4004277a` | 437 | `0x400cd568` | 500 |
+
+`0x400cce3c` is the documented idle self-branch. The kick replay includes
+`DSP_LINK`, which opens the synthetic DSPI2 gate with placeholder replies; the
+clap replay did not. The earlier failed continuous-track-2 runs did include
+`DSP_LINK`, so this difference alone does not establish a cause. Both used
+`RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=out/run-card.img`,
+`INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP
+DTIM3_TICKS_PER_INSTRUCTION=16`, and the same section-3 runner's PIT/DTIM1
+rates of 1. No explicit IPS setting or semaphore-forcing option appears in
+either replay. The snapshots, UI context, input timing and confirmation
+sequences differ, and the original creation transcript for the pinned kick
+snapshot was not retained, so its inherited state cannot be equated to the
+continuous route. No setting difference is proven causal.
+
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
 separate `+1` rotations visibly changed its readout to `-30.0`. D's `+16`
