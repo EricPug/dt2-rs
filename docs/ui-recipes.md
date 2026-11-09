@@ -83,6 +83,12 @@ pinned action-menu snapshot, not from an uninterrupted main-page replay. The
 continuous route below stalled, so repeating the sequence by hand is not
 guaranteed to load a sample.
 
+Select by the visible label rather than blindly sending four UP presses:
+`LOAD TO PROJECT` is above `LOAD TO TRK 01` and is a different action. In a
+manual attempt `LOAD TO PROJECT` remained on `LOADING 1 SAMPLE`; the app
+recorded no additional card commands or RGPIO events. See the handoff's manual
+attempt section for the preserved evidence.
+
 The continuous browse-to-load route was replayed from
 `out/shots/main-after-load.snap` with the browser/load inputs spaced 6,000,000
 instructions apart and a 2,000,000,000-instruction budget. The final screen
