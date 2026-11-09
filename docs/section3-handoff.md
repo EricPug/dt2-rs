@@ -88,6 +88,35 @@ emerged from this search. Retain the existing regressions and leave the
 external boundary unresolved; no new peripheral, SHARC or eDMA implementation
 is warranted by these sources.
 
+#### Community cross-check, 2026-11-09
+
+- The [Digitakt II PCB photos](https://www.elektronauts.com/t/digitakt-ii-pcb/212504)
+  include a clear close-up of `ADSP-21569 KBCZ210` on board `PCBA0109B`.
+  The exact codec marking was not readable in the photos checked. A
+  [2024 forum post](https://www.elektronauts.com/t/introducing-digitakt-ii/212312/1399)
+  says the II codec looks like the original's AK4621, but does not confirm
+  its marking. A [2025 discussion](https://www.elektronauts.com/t/disassembled-photos-of-og-digitakt-and-dac-adc-models/235104)
+  documents AK4621 and CS4272 variants on the **original** Digitakt, not a
+  confirmed II part number. No hardware continuity or signal capture was found
+  in the public forum material checked; private Discord was not searched.
+- [Digikit's LP0 tool, pinned](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/tools/sharc_dev/sharc_lp0.py)
+  describes replaying captured ColdFire writes into a SHARC emulator using a
+  modeled byte/clock interpretation and manually modeled DMA/interrupt
+  delivery. Its 1.16 profile and the separate
+  [Digitone II LP0 diagnostic](https://github.com/ElekLabs/digikit/blob/c6da26dd8f7b6f61750a01746686972f28dbecae/modules/core/adapters/dsp-lp0-proof/README.md)
+  are useful software leads, not a Digitakt II hardware bridge capture. The
+  Digitone diagnostic explicitly says it is emulator-only and never to use it
+  on hardware. The previously checked Digiemu and lalzart main revisions remain
+  unchanged. No independently validated 1.17 bridge or SSI endpoint was found.
+- [Elektron Emu's Digitakt II README, pinned](https://github.com/xerydian/elektron-emu/blob/03961c61f085200b6de8607075b214e425145040/Digitakt-II/README.md)
+  describes an OS 1.16 emulator and loading samples. That claim was not tested
+  here and does not establish physical SSI wiring or a hardware capture.
+
+Because the exact II codec was not confirmed, the requested same-DSP-and-codec
+reference-design comparison cannot yet be made. A generic development-board
+schematic would not identify this product's wiring. The conclusion above is
+unchanged: stop at the unverified external boundary.
+
 ## Milestone order
 
 1. **Complete:** format the workspace, resolve Clippy findings, and align the
