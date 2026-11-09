@@ -183,6 +183,47 @@ different action from the successful pinned `LOAD TO TRK 01` checkpoint; it does
 not demonstrate a successful load or explain the stall. The saved log, UART
 capture, and final snapshot are under `out/hand-test-project/`.
 
+### Matched kick action-menu comparison
+
+Two checkpoints showing `1 SAMPLE SELECTED` and `LOAD TO TRK 01` highlighted
+were replayed with DTIM3 = 16, `DSP_LINK`, identical 6M-instruction button
+spacing, and separate copies of `out/run-card.img`. One was reached from
+`main-after-load.snap` via the continuous browser recipe and DOWN; the other
+was `action-down.snap` followed by UP four times. The latter is a pre-upload
+checkpoint; the former already had the kick loaded. Both sent
+`2102,2100,-,-,-,-,2102,2100` and ran 300M instructions. The pinned run
+issued two CMD18s for blocks `0x5f01c0` and `0x5f0200` and recorded 125,061
+RGPIO accesses. The continuous run issued no eSDHC commands and recorded zero
+RGPIO accesses. These are not equivalent to the user's clap `LOAD TO PROJECT`
+attempt.
+
+The highlighted menu's left-hand `DESTIN.: RAM BANK ANY` is not evidence that
+the first YES opened a separate destination confirmation. From the selected
+pinned menu, a single YES press and release, with no second YES, produced both
+card reads and the full RGPIO access count; at 60M its frame says
+`1 SAMPLE LOADED`. This corrects the earlier two-confirmation interpretation.
+The existing two-YES recipe remains a reproducible historical sequence, but
+its second YES is not needed for that upload.
+
+To test two concrete differences without changing code, NO then RIGHT closed
+and reopened the pinned menu; DOWN selected `LOAD TO TRK 01`, and the same
+two-YES sequence still produced both reads and 125,061 RGPIO accesses. After
+that successful upload, selecting the same kick again with YES, reopening the
+menu with RIGHT, and repeating DOWN and the two-YES sequence produced zero
+card commands and zero RGPIO accesses over 300M instructions. This repeat
+resembles the continuous run, but does not prove that the prior upload itself
+caused the difference: selection, navigation, and other firmware state also
+changed. Whether the repeat was intentionally skipped or stalled remains
+inconclusive. Do not equate it with the user's loading-overlay freeze.
+
+One diagnostic limitation: a 60M single-YES replay from the pinned selected
+menu with `TRACE_REGS=0x400f0c1c` produced no card or RGPIO activity, while
+the same input without `TRACE_REGS` produced both reads and 125,061 RGPIO
+accesses. This instrumentation changes instruction-hook configuration; the
+cause of the behavioral difference is unverified. Its zero-hit result cannot
+establish that no job was submitted in the normal replay. The full logs,
+frames, and snapshots are under ignored `out/load-state-compare/`.
+
 ### Clap load diagnostic
 
 The clap replay started at `out/ui-frames/26-down-release.snap` before the
@@ -1756,7 +1797,7 @@ write-window tracer is documented in the README.
 
 ### Sample load and the per-block DSPI2 stream
 
-- Load replay (from `out/shots/action-down.snap`, cursor on RENAME in the `incoming` action menu): `UP UP UP UP YES wait wait YES` with `ESDHC_FILE=out/run-card.img DSPI2_BOOTSTRAP DSP_LINK ESDHC_TRACE`, 200M instructions, log `out/dsp-load.log`. The browser shows `008 kick verb` with `C044` afterwards, so the load happened. (`UP` x4 then one `YES` alone leaves the Destination dialog open; a second `YES` confirms.)
+- Load replay (from `out/shots/action-down.snap`, cursor on RENAME in the `incoming` action menu): `UP UP UP UP YES wait wait YES` with `ESDHC_FILE=out/run-card.img DSPI2_BOOTSTRAP DSP_LINK ESDHC_TRACE`, 200M instructions, log `out/dsp-load.log`. The browser shows `008 kick verb` with `C044` afterwards, so the load happened. A later matched replay established that the first `YES` alone completes this upload; the earlier interpretation of a separate Destination confirmation was incorrect.
 - Two CMD18 reads, each 64 sectors (32 KiB) on eDMA ch59 (TCD DADDR/value `0x4060d770` then `0x40605770`), CMDARG last `0x5f0200`; the first read (sector `0x5f01c0`) lands at `0x4060d770`, the second (`0x5f0200`) at `0x40605770`. The earlier inference that PCM begins six bytes into the first read was incorrect; the verified file-header offset is `0x40`.
 - Across the sample-load run (1999 DSPI2 blocks), the two free-running counters (indices 270, 462) and a UI-animation field (112/113/114) change. No descriptor, address or sample data reaches that DSPI2 stream during loading. This is separate from the note-dependent fields found in the longer TRIG/PLAY comparison. A 3-halfword n-gram search of the TRIG+PLAY blocks (`out/dsp-c.log`) for kick samples also finds no sample data.
 - Sample data is not delivered over the per-block DSPI2 eDMA 28/29 stream; its TCDs exchange 1,374 frames per block. Digiemu's 1.15C/1.16 findings describe the same frame count, while related OS 1.16 research labels the separate DSPI1 request `0001 012c` as plausible `kind,slot` fields. The DSPI1 transaction's connection to the waveform cache remains unproven; the synthetic diagnostic does not execute channels 14/15, so its zeroed response buffer is not hardware evidence.
