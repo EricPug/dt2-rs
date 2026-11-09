@@ -96,21 +96,30 @@ action: that route was not the intended shared-pool assignment flow. A plain
 TRIG tap is not a track selection.
 
 The emulator's Track 1 chord input was sent as `2180,2301,2300,2100,-`; the
-display showed `SMP 1`, but the starting frame already showed `SMP 1`, so this
-does not isolate the chord's effect. The starting frame was already on SRC; the
-SRC input left the sample controls visible. One slow encoder D `+1`
-(`3301,3300`) then left the display unchanged on
-`SMP 1`; the expected empty-slot screen was not reached. The run stopped here:
-no DOWN, YES, browser navigation, or sample load was sent. Screens:
-`out/modeled-dsp/menu-track1-src.png` and
-`out/modeled-dsp/menu-track1-slot-step1.png`; both have SHA-256
-`55abfbeb226ddc8f2e61392be564c604aec7a1f72085a550b8339a81ee6204fb`.
+display showed `SMP 1`, but the starting frame already showed `SMP 1`, so the
+chord is untested, not failed. The starting frame was already on SRC; the SRC
+input left the sample controls visible. One D `+1`, one DOWN, and four separate
+spaced D `+4` turns all left the screen on `SMP 1`; no empty slot was visibly
+reached. Screens: `menu-track1-src.png`, `menu-track1-slot-step1.png`,
+`menu-track1-down.png`, and `menu-track1-d-plus4.png` through
+`menu-track1-d-plus4-step4.png`.
 
-This is not a verified recipe. Do not claim a second sample assignment or
-compare its RGPIO header / DSPI2 `0xe0` until an empty slot visibly changes,
-the load completes, and a distinct upload is captured. Keep the existing pinned
-load recipe for the one-sample regression only; its combined load-plus-trigger
-run preserves the modeled DSP's uploaded sample.
+The earlier D `+16` image shows a list of sample names, but its `Tune Max
+EncoderD` heading does not prove that it is the +Drive browser. The verified
++Drive route starts from `out/shots/close-browser.snap`: its screen shows
+`SAMPLES` with `+DRIVE` selected. Entering +Drive shows `Factory A` and
+`incoming`; entering `incoming` shows `008 kick verb` and `SDE clap real`.
+One DOWN from that listing and one YES left the same file list on screen,
+produced zero RGPIO events, and left the observed `0xe0` word at `0x012c`.
+The fallback did not load or replace a sample. Frames:
+`plusdrive-list.png`, `plusdrive-incoming-folder.png`,
+`plusdrive-clap-selected.png`, and `plusdrive-clap-load-result.png`.
+
+This remains inconclusive: no second upload, replacement, or WAV was confirmed.
+Do not compare sample headers or claim two-track playback until the sample load
+completes and a distinct upload is captured. Keep the existing pinned load
+recipe for the one-sample regression only; its combined load-plus-trigger run
+preserves the modeled DSP's uploaded sample.
 
 ## Run the scripts
 
