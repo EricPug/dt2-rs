@@ -108,24 +108,41 @@ The earlier D `+16` image shows a list of sample names, but its `Tune Max
 EncoderD` heading does not prove that it is the +Drive browser. The verified
 +Drive route starts from `out/shots/close-browser.snap`: its screen shows
 `SAMPLES` with `+DRIVE` selected. Entering +Drive shows `Factory A` and
-`incoming`; entering `incoming` shows `008 kick verb` and `SDE clap real`.
+`incoming`; entering `incoming` shows `008 kick verb` and `303 clap real`.
 Per Elektron's FAQ, factory samples do not occupy +Drive space, so the Factory
 tree appearing empty is expected; do not investigate it as an emulator issue.
-One DOWN from that listing and one YES left the same file list on screen,
-produced zero RGPIO events, and left the observed `0xe0` word at `0x012c`.
+One DOWN from that listing moved the white highlight to the clap; a subsequent
+YES in the earlier attempt left that frame unchanged, produced zero RGPIO
+events, and left the observed `0xe0` word at `0x012c`.
 The fallback did not load or replace a sample. Frames:
 `plusdrive-list.png`, `plusdrive-incoming-folder.png`,
 `plusdrive-clap-selected.png`, and `plusdrive-clap-load-result.png`.
 
 A bounded Route A retry started from
 `out/modeled-dsp/plusdrive-incoming-folder.snap` and sent DOWN as `2120` held
-for 3M instructions, then release `2100`. After another 51M instructions in
-3M chunks, the frame was stable but the kick `C044` row remained selected;
-the clap was not highlighted. No YES/RIGHT or action-menu/load input was sent.
-The run reported zero RGPIO events. Frames and logs are under `out/ui-frames/`
-(`00-start.png`, `01-down.png`, and `02-wait.png` through `16-wait.png`).
-Treat clap selection as inconclusive; no second upload or upload-field capture
-was produced.
+for 3M instructions, then release `2100`. The white highlight moved from kick
+to clap and stayed there through 51M instructions in 3M chunks. The `C044`
+marker on the kick row is separate from the highlight; the previous report
+mistook it for the cursor. No YES/RIGHT or action-menu/load input was sent in
+that run, and it reported zero RGPIO events. Frames and logs are under
+`out/ui-frames/` (`00-start.png`, `01-down.png`, and `02-wait.png` through
+`16-wait.png`).
+
+Continuing from the clap-highlighted snapshot, YES (`2102`, release `2100`)
+added a check mark beside the clap, and RIGHT (`2140`, release `2100`) opened
+the action menu. TRK+TRIG 2 (`2180,2302,2300,2100`, with each held for 3M
+instructions) changed its entry from `LOAD TO TRK 01` to `LOAD TO TRK 02`.
+DOWN (`2120,2100`) moved the white highlight to that entry; YES was then sent
+and released. The display showed `LOADING 1 SAMPLE` after 69M instructions and
+remained there through 300M. All 100 post-confirmation 3M chunks reported zero
+RGPIO events. The popup obscures the clap row, so a loaded marker cannot be
+checked; no upload header, page count, or length was captured. The SRAM word
+corresponding to candidate DSPI2 offset `0xe0` remained `0x012c`; this is not
+a direct capture of a DSPI2 frame. It is inconclusive whether the kick's slot
+would be replaced.
+Frames: `out/ui-frames/17-yes-press.png` through
+`out/ui-frames/26-down-release.png`, then `27-load-yes-press.png`,
+`28-load-yes-release.png`, and `29-load-wait.png` through `126-load-wait.png`.
 
 This remains inconclusive: no second upload, replacement, or WAV was confirmed.
 Do not compare sample headers or claim two-track playback until the sample load
