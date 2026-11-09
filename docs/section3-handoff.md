@@ -47,15 +47,18 @@ and must point here rather than maintain competing status reports.
 4. **Complete, modeled only:** load one sample, trigger it from the observed
    DSPI2 note edge, and verify a nonzero 48 kHz WAV segment against source bytes.
    The runner and WAV hash are part of the smoke gate; no injected audio counts.
-5. **In progress:** the second sample's RGPIO upload is confirmed, but its
-   header reports slot 300, the same slot as the first sample. A Track 2 menu
-   can be reached, but two attempts at the follow-up load gesture from that
-   saved menu state produced zero RGPIO events. The retry's `0xe0` word remained
-   `0x012c` (300); distinct per-track assignment and two-track playback remain
-   unverified. The candidate DSPI2 field at `0xe0` has no confirmed per-track
-   layout. Note 60/45 fields are visible in DSPI2, but a note-60 input on the
-   sample-machine track and its rate mapping remain inconclusive. Retire
-   synthetic startup assumptions individually when evidence replaces them.
+5. **In progress:** distinct sample slots assigned to two tracks and
+   two-track playback are unverified. The earlier clap upload reported slot
+   300, the same as the first sample, and did not establish independent
+   assignment. The card-browser `LOAD TO TRK 02` route was the wrong workflow
+   for that goal and produced zero RGPIO events twice. Following the corrected
+   SRC-page flow, the screen showed `SMP 1`; one encoder-D `+1` left it
+   unchanged, so the attempt stopped before selecting an empty slot or loading.
+   No new header, page count, length, or `0xe0` comparison was produced. The
+   candidate DSPI2 field at `0xe0` has no confirmed per-track layout. Note 60/45
+   fields are visible in DSPI2, but a note-60 input on the sample-machine track
+   and its rate mapping remain inconclusive. Retire synthetic startup
+   assumptions individually when evidence replaces them.
 
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
