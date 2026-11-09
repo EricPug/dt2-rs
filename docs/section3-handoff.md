@@ -36,6 +36,31 @@ and must point here rather than maintain competing status reports.
   `cargo clippy --workspace --all-targets -- -D warnings`, and
   `cargo test --workspace` (324 passed, 1 ignored).
 
+## Audio boundary assessment: Digiemu comparison
+
+The next audio milestone is **not yet a promised non-silent ColdFire SSI
+capture**. The observed 1.17 sample-upload and note-control traffic reaches
+CPU-visible interfaces, but the receiver and its route to physical audio are
+not established. The silent SSI trace does not prove that the real sample
+engine renders on the ColdFire, nor that it does not.
+
+| Question | Digiemu evidence | OS 1.17 evidence here | Assessment |
+|---|---|---|---|
+| Sample upload | [II findings, pinned revision](https://github.com/elekloader/digiemu/blob/6f2d619fd1bc9579a62868688fc6bdd1dcf844db/docs/FINDINGS.md) describe FlexBus sample pages and headers for 1.15C/1.16 as prior research, not a fully verified 1.17 route. | Twelve GPIO-serialized packets reconstruct the kick and clap file bytes, including all PCM; the RGPIO-ready response is synthetic. | Sample bytes leave the CPU-visible path; physical receiver and consumption are unconfirmed. The older high-offset window remains untested here. |
+| Trigger/control | The pinned II findings verify a fixed 1,374-word full-duplex DSPI2 frame for the older images, with machine-related fields. | The same frame length and note-dependent fields occur in 1.17; the tested DSPI2 stream has no sample PCM. `DSP_LINK` supplies a constant fabricated reply. | Consistent with a separate control path, not proof of DSP receipt or exact field semantics. |
+| SSI timing and input | The II findings describe externally clocked SSI0 and a receive-marker-dependent handover; clock rate and external source are unresolved. Their opt-in SSI event model does not synthesize RX peer data. | The 1.17 diagnostic `SSI_AUDIO_IRQ` fabricates RX markers to advance the interrupt chain and schedules TX servicing; it is not a hardware clock or peer model. | A running interrupt chain in our tests relies on a synthetic input. Its successful progression does not validate the physical SSI source or timing. |
+| SSI output | Digiemu's [mk1 audio analysis](https://github.com/elekloader/digiemu/blob/master/docs/mk1/11-audio.md) demonstrates a ColdFire sample renderer for mk1 OS 1.53, not for Digitakt II. | In a 1.17 trigger/play run, 1,199 SSI TX blocks were zero. The active service cleared its buffer and followed a null USB-stream list. Forcing mode 5 also produced zero output and only exercised a USB host-audio source list. | Do not transplant the mk1 renderer or infer that forcing mode 5 should play samples. Neither test rules out an unobserved 1.17 CPU renderer or external audio path. |
+
+**Decision:** retain the fresh-load and modeled-DSP tests as regression
+evidence, but do not count their WAV as firmware audio. Before implementing
+anything else, seek independently sourced Digitakt II board/interface
+documentation or hardware observations that identify the SSI endpoint and
+audio signal direction. A bounded follow-up should report the source, firmware
+version and evidence quality, and either identify a testable CPU-side path or
+explicitly stop at an unverified external boundary. Do not invent RX audio,
+force USB events, assume a DSP-to-SSI route, or pursue SHARC/eDMA
+implementation based on the mk1 analogy.
+
 ## Milestone order
 
 1. **Complete:** format the workspace, resolve Clippy findings, and align the
