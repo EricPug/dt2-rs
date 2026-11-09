@@ -73,6 +73,16 @@ state-level provenance, not a fully reproducible snapshot-generation recipe.
 It depends on the settled incoming-card browser state and its selected sample;
 a visually similar menu is not sufficient.
 
+For a manual attempt from the sample-loaded main page: hold FUNC, press and
+release SAMPLING, then release FUNC; select `+DRIVE` with YES, move DOWN to
+`incoming` and press YES. Highlight the desired sample, press YES to check it,
+then RIGHT for its action menu. In the pinned kick checkpoint the cursor is on
+`RENAME`: UP four times selects `LOAD TO TRK 01`; YES opens its Destination
+dialog, and a second YES confirms. The confirmed kick upload starts from that
+pinned action-menu snapshot, not from an uninterrupted main-page replay. The
+continuous route below stalled, so repeating the sequence by hand is not
+guaranteed to load a sample.
+
 The continuous browse-to-load route was replayed from
 `out/shots/main-after-load.snap` with the browser/load inputs spaced 6,000,000
 instructions apart and a 2,000,000,000-instruction budget. The final screen
@@ -86,14 +96,16 @@ Neither continuous route is a verified load. Captures:
 `out/modeled-dsp/two-track-loaded.log` and
 `out/modeled-dsp/two-track-loaded-retry.log`.
 
-## Shared-pool, two-track load flow (not yet verified)
+## Shared-pool, two-track load flow (known bad in emulator)
 
-For two independently playable samples, select each destination track with a
-latched TRK+TRIG chord, then use the SRC page's encoder D to choose a distinct
-empty shared-pool slot. Press YES on that slot to open the +Drive browser, choose
-a sample, and press YES to load it. Do not use the card-browser `LOAD TO TRK`
-action: that route was not the intended shared-pool assignment flow. A plain
-TRIG tap is not a track selection.
+The attempted shared-pool flow selected a destination track with a latched
+TRK+TRIG chord, then used SRC encoder D to choose an empty slot and YES to open
+the assignment browser. Selecting the already-loaded kick with YES left the
+browser unresponsive in matched DTIM3 = 4 and 16 replays. A later hand test
+reported the same symptom with clap and Track 2. Treat SRC-slot-YES as a known
+bad path in this emulator, not as a verified way to load samples; see
+[the handoff](./section3-handoff.md#slot-number-correlation-and-routing-limit).
+A plain TRIG tap is not a track selection.
 
 The emulator's Track 1 chord input was sent as `2180,2301,2300,2100,-`; the
 display showed `SMP 1`, but the starting frame already showed `SMP 1`, so the
