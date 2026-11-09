@@ -59,7 +59,11 @@ check_sha256 out/shots/main-after-load.png \
 check_sha256 out/shots/main-after-load.snap \
   225760283abcf448018f924c3eb71890666694e5b0c5d2825df7d545efa297a6
 
-echo "SKIP encoder mutation check: +16 Tune/Start inputs did not change the screen; see docs/ui-recipes.md"
+tools/ui-turn-encoder.sh --tune-16-one-count-steps \
+  out/shots/main-after-load.snap out/shots/main-after-load.png \
+  "$OUT/tune-16-single-steps" \
+  0121a4cf0880c5892dabd094dbc7cf4caf6d14fd9d93cfd5b276d37981a74368 "$BIN"
+
 tools/ui-change-page.sh FLTR \
   out/shots/main-after-load.snap out/shots/main-after-load.png \
   "$OUT/fltr" \

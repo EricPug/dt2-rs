@@ -11,10 +11,12 @@ and must point here rather than maintain competing status reports.
 - The partial ColdFire emulator executes the OS 1.17 section-3 direct-entry trace
   with explicitly modeled and synthetic startup conditions; this is not a
   hardware-faithful cold boot.
-- The diagnostic run reaches the SAMPLE page. UART8 page input is confirmed, but
-  encoder inputs have not produced a confirmed parameter-value change from the
-  sample-loaded checkpoint. A clickable front panel is available in the optional
-  window build.
+- The diagnostic run reaches the SAMPLE page. UART8 page input is confirmed.
+  From the sample-loaded checkpoint, sixteen separate `+1` rotations on
+  encoder A (Tune) visibly change its readout to `-30.0`; a single `+16` does
+  not. Matched SRAM and DSPI2 captures did not change, so the firmware parameter
+  state and DSP mapping remain unconfirmed. A clickable front panel is
+  available in the optional window build.
 - The synthetic eMMC supports formatting, browsing, and loading a sample into RAM.
 - Firmware-driven audio playback is not working: SSI TX remains silent in the
   documented trigger/play trace. A separately labeled modeled-DSP stand-in now
@@ -36,10 +38,10 @@ and must point here rather than maintain competing status reports.
 
 1. **Complete:** format the workspace, resolve Clippy findings, and align the
    project summaries with this document.
-2. **Partial:** establish deterministic boot-to-SAMPLE-page and page-change
-   checks before changing DMA/shared-memory behavior. The encoder screen hash was
-   a false positive: it matches the matched no-turn result, so visible encoder
-   state change remains unverified.
+2. **Partial:** establish deterministic boot-to-SAMPLE-page, page-change, and
+   Tune-encoder UI checks before changing DMA/shared-memory behavior. The
+   verified repeated-`+1` Tune sequence now has a distinct screen hash in the
+   smoke test. Firmware parameter state remains unverified.
 3. **Complete:** trace and document the CPU-visible RGPIO sample-page upload and
    DSPI2 note fields. Physical DSP receipt/consumption remains unverified.
 4. **Complete, modeled only:** load one sample, trigger it from the observed
@@ -55,16 +57,16 @@ and must point here rather than maintain competing status reports.
    inconclusive. Retire synthetic startup assumptions individually when evidence
    replaces them.
 
-The prior +5/+20 SAMPLE encoder sweeps are invalid for parameter attribution:
-their setup was not confirmed by a visible value change. A +16-count retry,
-using the SAMPLE control grid's top-left Tune (A) and bottom-left Start (E),
-again matched the no-turn screen hash. Encoder D left SAMPLE for the Incoming
-sample list. A page-key positive control passed, but no parameter value
-changed. Treat all earlier SRAM/DSPI2 differences as unclassified, not
-parameter evidence. This is logged as an encoder-input fault; its cause is
-unresolved. No parameter diff or model change was made, and parameter work is
-stopped. The smoke gate keeps the encoder mutation check disabled until a
-visible change is verified. See the [hypothesis log](./audio-trace-hypotheses.md).
+The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
+comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
+separate `+1` rotations visibly changed its readout to `-30.0`. D's `+16`
+event was also a rotation, and the screen changed to the Incoming sample list.
+Matched 64 KiB SRAM and 999 DSPI2-block captures showed no differences between
+the repeated-`+1` Tune run and no-turn; no trigger was sent. Thus there is a
+repeatable visible UI change but no confirmed persistent firmware/DSP parameter
+state or parameter model. The repeated-`+1` screen hash is asserted in the
+smoke test; the single-`+16` result and Start/length/level parameter sweeps are
+not. See the [hypothesis log](./audio-trace-hypotheses.md).
 
 ## UI smoke regression
 
@@ -72,10 +74,10 @@ Run `tools/ui-smoke.sh [path/to/dt2-cli]`. It performs the 1.5B-instruction
 section-3 diagnostic boot with the synthetic conditions in `tools/run-section3.sh`,
 captures its upright UART8 screen, then uses the reusable recipes in
 [ui-recipes.md](./ui-recipes.md) to check a FLTR page change and return to SAMPLE
-from the pinned sample-loaded UI state. It then runs the modeled-DSP WAV
-load-plus-trigger regression. The encoder mutation check is skipped: its prior
-expected hash also occurs with no encoder input, so it did not prove a value
-change.
+from the pinned sample-loaded UI state. It also checks the Tune readout after
+sixteen separate `+1` encoder-A inputs, then runs the modeled-DSP WAV
+load-plus-trigger regression. The single-`+16` gesture is not asserted because
+its final frame matches no-turn.
 
 The script requires local ignored assets: the section-3 image/RAM/NOR files,
 `out/run-card.img`, and the sample-loaded `out/shots/main-after-load.snap` plus
@@ -89,6 +91,7 @@ Expected SHA-256 frame hashes:
 |---|---|
 | Cold boot SAMPLE page | `8cdccf4db484a161695d1453c0841b4a454ea6cb839ec9ded67ff7f255616e6a` |
 | Sample-loaded baseline | `6e4f2126469865d8b9c49cbae17ecf9cb61e22bc85c522acb6e2bc01b2c62ff6` |
+| Tune after sixteen separate encoder-A `+1` inputs | `0121a4cf0880c5892dabd094dbc7cf4caf6d14fd9d93cfd5b276d37981a74368` |
 | FLTR page (`2004,2000`, once at 3M spacing) | `20b7b62611a13133779f3da6e452591182fc7ff5bc37c2b9b3ada5e16b7133c3` |
 | Return to SAMPLE (`2002,2000`, once at 3M spacing) | `18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b` |
 | Modeled-DSP load + trigger WAV (mono 16-bit, 48 kHz) | `7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200` |
