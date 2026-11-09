@@ -22,7 +22,7 @@ Panel messages are comma-separated hexadecimal byte pairs:
 | `2208,2200` | PLAY press, then release |
 | `2002,2000` | SRC / SAMPLE page |
 | `2004,2000` | FLTR page |
-| `3005,3000` | one encoder-A detent |
+| `3005,3000` | encoder channel 0 (A), +5 then zero delta |
 
 `UART8_RX_PERIODIC` spaces messages by the recipe's instruction interval.
 Encoder and page recipes use 3,000,000 instructions; track, browser, load, and
@@ -37,7 +37,7 @@ Do not insert `2200` between `2201` and `2601`. No other recipe latches a key.
 
 | Gesture | Starting state | Sequence and interval | Final screen assertion |
 |---|---|---|---|
-| Turn encoder A once | `out/shots/main-after-load.snap` and `.png` | `3005,3000`, 3M | frame SHA-256 `3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a` |
+| Encoder A-H input check | `out/shots/main-after-load.snap` and `.png` | `(0x30+channel),05`, then zero delta; 3M | Inconclusive: no-turn and channels A, B, C, E, F, G, H all hash to `3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a`; D leaves SAMPLE. No parameter change confirmed. |
 | Change page to FLTR | same sample-loaded state | `2004,2000`, 3M | frame SHA-256 `20b7b62611a13133779f3da6e452591182fc7ff5bc37c2b9b3ada5e16b7133c3` |
 | Return to SAMPLE | snapshot and rendered frame from the FLTR recipe | `2002,2000`, 3M | frame SHA-256 `18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b` |
 | Select track 2 | sample-loaded main page | `2180,2100,2302,2300`, 3M | the `SMP 2` tile is selected; frame SHA-256 `e8940fe5181d7672ffe24a7f153f5fd7fcd0274c83da803fb21bf5c8602f4c04` |
@@ -51,6 +51,12 @@ selects a TRIG key; it does not assert which firmware track receives the note.
 For example, the tested trigger recipe's screen assertion is unchanged UI state
 and does not prove audio. Only the modeled-DSP runner's captured note edge and
 sample-matching WAV establish that modeled playback path.
+
+The SAMPLE screen labels controls Tune, Start, Len, Loop, and Lev, but does not
+identify their A-H encoder channels. Do not infer the channel-to-control mapping
+from the label order. `ui-turn-encoder.sh` can still capture an input run, but
+its former expected hash is also produced by the no-turn control; it is not a
+value-change assertion and is excluded from `ui-smoke.sh` until verified.
 
 The card route is split into `ui-browse-sample.sh` and `ui-load-sample.sh`.
 The load recipe is pinned to `out/shots/action-down.snap`, where the selected
@@ -84,11 +90,6 @@ Each runner takes its pinned starting snapshot, base frame, output prefix,
 expected final-frame SHA-256, and optional `dt2-cli` binary:
 
 ```sh
-tools/ui-turn-encoder.sh \
-  out/shots/main-after-load.snap out/shots/main-after-load.png \
-  out/ui-recipes/encoder \
-  3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a
-
 tools/ui-change-page.sh FLTR \
   out/shots/main-after-load.snap out/shots/main-after-load.png \
   out/ui-recipes/fltr \
@@ -122,8 +123,9 @@ tools/ui-trigger-track.sh 1 \
 
 `ui-load-sample.sh --messages` and `ui-trigger-track.sh --messages <n>` emit
 their encoded sequences for a caller that must combine them in one emulator
-run. `tools/ui-smoke.sh` uses the encoder, page-change, and SAMPLE-return
-recipes. `tools/modeled-dsp-sample.sh` uses the load and trigger recipes.
+run. `tools/ui-smoke.sh` uses the page-change and SAMPLE-return recipes; its encoder
+mutation check is skipped until a visible change is confirmed.
+`tools/modeled-dsp-sample.sh` uses the load and trigger recipes.
 
 No repository agent-instructions file was present when these recipes were
 added.
