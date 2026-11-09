@@ -83,6 +83,10 @@ the left-side `DESTIN.: RAM BANK ANY` is visible in the menu itself, not proof
 of a separate confirmation dialog. The confirmed kick upload starts from that
 pinned action-menu snapshot, not from an uninterrupted main-page replay.
 Repeating the sequence by hand is not guaranteed to load a sample.
+An uninterrupted first-load run from a fresh card-attached boot subsequently
+loaded the kick and accepted DOWN afterward; see the fresh-boot comparison and
+exact reproduction in the canonical handoff. This does not resolve the
+previously loaded or manual `LOAD TO PROJECT` cases.
 
 Select by the visible label rather than blindly sending four UP presses:
 `LOAD TO PROJECT` is above `LOAD TO TRK 01` and is a different action. In a
