@@ -49,13 +49,13 @@ and must point here rather than maintain competing status reports.
    The runner and WAV hash are part of the smoke gate; no injected audio counts.
 5. **In progress:** the second sample's RGPIO upload is confirmed, but its
    header reports slot 300, the same slot as the first sample. A Track 2 menu
-   can be reached, but the follow-up load from that visually similar browser
-   state produced zero RGPIO events; distinct per-track assignment and
-   two-track playback remain unverified. The candidate DSPI2 field at `0xe0`
-   has no confirmed per-track layout. Note 60/45 fields are visible in DSPI2,
-   but a note-60 input on the sample-machine track and its rate mapping remain
-   inconclusive. Retire synthetic startup assumptions individually when evidence
-   replaces them.
+   can be reached, but two attempts at the follow-up load gesture from that
+   saved menu state produced zero RGPIO events. The retry's `0xe0` word remained
+   `0x012c` (300); distinct per-track assignment and two-track playback remain
+   unverified. The candidate DSPI2 field at `0xe0` has no confirmed per-track
+   layout. Note 60/45 fields are visible in DSPI2, but a note-60 input on the
+   sample-machine track and its rate mapping remain inconclusive. Retire
+   synthetic startup assumptions individually when evidence replaces them.
 
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
