@@ -138,6 +138,35 @@ pages and sentinel slot `300`; the different route and starting state prevent
 attributing the difference to DTIM3. Full logs, PNGs, captures, and snapshots are
 under `out/assign-yes-diagnostic/` and are ignored firmware-derived artifacts.
 
+### Slot-number correlation and routing limit
+
+The SRC-slot-YES assignment route is **known bad in these emulator runs**: it
+leaves the browser unresponsive after selecting the already-loaded kick, at
+both DTIM3 rates tested above. In a subsequent hand test the user reported the
+same symptom selecting clap on Track 2; the final frame shows
+`ASSIGN SAMPLE > A001` with clap highlighted. The hand-test input log, final
+snapshot and rendered frame are preserved as `track2-hand-*` under
+`out/assign-yes-diagnostic/`. Do not continue investigating the Track 2 load.
+
+The kick's `C044` browser marker and `0x012c` (300) upload header agree with
+bank C starting at 256 plus 44. Similarly, `C001` and header `0x0101` (257)
+agree with 256 plus 1. This is a strong two-point correlation, not an
+independently proven complete bank-number ABI.
+
+Direct DSPI2 frame captures from `action-down.snap` before the kick load and
+`main-after-load.snap` afterwards show offsets `0xe0/0xe2/0xe4` changing from
+`0007/0000/0700` to `012c/0200/2c00` respectively
+(`out/assign-yes-diagnostic/slot-action-down.log` and
+`slot-main-after-load.log`). The `0xe0` value after the kick load equals the
+300 in the header; the before value is 7. If a contiguous two-byte track stride
+starting at `0xe0` is assumed, Track 2's candidate is `0x0200`, not a confirmed
+slot number. The known modeled WAV trigger is zero-based frame track 2 (third
+note/machine lane), whose candidate `0xe4` is `0x2c00`, not `0x012c`.
+The original model did not use this field. These captures do not establish a
+per-track slot table, so changing the model to route by that assumed stride
+would break the known WAV comparison and is not justified. No Track 1 modeled
+playback was established by the previous smoke test.
+
 ### Clap load diagnostic
 
 The clap replay started at `out/ui-frames/26-down-release.snap` before the

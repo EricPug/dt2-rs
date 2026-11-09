@@ -34,6 +34,17 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 
 ### Candidate DSPI2 slot/state field (inconclusive)
 
+The displayed `C044` and header ID 300 agree with `256 + 44`; displayed
+`C001` and header ID 257 agree with `256 + 1`. This is a two-point
+correlation, not proof of the complete encoding. A direct DSPI2 snapshot
+comparison shows `0xe0` = `0007` before the kick load and `012c` after it,
+matching header ID 300 after load. The next two words after the load are
+`0xe2=0200` and `0xe4=2c00`, not `012c`; the observed sample-machine note
+edge is on zero-based lane 2, not lane 0. Therefore a simple `0xe0 + 2*i`
+per-track slot table is not established and would not select the captured
+sample for that trigger. See the canonical handoff's slot-number section for
+the evidence and the known-bad SRC-slot-YES route.
+
 TX data offset `0xe0` is copied into the channel-29 PUSHR buffer at
 `0x80001d82` by PC `0x400cd564`, from the SRAM word at `0x80005428`. In the
 clap-to-Track-01 run, that source word was repeatedly updated by PC
