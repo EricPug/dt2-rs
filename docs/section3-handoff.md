@@ -185,6 +185,10 @@ capture, and final snapshot are under `out/hand-test-project/`.
 
 ### Matched kick action-menu comparison
 
+Update: the fresh card-attached boot and normal first-load navigation now work
+in the specific headless run described in the next section. The previously
+loaded/repeat-load comparison below is a different starting state.
+
 Two checkpoints showing `1 SAMPLE SELECTED` and `LOAD TO TRK 01` highlighted
 were replayed with DTIM3 = 16, `DSP_LINK`, identical 6M-instruction button
 spacing, and separate copies of `out/run-card.img`. One was reached from
@@ -223,6 +227,46 @@ accesses. This instrumentation changes instruction-hook configuration; the
 cause of the behavioral difference is unverified. Its zero-hit result cannot
 establish that no job was submitted in the normal replay. The full logs,
 frames, and snapshots are under ignored `out/load-state-compare/`.
+
+### Fresh-boot first kick load
+
+Starting with a disposable copy of `out/run-card.img` attached at boot, the
+firmware reached the main SAMPLE page after 1.5B instructions using the
+existing smoke-test startup settings, without `DSP_LINK`. Restoring that
+snapshot with `DSP_LINK` and DTIM3 = 4, one uninterrupted 200M-instruction
+input sequence opened the browser, selected `008 kick verb`, selected
+`LOAD TO TRK 01`, pressed YES once, waited, and pressed DOWN. The firmware
+issued nine CMD18s, including kick reads at `0x5f01c0` and `0x5f0200`;
+recorded 125,061 RGPIO accesses; showed `1 SAMPLE LOADED`; and then moved the
+browser highlight from kick to clap in response to DOWN. This proves response
+to that subsequent input, not general UI stability or a second load.
+
+A separate replay of the same route with the modeled DSP captured two sentinel
+packets and all ten pages. The final header reported slot 300 and length
+`0x9c00`; the converted kick PCM matched all 19,968 source frames, and the
+modeled WAV matched them as well. This is not real DSP or firmware SSI audio.
+The existing kick-loaded continuous route and manual `LOAD TO PROJECT` stall
+remain distinct, unresolved cases.
+
+Reproduction (the card is writable; never use the original directly):
+
+```bash
+mkdir -p out/first-kick-navigation
+cp --reflink=auto --sparse=always out/run-card.img out/first-kick-navigation/repro-card.img
+tools/run-section3.sh target/release/dt2-cli 1500000000 RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=out/first-kick-navigation/repro-card.img INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP UART8_TX_FILE=out/first-kick-navigation/repro-boot.tx LIVE_PNG=out/first-kick-navigation/repro-boot.png SNAPSHOT_SAVE=out/first-kick-navigation/repro-boot.snap >out/first-kick-navigation/repro-boot.log 2>&1
+tools/run-section3.sh target/release/dt2-cli 200000000 RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC ESDHC_FILE=out/first-kick-navigation/repro-card.img ESDHC_TRACE INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP DTIM3_TICKS_PER_INSTRUCTION=4 DSP_LINK SNAPSHOT_LOAD=out/first-kick-navigation/repro-boot.snap UART8_RX_ONCE 'UART8_RX_PERIODIC=6000000:2201,2601,2600,2200,2102,2100,2120,2100,2102,2100,2102,2100,2140,2100,2120,2100,2102,2100,-,-,-,-,-,-,-,-,-,-,2120,2100,-,-,-,-' UART8_TX_FILE=out/first-kick-navigation/repro.tx LIVE_PNG=out/first-kick-navigation/repro.png >out/first-kick-navigation/repro.log 2>&1
+python3 tools/render-uart-frames.py --base out/first-kick-navigation/repro-boot.png out/first-kick-navigation/repro.tx out/first-kick-navigation/repro-frame
+```
+
+In the recorded run, the boot PNG SHA-256 was
+`8cdccf4db484a161695d1453c0841b4a454ea6cb839ec9ded67ff7f255616e6a`,
+and the final rendered frame was
+`451d9260e91f6214487b39e770f3f85fb4b8177db272dc2583544e7f38c0f022`.
+The original logs, frames, snapshot and modeled capture are in
+`out/first-kick-navigation/`. A separate boot attempt with `DSP_LINK` and
+DTIM3 = 16 enabled from startup reached no display or card commands by 1.5B;
+its final PC was the DSPI2 RX-count poll `0x400cd3b2`. It is not equivalent to
+the successful smoke-test startup and does not establish a general boot cause.
 
 ### Clap load diagnostic
 
