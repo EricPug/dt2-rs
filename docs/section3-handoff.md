@@ -248,7 +248,13 @@ modeled WAV matched them as well. This is not real DSP or firmware SSI audio.
 The existing kick-loaded continuous route and manual `LOAD TO PROJECT` stall
 remain distinct, unresolved cases.
 
-Reproduction (the card is writable; never use the original directly):
+The reproducible regression is `tools/ui-fresh-kick.sh target/release/dt2-cli`,
+also run by `tools/ui-smoke.sh`. It boots with a disposable card copy, checks
+the kick reads and post-DOWN frame in an unmodeled replay, and checks all
+captured upload bytes and the modeled WAV against the source in a separate
+replay. Logs and captures are retained under `out/ui-smoke/fresh-kick/`.
+
+Original diagnostic reproduction (the card is writable; never use the original directly):
 
 ```bash
 mkdir -p out/first-kick-navigation

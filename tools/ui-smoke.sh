@@ -53,6 +53,9 @@ grep -q '^stop: instruction limit$' "$OUT/boot.log"
 check_sha256 "$OUT/boot.png" \
   8cdccf4db484a161695d1453c0841b4a454ea6cb839ec9ded67ff7f255616e6a
 
+# Independently boot with the populated card attached and test the first kick load.
+tools/ui-fresh-kick.sh "$BIN"
+
 # The sample-loaded pin is required for page navigation and modeled playback.
 check_sha256 out/shots/main-after-load.png \
   6e4f2126469865d8b9c49cbae17ecf9cb61e22bc85c522acb6e2bc01b2c62ff6
