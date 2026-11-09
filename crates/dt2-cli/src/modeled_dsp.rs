@@ -8,7 +8,8 @@ const SAMPLE_MACHINE: u16 = 2;
 const TRACKS: usize = 16;
 const FRAMES_PER_DSPI2_BLOCK: usize = 32;
 const SAMPLE_RATE: u32 = 48_000;
-const SAMPLE_PREFIX_BYTES: usize = 6;
+const SAMPLE_FILE_HEADER_BYTES: usize = 0x40;
+const MAX_UPLOAD_PAGES: usize = 64;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Trigger {
@@ -20,10 +21,13 @@ pub struct Trigger {
 
 pub struct ModeledDsp {
     output_path: PathBuf,
+    capture_dir: Option<PathBuf>,
     upload_active: bool,
     gpio_writes: Vec<u8>,
     pages: BTreeMap<u32, Vec<u8>>,
     sample_length: Option<usize>,
+    sample_offset: Option<usize>,
+    sample_rate: Option<u32>,
     sample: Vec<i16>,
     previous_notes: [u16; TRACKS],
     playing_position: Option<usize>,
@@ -35,13 +39,16 @@ pub struct ModeledDsp {
 }
 
 impl ModeledDsp {
-    pub fn new(output_path: PathBuf) -> Self {
+    pub fn new(output_path: PathBuf, capture_dir: Option<PathBuf>) -> Self {
         Self {
             output_path,
+            capture_dir,
             upload_active: false,
             gpio_writes: Vec::with_capacity(UPLOAD_WRITES),
             pages: BTreeMap::new(),
             sample_length: None,
+            sample_offset: None,
+            sample_rate: None,
             sample: Vec::new(),
             previous_notes: [0; TRACKS],
             playing_position: None,
@@ -188,18 +195,43 @@ impl ModeledDsp {
         let index = u32::from_le_bytes(prefix);
         self.upload_calls += 1;
         let call = self.upload_calls;
+        if let Some(dir) = &self.capture_dir {
+            let path = dir.join(format!("call-{call:02}.bin"));
+            if let Err(error) = std::fs::write(&path, &bytes) {
+                self.error.get_or_insert_with(|| {
+                    format!("cannot write upload packet {}: {error}", path.display())
+                });
+                return;
+            }
+        }
         if index == u32::MAX {
             let slot = u32::from_le_bytes(body[..4].try_into().expect("4-byte slot"));
+            let offset = u32::from_le_bytes(body[4..8].try_into().expect("4-byte offset"));
+            let second_offset = u32::from_le_bytes(body[8..12].try_into().expect("4-byte offset"));
+            let rate = u32::from_le_bytes(body[12..16].try_into().expect("4-byte sample rate"));
             let length = u32::from_le_bytes(body[16..20].try_into().expect("4-byte sample length"));
             if length != 0 {
+                if offset as usize != SAMPLE_FILE_HEADER_BYTES
+                    || second_offset != offset
+                    || length % 2 != 0
+                    || length as usize > MAX_UPLOAD_PAGES * 0x1000 - SAMPLE_FILE_HEADER_BYTES
+                {
+                    self.error.get_or_insert_with(|| {
+                        format!(
+                            "unsupported upload metadata: offsets={offset:#x}/{second_offset:#x}, length={length:#x}"
+                        )
+                    });
+                    return;
+                }
                 self.sample_length = Some(length as usize);
+                self.sample_offset = Some(offset as usize);
+                self.sample_rate = Some(rate);
                 self.rebuild_sample();
             }
             println!(
-                "MODELED_DSP RGPIO call={call} prefix={index:08x} header slot={slot} sample_length={:#x}",
-                length
+                "MODELED_DSP RGPIO call={call} prefix={index:08x} header slot={slot} sample_length={length:#x} offsets={offset:#x}/{second_offset:#x} rate={rate}"
             );
-        } else if index < 64 {
+        } else if index < MAX_UPLOAD_PAGES as u32 {
             println!(
                 "MODELED_DSP RGPIO call={call} prefix={index:08x} page={index} bytes={}",
                 body.len()
@@ -213,10 +245,13 @@ impl ModeledDsp {
     }
 
     fn rebuild_sample(&mut self) {
-        let Some(length) = self.sample_length else {
+        let (Some(length), Some(offset), Some(rate)) =
+            (self.sample_length, self.sample_offset, self.sample_rate)
+        else {
             return;
         };
-        let page_count = length.div_ceil(0x1000);
+        let end = offset + length;
+        let page_count = end.div_ceil(0x1000);
         let mut image = Vec::with_capacity(page_count * 0x1000);
         for index in 0..page_count {
             let Some(page) = self.pages.get(&(index as u32)) else {
@@ -224,17 +259,18 @@ impl ModeledDsp {
             };
             image.extend_from_slice(page);
         }
-        image.truncate(length);
-        if image.len() < SAMPLE_PREFIX_BYTES || (image.len() - SAMPLE_PREFIX_BYTES) % 2 != 0 {
+        for pair in image.chunks_exact_mut(2) {
+            pair.swap(0, 1);
+        }
+        let file_length = u32::from_be_bytes(image[4..8].try_into().expect("sample file length"));
+        let file_rate = u32::from_be_bytes(image[8..12].try_into().expect("sample file rate"));
+        if file_length as usize != length || file_rate != rate {
             self.error = Some(format!(
-                "uploaded sample length {length:#x} cannot contain the {SAMPLE_PREFIX_BYTES}-byte sample prefix and 16-bit PCM"
+                "upload metadata disagrees with sample file: length={length:#x}/{file_length:#x}, rate={rate}/{file_rate}"
             ));
             return;
         }
-        for pair in image[SAMPLE_PREFIX_BYTES..].chunks_exact_mut(2) {
-            pair.swap(0, 1);
-        }
-        self.sample = image[SAMPLE_PREFIX_BYTES..]
+        self.sample = image[offset..end]
             .chunks_exact(2)
             .map(|pair| i16::from_be_bytes([pair[0], pair[1]]))
             .collect();
@@ -291,15 +327,24 @@ mod tests {
 
     #[test]
     fn uploaded_pages_are_reassembled_and_played_from_a_sample_note_edge() {
-        let mut dsp = ModeledDsp::new(PathBuf::from("unused.wav"));
+        let mut dsp = ModeledDsp::new(PathBuf::from("unused.wav"), None);
         let mut page = vec![0; 0x1000];
-        page[..10].copy_from_slice(&[0x00, 0x01, 0xfc, 0xff, 0xfc, 0xff, 0x34, 0x12, 0xfe, 0xff]);
+        let mut file = vec![0; 0x1000];
+        file[4..8].copy_from_slice(&4u32.to_be_bytes());
+        file[8..12].copy_from_slice(&46875u32.to_be_bytes());
+        file[0x40..0x44].copy_from_slice(&[0x12, 0x34, 0xff, 0xfe]);
+        for (dst, src) in page.chunks_exact_mut(2).zip(file.chunks_exact(2)) {
+            dst.copy_from_slice(&[src[1], src[0]]);
+        }
         send_call(&mut dsp, 0, &page);
         dsp.finish_upload_call();
 
         let mut header = vec![0; 0x1000];
         header[..4].copy_from_slice(&300u32.to_le_bytes());
-        header[16..20].copy_from_slice(&10u32.to_le_bytes());
+        header[4..8].copy_from_slice(&0x40u32.to_le_bytes());
+        header[8..12].copy_from_slice(&0x40u32.to_le_bytes());
+        header[12..16].copy_from_slice(&46875u32.to_le_bytes());
+        header[16..20].copy_from_slice(&4u32.to_le_bytes());
         send_call(&mut dsp, u32::MAX, &header);
         dsp.finish_upload_call();
         assert_eq!(dsp.sample, [0x1234, -2]);
@@ -316,5 +361,44 @@ mod tests {
         assert_eq!(dsp.triggers[0].track, 2);
         assert_eq!(dsp.triggers[0].instruction, 1234);
         assert_eq!(&dsp.audio[..4], &[0x1234, -2, 0, 0]);
+    }
+
+    #[test]
+    fn sample_crossing_a_page_boundary_waits_for_the_complete_pcm() {
+        let mut dsp = ModeledDsp::new(PathBuf::from("unused.wav"), None);
+        let mut file = vec![0; 0x2000];
+        file[4..8].copy_from_slice(&0xfc2u32.to_be_bytes());
+        file[8..12].copy_from_slice(&46875u32.to_be_bytes());
+        file[0x1000..0x1002].copy_from_slice(&[0x12, 0x34]);
+        let mut image = file.clone();
+        for pair in image.chunks_exact_mut(2) {
+            pair.swap(0, 1);
+        }
+        send_call(&mut dsp, 0, &image[..0x1000]);
+        let mut header = vec![0; 0x1000];
+        header[4..8].copy_from_slice(&0x40u32.to_le_bytes());
+        header[8..12].copy_from_slice(&0x40u32.to_le_bytes());
+        header[12..16].copy_from_slice(&46875u32.to_le_bytes());
+        header[16..20].copy_from_slice(&0xfc2u32.to_le_bytes());
+        send_call(&mut dsp, u32::MAX, &header);
+        assert!(dsp.sample.is_empty());
+        send_call(&mut dsp, 1, &image[0x1000..]);
+        assert_eq!(dsp.sample.len(), 0xfc2 / 2);
+        assert_eq!(dsp.sample.last(), Some(&0x1234));
+    }
+
+    #[test]
+    fn rejects_inconsistent_upload_metadata() {
+        let mut dsp = ModeledDsp::new(PathBuf::from("unused.wav"), None);
+        let page = vec![0; 0x1000];
+        send_call(&mut dsp, 0, &page);
+        let mut header = vec![0; 0x1000];
+        header[4..8].copy_from_slice(&0x40u32.to_le_bytes());
+        header[8..12].copy_from_slice(&0x40u32.to_le_bytes());
+        header[12..16].copy_from_slice(&46875u32.to_le_bytes());
+        header[16..20].copy_from_slice(&4u32.to_le_bytes());
+        send_call(&mut dsp, u32::MAX, &header);
+        assert!(dsp.error.as_ref().unwrap().contains("metadata disagrees"));
+        assert!(dsp.sample.is_empty());
     }
 }
