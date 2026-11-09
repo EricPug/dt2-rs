@@ -25,7 +25,9 @@ and must point here rather than maintain competing status reports.
   This is a modeled playback milestone, not a SHARC implementation or evidence
   of physical DSP reception or hardware audio. The first SAMPLE-page encoder
   sweep found no confirmed tune, start, length, or level mapping in DSPI2, so the
-  stand-in still plays the full sample at nominal pitch and gain.
+  stand-in uses nominal pitch and gain. In the later clap-as-kick substitution
+  control, its output includes part of the on-card header and truncates the
+  clap tail, so that run is not clean sample playback.
 - The latest sample-load and trigger/play trace found no qualifying CPU bulk
   write to non-RAM. Its only >=1 KiB transfers are the synthetic DSPI2 `DSP_LINK`
   path and the emulator's timer-scheduled SSI service, not evidence of physical
@@ -143,6 +145,56 @@ either replay. The snapshots, UI context, input timing and confirmation
 sequences differ, and the original creation transcript for the pinned kick
 snapshot was not retained, so its inherited state cannot be equated to the
 continuous route. No setting difference is proven causal.
+
+#### Idle loop, DSP_LINK retry, and substituted-file control
+
+Disassembly shows `0x400cce3c: bra.b 0x400cce3c`: the loop itself polls
+no address and has no value-based exit. Immediately before it, startup tests
+`0x4029eef0 & 0x40` and branches past the self-loop when the result is zero;
+changing that flag does not make an already-entered self-loop exit. Later
+initialization also branches back to this loop. This is a startup/idle-thread
+loop, not an identified DSP-link polling loop; interrupts can run while the
+thread is idle.
+
+The same clap replay and 69M–119M PC-sampling window, now with `DSP_LINK`,
+still had zero eSDHC commands, zero channel-59 events, and zero RGPIO events
+through 119M instructions; `out/load-diagnostic/clap-dsp-final.png` still
+shows the loading popup. `0x400cce3c` remained the most sampled PC, with
+3,241 of 50,000 samples versus 7,929 without `DSP_LINK`. Other top samples:
+`0x401abac8` 763, `0x401abac0` 758, `0x401abac4` 680, `0x400cd55c` 528,
+`0x400cd564` 520, `0x400cd562` 517, `0x400cd55a` 513, `0x400cd560` 512,
+and `0x400cd558` 500. These are sampled observations, not exact execution
+counts. The synthetic gate did not start a card read in this replay.
+Evidence: `out/load-diagnostic/clap-dsp.log` and `clap-dsp-pc.txt`.
+
+An independent control copied the sparse card to
+`out/load-diagnostic/clap-as-kick-card.img`, retaining `/incoming/008 kick
+verb` and its inode and extents while replacing its contents with the actual
+`303 clap real` sample-file bytes. The copied inode length and both content
+hash records were updated and the file content read back. The original card
+was not changed. From `out/shots/action-down.snap`, the existing modeled-DSP
+load-and-trigger sequence was replayed unchanged with the copied card,
+`DSP_LINK`, and tracing. Two CMD18 reads used the original kick sectors.
+The RGPIO stream contained ten numbered pages (0–9) and two sentinel
+packets, with final header slot `300` and length `0x3022`; the kick control
+had the same slot and page count but length `0x9c00`. SRAM `0x80005428`,
+the proxy for candidate DSPI2 offset `0xe0`, was `0x012c` in both; no direct
+DSPI2 frame was captured for this comparison. The ten pages despite the
+shorter file may reflect state cached in the pinned snapshot; the cause is
+not established.
+
+The resulting modeled WAV, `out/load-diagnostic/clap-as-kick.wav`, is
+nonzero, has 95,968 mono frames at 48 kHz, and has SHA-256
+`2d1edc3b61db0cbd96a4f90e051612375db9987581766a68486f304549f2846e`;
+the kick control's hash is
+`7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200`.
+However, its 6,158-frame played segment exactly matches card file bytes
+`[6:0x3022]`, including part of the 64-byte file header: the clap PCM begins
+29 frames into that segment and its tail is truncated. Therefore it is not
+a clean full-clap playback or evidence of hardware DSP audio. The run log,
+UI capture and final frame are `out/load-diagnostic/clap-as-kick.log`,
+`clap-as-kick-ui.tx`, and `clap-as-kick-final.png`. This replacement control
+does not establish a second slot or explain the Track 2 load stall.
 
 The prior +5/+20 sweeps remain invalid for parameter attribution. In the latest
 comparison, A is Tune: a single `+16` rotation matched no-turn, but sixteen
