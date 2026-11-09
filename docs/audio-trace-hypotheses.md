@@ -19,7 +19,7 @@ a diagnostic stand-in, not a DSP model or evidence of audible playback.
 | OS 1.17 GPIO serial traffic carries sample bytes | Sample page stream confirmed; downstream DSP receipt/consumption inconclusive | Calls 2–10 contain exact 4 KiB 16-bit-byte-swapped sample pages from `0x4060d770..+0x8000` and `0x40605770`; call 11 carries a matching `0xc00`-byte tail plus `0x400` bytes of staging/padding. Pages 0–9 reconstruct the converted `0x9c00`-byte sample exactly. Calls 4, 5, and 11 also match staging-buffer pages. Calls 1 and 12 are sentinel header/control packets. This confirms serialized bytes at the RGPIO data port, not physical DSP receipt. |
 | Second RGPIO upload selects an independent sample slot and enables two-track playback | Inconclusive; no two-sample/two-track load demonstrated | A pinned-context clap upload contained indexed pages 0–3 and a final header with slot `300`, length `0x3022`; the first sample used the same slot with length `0x9c00`. A separate modeled run played the clap upload as one sample (6,158 PCM frames). In a controlled UI attempt, Track 2 was selected and the menu displayed `LOAD TO TRK 02`, but the subsequent load gesture produced zero RGPIO events; it did not establish a second assignment. The emulator's modeled DSP still has one sample buffer. Logs: `out/modeled-dsp/clap-track1-retry.log`, `out/modeled-dsp/two-track-browser.log`, `out/modeled-dsp/two-track-loaded.log`. |
 | DSPI2 TX offset `0xe0` is a per-track sample-slot table | Inconclusive; no per-track layout confirmed | The word at `0x80005428` is transmitted at TX offset `0xe0`. In the pre-load action-menu snapshot, the words at `0xe0/0xe2/0xe4` were `0007/0000/0700`; after the known single-sample load they were `012c/0200/2c00`. The note and machine fields have observed per-track strides at `0x02 + 2*i` and `0x94 + 2*i`, respectively; the values around `0xe0` do not establish a comparable per-track stride. The Track 2 browser attempt did not upload a sample, so it cannot resolve the field's semantics. Treat `0xe0` as an unclassified frame field, not a slot assignment. RAM dumps: `out/modeled-dsp/source-field-before.log`, `out/modeled-dsp/source-field-kick.log`, `out/modeled-dsp/source-field-track2.log`, `out/modeled-dsp/two-track-loaded.log`. |
-| SAMPLE tune/start/length/level encoders map to modeled-DSP parameters | Inconclusive; no parameter mapping established | A matched +5-count and +20-count sweep found no visible value change; all full-run screen hashes are identical. In 2,299-block triggered captures, tune (`0x30`), length (`0x32`), and level (`0x38`) matched baseline across DSPI2 and SRAM. Start (`0x31`) had repeatable but unclassified DSPI2 differences and 22 changed SRAM bytes outside every legacy per-track mirror window; the OS 1.17 state equivalent remains unidentified. No changed field is established as a sample parameter, so the modeled DSP and WAV comparison were not changed. See the +20-count follow-up below. Captures: `out/modeled-dsp/parameter-sweep/`. |
+| SAMPLE tune/start/length/level encoders map to modeled-DSP parameters | Inconclusive; encoder setup/value changes are unverified | Earlier +5/+20-count captures had no matched no-input screen assertion, so their DSPI2/SRAM differences cannot be attributed to sample parameters. A later matched no-turn run produced the same final screen hash as encoder A-H inputs (except D, which left the SAMPLE page); none confirmed a changed parameter. Disregard the earlier DSPI2/SRAM diffs as parameter evidence. No modeled-DSP mapping or WAV comparison is justified. See the input-validation follow-up below. Captures: `out/modeled-dsp/parameter-sweep/`. |
 | Note 60 and note 45 select different playback rates on one sample-machine track | Inconclusive; pitch change not observed on the sample-machine track | The Track 02 capture had note `0x2d00` at data offset `0x06` with machine type 2 at offset `0x98`. A keyboard/TRIG 16 attempt changed offset `0x02` from `0x3c00` to `0x4800`, while offset `0x06` remained `0x2d00` and machine type at `0x94` remained zero. This changed another track, not the sample-machine track. The proposed equal-tempered rule `rate(n) = rate(60) * 2^((n - 60) / 12)` remains an assumption; no DSP rate response was measured. Logs: `out/modeled-dsp/clap-track2-note60-attempt.log`, `out/modeled-dsp/clap-track2-note60-select.log`. |
 | The DSPI1 response buffer at `0x4fe79340..0x4fe79640` is populated or consumed during sample load | inconclusive | A repeat sample-load run starts with all `0x300` bytes zero and records zero overlapping CPU-bus reads and writes. The channel-14 TCD is configured for two 16-bit reads from DSPI1 POPR into the buffer, but the emulator's synthetic DSPI diagnostic does not execute eDMA channels 14/15. Therefore the empty buffer is evidence about this emulator run, not evidence that real hardware returns no response. |
 | Physical DSP receives and consumes the confirmed RGPIO pages | Unresolved | Firmware serializes the sample pages to RGPIO, but the emulator has no physical DSP peer. The per-block DSPI2 stream has no sample address, and the OS 1.17 SHARC loader contains no literal `0x40605770`/adjacent address or recognizable voice/sample descriptor table. Computed or relocated addresses and DSP-side consumption remain possible; the modeled WAV is not physical-device evidence. |
@@ -471,41 +471,35 @@ SHA-256 is `d9781f776139a7d97d42d89616f5b976803696fa2f03ede416688103166a99fb`.
 The WAV and source dumps are reproducible under `out/modeled-dsp/`; these are
 generated artifacts, not firmware or hardware output.
 
-## SAMPLE encoder +20-count follow-up
+## SAMPLE encoder input validation
 
-The earlier +5-count sweep was repeated with +20 counts on tune (`0x30`), start
-(`0x31`), length (`0x32`), and level (`0x38`), using a cadence-matched no-turn
-baseline. Each full capture contains 2,299 DSPI2 blocks. The baseline and all
-four parameter screenshots have the same SHA-256,
-`b4a3acb13c5c38e910720d804c6938c3679f9635e9b958fe1d7899732933c7a6`; no
-on-screen parameter value was confirmed to change.
+The saved SAMPLE-page image visibly labels controls `TUNE`, `STRT`, `LEN`,
+`LOOP`, and `LEV`, but does not label them with encoder letters A-H. The prior
+letter-to-parameter assignment is therefore not confirmed by this frame.
 
-Tune, length, and level have zero differing DSPI2 payload words and zero
-different bytes in the captured `0x80000000..0x8000ffff` SRAM image. Start's
-DSPI2 trace differs from baseline in 20 data offsets and its repeat is
-byte-for-byte identical:
+From `out/shots/main-after-load.snap`, each encoder A-H was sent once as a
+5-count signed delta (`0x30..0x37`); the separate LEVEL channel (`0x38`) had
+already been tried in the earlier sweep. A matched no-turn control used the
+same 3M instruction cadence. The no-turn, A, B, C, E, F, G, and H final frames
+all have SHA-256
+`3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a`.
+Encoder D instead produced frame
+`3cc006f15d378db1f685e07adef228e2f627888df408f68c10b259b6878a4579`, which
+leaves the SAMPLE control layout; it does not confirm a parameter change. The
+page-key positive control produced the expected FLTR frame hash, so UART input
+delivery and page handling work in this run.
 
-- Brief note/state words appear at blocks 1439 and 1880.
-- Event-like values at data offsets `0x22/0x26` pulse for 8 blocks,
-  `0x24/0x28` for 14 blocks, `0x206` for 4 blocks, and `0x7ea` for 2 blocks.
-- Offsets `0x21c` and `0x5ee` remain different through the end of the trace,
-  but their values continue changing frame-to-frame rather than holding a
-  parameter value. These fields are unclassified.
+The local `PanelInput` generator accepts channels 0-8 and emits
+`(0x30 | channel, signed_delta)`. Digiemu's
+[panelin.py](https://github.com/irpina/digiemu/blob/main/emu/panelin.py)
+describes the same format, but its OS builds do not verify the OS 1.17
+letter-to-parameter mapping. The raw UART input path was already using this
+format; no source-level per-channel defect is identified, so no speculative
+input-model change was made.
 
-The Start SRAM image has 22 differing bytes after the trigger, at
-`0x80001ffb`, `0x8000279f`, `0x80004692..0x80004693`,
-`0x800046b6..0x800046b7`, `0x800046c2..0x800046c3`,
-`0x800046d2..0x800046d3`, `0x800046f6..0x800046f7`,
-`0x80004702..0x80004703`, `0x8000487e..0x8000487f`,
-`0x8000488a..0x8000488b`, `0x80005565`, `0x80005937`, `0x80005d65`,
-and `0x80006303`. None falls in any of the 16 windows from the older-version
-hint `0x80003362 + track * 0x8e`; the OS 1.17 equivalent is not identified.
-An additional 100M-instruction pre-trigger capture for each encoder showed no
-screen, SRAM, or DSPI2 differences, so that shorter check is inconclusive about
-whether the input had been accepted by the relevant firmware path.
-
-No DSPI2 or SRAM field is established as tune, start, length, or level. No
-parameter-specific modeled-DSP change or WAV comparison is justified; all
-parameter mappings remain inconclusive. The full captures, screenshots, SRAM
-dumps, and short pre-trigger checks are under
+No value visibly changed. Therefore no parameter SRAM/DSPI2 diff was collected
+for this attempt, and the earlier +5/+20 DSPI2/SRAM differences are not
+parameter evidence. Stop parameter work here. The screen assertions in the
+encoder recipe and smoke gate were false positives because the no-turn control
+has the same hash. Raw captures remain under
 `out/modeled-dsp/parameter-sweep/`.

@@ -11,9 +11,10 @@ and must point here rather than maintain competing status reports.
 - The partial ColdFire emulator executes the OS 1.17 section-3 direct-entry trace
   with explicitly modeled and synthetic startup conditions; this is not a
   hardware-faithful cold boot.
-- The diagnostic run reaches the SAMPLE page. UART8 panel input can change screen
-  values and pages, and panel LED records are observed. A clickable front panel is
-  available in the optional window build.
+- The diagnostic run reaches the SAMPLE page. UART8 page input is confirmed, but
+  encoder inputs have not produced a confirmed parameter-value change from the
+  sample-loaded checkpoint. A clickable front panel is available in the optional
+  window build.
 - The synthetic eMMC supports formatting, browsing, and loading a sample into RAM.
 - Firmware-driven audio playback is not working: SSI TX remains silent in the
   documented trigger/play trace. A separately labeled modeled-DSP stand-in now
@@ -35,9 +36,10 @@ and must point here rather than maintain competing status reports.
 
 1. **Complete:** format the workspace, resolve Clippy findings, and align the
    project summaries with this document.
-2. **Complete:** establish a deterministic boot-to-SAMPLE-page smoke gate, with
-   sample-loaded encoder and page-change frame hashes, before changing
-   DMA/shared-memory behavior.
+2. **Partial:** establish deterministic boot-to-SAMPLE-page and page-change
+   checks before changing DMA/shared-memory behavior. The encoder screen hash was
+   a false positive: it matches the matched no-turn result, so visible encoder
+   state change remains unverified.
 3. **Complete:** trace and document the CPU-visible RGPIO sample-page upload and
    DSPI2 note fields. Physical DSP receipt/consumption remains unverified.
 4. **Complete, modeled only:** load one sample, trigger it from the observed
@@ -53,14 +55,13 @@ and must point here rather than maintain competing status reports.
    inconclusive. Retire synthetic startup assumptions individually when evidence
    replaces them.
 
-The SAMPLE parameter sweep tried +5 and +20 counts on tune (encoder A), start
-(encoder B), length (encoder C), and level (LEVEL encoder). The full-run screen
-hashes are identical, so no changed on-screen value was confirmed. In aligned
-2,299-block captures, tune, length, and level had no DSPI2 or SRAM differences.
-Start had repeatable but unclassified DSPI2 changes and 22 changed SRAM bytes
-outside the older per-track mirror layout; the OS 1.17 parameter-state
-equivalent remains unidentified. No parameter mapping or WAV comparison was
-added to the modeled DSP. Results remain inconclusive; details are in the
+The prior +5/+20 SAMPLE encoder sweeps are invalid for parameter attribution:
+their setup was not confirmed by a visible value change. A later A-H attempt
+matched the no-turn screen hash for A, B, C, E, F, G, and H; D left the SAMPLE
+page. A page-key positive control passed, but no parameter value change was
+confirmed. Treat all earlier SRAM/DSPI2 differences as unclassified, not
+parameter evidence. No model mapping or WAV comparison was added. Parameter
+work is stopped pending a verified encoder-to-control/input setup; see the
 [hypothesis log](./audio-trace-hypotheses.md).
 
 ## UI smoke regression
@@ -68,10 +69,11 @@ added to the modeled DSP. Results remain inconclusive; details are in the
 Run `tools/ui-smoke.sh [path/to/dt2-cli]`. It performs the 1.5B-instruction
 section-3 diagnostic boot with the synthetic conditions in `tools/run-section3.sh`,
 captures its upright UART8 screen, then uses the reusable recipes in
-[ui-recipes.md](./ui-recipes.md) to check one encoder detent, a FLTR page change,
-and return to SAMPLE from the pinned sample-loaded UI state. It then runs the
-modeled-DSP WAV load-plus-trigger regression. The clean boot has no loaded
-sample, so an encoder delta does not produce a meaningful value change there.
+[ui-recipes.md](./ui-recipes.md) to check a FLTR page change and return to SAMPLE
+from the pinned sample-loaded UI state. It then runs the modeled-DSP WAV
+load-plus-trigger regression. The encoder mutation check is skipped: its prior
+expected hash also occurs with no encoder input, so it did not prove a value
+change.
 
 The script requires local ignored assets: the section-3 image/RAM/NOR files,
 `out/run-card.img`, and the sample-loaded `out/shots/main-after-load.snap` plus
@@ -85,7 +87,6 @@ Expected SHA-256 frame hashes:
 |---|---|
 | Cold boot SAMPLE page | `8cdccf4db484a161695d1453c0841b4a454ea6cb839ec9ded67ff7f255616e6a` |
 | Sample-loaded baseline | `6e4f2126469865d8b9c49cbae17ecf9cb61e22bc85c522acb6e2bc01b2c62ff6` |
-| One encoder A detent (`3005,3000`, once at 3M spacing) | `3c2c3309fff62686bd275285a587692c0edcc260e7419c283bf2d29b6aa7ae6a` |
 | FLTR page (`2004,2000`, once at 3M spacing) | `20b7b62611a13133779f3da6e452591182fc7ff5bc37c2b9b3ada5e16b7133c3` |
 | Return to SAMPLE (`2002,2000`, once at 3M spacing) | `18f5fff0850f13a36134f16346e12e56a00edd62adfb78eb434badcae0aede7b` |
 | Modeled-DSP load + trigger WAV (mono 16-bit, 48 kHz) | `7b45eaff1a7315ff954445dc1292a0915b6dcb3b3ec778657301375ce4cc4200` |
@@ -879,11 +880,11 @@ Captured with `UART8_TX_FILE`: a 1.5B reset run with `DTIM3_BOOTSTRAP` (baseline
 | input (hex) | continuation TX | result on screen |
 |---|---|---|
 | none (baseline boot) | 48,413 bytes | `A01 WAXSAFETY 102.0`, then the SAMPLE page (TUNE, PLAY, SAMP, LEV/STRT/LEN/LOOP/LEV) |
-| encoder A turn `3005,3000` | 2,055 bytes, 17 updates, 200 tile records | title bar becomes `Tune=4.27`, and the TUNE tile value changes from `1...0.` to `5.09`/`.0...1` as the encoder turns |
+| encoder A turn `3005,3000` | 2,055 bytes, 17 updates, 200 tile records | Originally read as a Tune change; superseded as parameter evidence because no matched no-turn capture was made. A later matched run produced the same final frame without encoder input. |
 | FLTR key tap `2004,2000` | 14,866 bytes, 20 updates, 1,476 tile records | the page changes to `Filter (2/2)` with a new set of widgets (DEL, KEY.T, BASE, WDTH, BW.RT, RSET) |
 | TRK key tap `2180,2100` | 3,981 bytes, 33 updates, 264 tile records | the layout stays on the SAMPLE page, with small changes (the `SMP 1` tile is highlighted) |
 
-- This is the first run where input produces UI changes that persist to the framebuffer: encoder values and page changes redraw. The tick and present path that DTIM3 turned on works end to end.
+- This establishes persistent page-input redraw. The claimed encoder-value redraw is inconclusive without a matched no-turn comparison; see the current encoder validation above.
 - **LED records now appear.** The baseline boot has 108 `b9 idx val` records on 50 distinct indices (the first time `b9` has been seen), and `bc` appears per input event as before. The TRK tap sends 410 `b9` records on 36 distinct indices (`idx 25` and others), while the encoder turn sends 2 and the FLTR tap sends 6. The idx-to-LED mapping is still unknown.
 - **Open:** whether the code 16 = TRK mapping is right and what the TRK page should show (the screen is nearly the same), and the encoder direction (`3005` is read as positive, as a guess).
 
