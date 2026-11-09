@@ -77,11 +77,12 @@ For a manual attempt from the sample-loaded main page: hold FUNC, press and
 release SAMPLING, then release FUNC; select `+DRIVE` with YES, move DOWN to
 `incoming` and press YES. Highlight the desired sample, press YES to check it,
 then RIGHT for its action menu. In the pinned kick checkpoint the cursor is on
-`RENAME`: UP four times selects `LOAD TO TRK 01`; YES opens its Destination
-dialog, and a second YES confirms. The confirmed kick upload starts from that
-pinned action-menu snapshot, not from an uninterrupted main-page replay. The
-continuous route below stalled, so repeating the sequence by hand is not
-guaranteed to load a sample.
+`RENAME`: UP four times selects `LOAD TO TRK 01`. In a later replay from that
+selected-menu state, one YES press and release was enough to load the sample;
+the left-side `DESTIN.: RAM BANK ANY` is visible in the menu itself, not proof
+of a separate confirmation dialog. The confirmed kick upload starts from that
+pinned action-menu snapshot, not from an uninterrupted main-page replay.
+Repeating the sequence by hand is not guaranteed to load a sample.
 
 Select by the visible label rather than blindly sending four UP presses:
 `LOAD TO PROJECT` is above `LOAD TO TRK 01` and is a different action. In a
@@ -101,6 +102,10 @@ display updates; the captured word at `0x80005428` remained `0x012c` (300).
 Neither continuous route is a verified load. Captures:
 `out/modeled-dsp/two-track-loaded.log` and
 `out/modeled-dsp/two-track-loaded-retry.log`.
+In a later label-matched Track 1 kick comparison, the continuous route
+produced no upload, while the pinned pre-upload state did; repeating the kick
+after a successful pinned upload also produced no upload. The reason is
+unconfirmed; see the matched comparison in the canonical handoff.
 
 ## Shared-pool, two-track load flow (known bad in emulator)
 
