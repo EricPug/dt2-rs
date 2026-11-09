@@ -56,13 +56,15 @@ and must point here rather than maintain competing status reports.
    replaces them.
 
 The prior +5/+20 SAMPLE encoder sweeps are invalid for parameter attribution:
-their setup was not confirmed by a visible value change. A later A-H attempt
-matched the no-turn screen hash for A, B, C, E, F, G, and H; D left the SAMPLE
-page. A page-key positive control passed, but no parameter value change was
-confirmed. Treat all earlier SRAM/DSPI2 differences as unclassified, not
-parameter evidence. No model mapping or WAV comparison was added. Parameter
-work is stopped pending a verified encoder-to-control/input setup; see the
-[hypothesis log](./audio-trace-hypotheses.md).
+their setup was not confirmed by a visible value change. A +16-count retry,
+using the SAMPLE control grid's top-left Tune (A) and bottom-left Start (E),
+again matched the no-turn screen hash. Encoder D left SAMPLE for the Incoming
+sample list. A page-key positive control passed, but no parameter value
+changed. Treat all earlier SRAM/DSPI2 differences as unclassified, not
+parameter evidence. This is logged as an encoder-input fault; its cause is
+unresolved. No parameter diff or model change was made, and parameter work is
+stopped. The smoke gate keeps the encoder mutation check disabled until a
+visible change is verified. See the [hypothesis log](./audio-trace-hypotheses.md).
 
 ## UI smoke regression
 
