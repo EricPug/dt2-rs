@@ -12,8 +12,9 @@ They match the constants in the upstream
 That project's
 [`PROVENANCE.md`](https://github.com/mischa85/elektron-firmware-tool/blob/main/PROVENANCE.md)
 describes its codec as independently implemented from a format description.
-Its repository `LICENSE` is MIT. This repository does not include its codec
-source code; the Rust implementation remains the project's own implementation.
+Its [`LICENSE`](https://github.com/mischa85/elektron-firmware-tool/blob/main/LICENSE)
+is MIT. This repository does not include its codec source code; the Rust
+implementation remains the project's own implementation.
 
 Copyright (c) 2026 Marcel Bierling
 
