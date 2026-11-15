@@ -19,9 +19,6 @@ use dt2_core::display;
 mod modeled_dsp;
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 mod panel_ui;
-#[cfg(dt2_unicorn)]
-mod unicorn_tier;
-
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::time::Instant;
@@ -1110,7 +1107,7 @@ fn run_binary(args: &[String]) {
         std::process::exit(2)
     });
     let mut cpu = Cpu::new();
-    cpu.set_icache(!args[6..].iter().any(|a| a == "DECODE_CACHE=off") && !unicorn_enabled());
+    cpu.set_icache(!args[6..].iter().any(|a| a == "DECODE_CACHE=off"));
     let mut cpu_overrides = Vec::new();
     let mut ram_dumps = Vec::new();
     let mut ram_file_dumps = Vec::new();
@@ -1611,8 +1608,6 @@ fn run_binary(args: &[String]) {
         });
         println!("{summary}");
     }
-    #[cfg(dt2_unicorn)]
-    unicorn_tier::print_stats();
     if let (Some(path), Some(display)) = (live_png, &bus.display) {
         let (width, height, pixels) = display.render_upright(4);
         std::fs::write(path, display::encode_gray_png(width, height, &pixels)).unwrap_or_else(
@@ -2105,26 +2100,12 @@ fn run_pc_sampled(
     report
 }
 
-/// `STATE_HASH=n1,n2,...` prints an FNV-1a hash of the full snapshot (CPU, RAM, devices) after each instruction count
-/// (counted from this run's start). It is the regression gate for CPU-core changes: equal hashes mean equal machine state.
-fn unicorn_enabled() -> bool {
-    #[cfg(dt2_unicorn)]
-    return unicorn_tier::enabled();
-    #[cfg(not(dt2_unicorn))]
-    false
-}
-
-/// Runs the CPU on the selected engine: the Rust interpreter, or the Unicorn tier when enabled.
 fn run_engine(
     cpu: &mut Cpu,
     bus: &mut ProbeBus,
     limit: usize,
     injection: Option<InterruptInjection>,
 ) -> dt2_core::coldfire::RunReport {
-    #[cfg(dt2_unicorn)]
-    if unicorn_tier::enabled() {
-        return unicorn_tier::run(cpu, bus, limit, injection);
-    }
     cpu.run_with_interrupt(bus, limit, injection)
 }
 
@@ -7422,8 +7403,7 @@ impl Bus for ProbeBus {
     }
 
     fn idle_skip(&mut self, max: usize) -> usize {
-        // Executing idle spins for real gives the instruction-exact baseline the Unicorn tier
-        // (which cannot fast-forward) is compared against.
+        // Executing idle spins for real gives an instruction-exact baseline.
         static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *DISABLED.get_or_init(|| std::env::var_os("DT2_NO_IDLE_SKIP").is_some()) {
             return 0;

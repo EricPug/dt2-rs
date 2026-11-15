@@ -1,129 +1,118 @@
 # dt2-rs
 
-An early-stage Digitakt II firmware emulator and analysis toolkit written in Rust.
-Not affiliated with or endorsed by Elektron.
+`dt2-rs` is an independent Rust project for analyzing Digitakt II firmware
+formats and partially emulating selected firmware execution paths. It is
+research software, not a complete or hardware-accurate device emulator. It does
+not flash or modify device firmware, and the repository does not distribute
+Digitakt II firmware.
 
-It can inspect and unpack SysEx firmware containers and run firmware traces on a
-partial ColdFire V4e core with modeled and synthetic peripherals. The current OS 1.17 diagnostic path reaches an interactive SAMPLE page: page
-input changes the screen and sample loading to RAM is observed. Sixteen separate
-single-step A/Tune inputs visibly change the Tune readout; a single +16 input
-does not. This screen response has not been matched to persistent firmware or
-DSP parameter state. These results depend on explicit diagnostic assumptions;
-this is not yet a hardware-faithful cold boot.
+## Current state
 
-Real firmware-driven audio playback is not implemented. SSI remains silent in the
-documented trigger/play trace. A separately labeled modeled-DSP path now consumes
-the traced RGPIO sample pages and DSPI2 note fields to produce a 48 kHz WAV;
-its trigger timing, PCM interpretation, and 32-frames-per-block cadence include
-explicit assumptions. This is measured modeled playback, not a SHARC core or
-hardware-faithful audio implementation. The model currently supports one
-uploaded sample; per-track sample-slot association and note-rate mapping remain
-unverified.
+**Implemented:** SysEx/container inspection and section decompression; a partial
+ColdFire V4e interpreter; modeled peripherals; diagnostic execution with
+explicit synthetic inputs; UART display decoding; and scripts for tracing and
+reproducing selected emulator runs. A documented OS 1.17 diagnostic path
+reaches the SAMPLE page and loads sample data from a synthetic eMMC image.
 
-The canonical project status, evidence, current blockers, and next-step order are in
-[docs/section3-handoff.md](docs/section3-handoff.md). That document is the single
-source of truth for implementation status; this README is a user-facing overview.
+**Experimental:** The clickable live viewer uses panel coordinates based on
+Elekfake's reference measurements; it is not a hardware-accurate panel model.
+A modeled-DSP path can write
+WAV files from captured sample pages and note fields. Its DSP, timing, pitch,
+gain, and input interpretation are assumptions; it is not firmware playback,
+SHARC emulation, or evidence of hardware audio.
 
-`tools/ui-smoke.sh` checks the boot-to-SAMPLE screen, page changes, the Tune
-readout after sixteen separate single-step encoder inputs, and load-plus-trigger
-modeled-DSP WAVs for kick and clap against their complete converted source audio.
-It requires the local ignored firmware/card assets documented in the handoff.
+**Not implemented:** Complete ColdFire/peripheral coverage, general cold boot,
+verified hardware behavior, persistent parameter editing, and firmware-driven
+audio output. The detailed findings and limitations are in
+[docs/section3-handoff.md](docs/section3-handoff.md), the authoritative project
+status and evidence document.
+
+## Architecture
+
+- `dt2-fw` parses the firmware container format and decompresses sections.
+- `dt2-core` provides the partial ColdFire CPU and modeled peripherals.
+- `dt2-cli` runs diagnostics, renders display data, and offers optional UI and
+  trace tools.
+- `docs/` and `research/` record emulator observations, assumptions, external
+  research, and unresolved questions.
+
+The workspace requires Rust 1.80 or later for its default features. The
+optional `window` feature currently requires Rust 1.88 or later for its image
+dependency.
+
+## Build and test
+
+A clean clone needs no firmware or sample assets to build and run the test
+suite:
 
 ```sh
-cargo test
-cargo run -p dt2-cli -- path/to/firmware.syx
-cargo run -p dt2-cli -- path/to/firmware.syx out
-cargo run -p dt2-cli -- render-pattern out/diagnostic-pattern.ppm
+cargo build --workspace
+cargo test --workspace
+cargo run -p dt2-cli -- render-pattern diagnostic-pattern.ppm
 ```
 
-`render-pattern` writes a deterministic 320x240 PPM color-bar and grayscale image.
-It is an emulator diagnostic artifact, not a screenshot of the Digitakt II OS.
+The `render-pattern` command creates a deterministic diagnostic image, not a
+device screenshot. Firmware-container inspection is optional and requires a
+firmware file obtained independently:
 
-`run-bin` accepts a raw binary image, RAM mapping, load address, entry point (or
-`SBF_RESET_VECTOR`), instruction limit, and optional register/RAM/MMIO overrides.
-Its usage text lists the available diagnostic options.
+```sh
+mkdir -p firmware
+# Place your locally supplied firmware file here.
+cargo run -p dt2-cli -- firmware/Digitakt_II_OS1.17.syx
+```
 
-For the current section-3 direct-entry experiment, `MCF5441X_SRAM_OVERLAY` combines
-the flat DDR image region with the documented 64 KiB mirrored SRAM window.
-`SYNTHETIC_MCF_MMIO` is an explicit approximation that returns zero for unclaimed
-peripheral reads and drops writes; it does not model hardware reset values or timing.
-`INSPECT_TRAP0` prints the live TRAP #0 vector after execution stops.
-`DUMP_RAM=address:length` prints 1-256 bytes from mapped RAM/SRAM after execution;
-it does not read MMIO.
-`DUMP_RAM_FILE=address:length:path` writes 1-64 MiB of mapped RAM/SRAM to a raw
-binary file after execution; MMIO is not readable through this option.
-`RAM_LOAD_FILE=address:path` restores a raw file into mapped RAM/SRAM before
-execution, for resuming a saved diagnostic snapshot.
-`STOP_PC=pc` stops before executing that instruction, allowing an exact handoff
-snapshot with `DUMP_RAM_FILE`.
-`PIT_BOOTSTRAP` advances modeled PIT counters by retired instruction, not bus
-cycles. With `INTC2_BOOTSTRAP`, the observed PIT0 source can naturally reach the
-partial INTC2 model; this remains an approximate timing model. `PIT0_ONESHOT` is
-an intentionally behavior-changing probe that suppresses PIT0 requests after the
-first one, useful for isolating post-interrupt code but not representative of
-normal timer behavior. Runs print a bounded RTE history with restored PCs.
-`PIT_FIRST_TICK_DELAY=n` adds `n` modeled ticks after PIT0 is first enabled and
-before its initial counter interval; it is a timing probe, not a hardware clock
-setting.
-`PIT0_PERIODIC` seeds PIT0/INTC2 for periodic interrupt delivery when resuming a
-saved section-3 handoff. `PIT2_PERIODIC` is an opt-in approximate 60 Hz PIT2
-source-15 probe; it is not a measured OS1.17 timer rate. `WATCH_WRITE=address`
-or `WATCH_WRITE=start:end` reports overlapping writes with old/new bytes, guest
-PC, instruction count, and pre-instruction D/A/SR registers. `WATCH_READ=address`
-or `WATCH_READ=start:end` reports overlapping CPU reads with guest PC and
-instruction count; both watch options disable the fast RAM path for complete
-CPU-bus observation. `TRACE_REGS=pc` (also prints the top four stack longs, `stack(A7)`)
-reports the most recent 192 register
-snapshots at one PC; `TRACE_TAIL=n` reports the last 1-1024 pre-instruction
-snapshots with PC, SR, D0-D7, and A0-A7. `TRACE_A1=offset,...` captures A0/A1
-pairs at output offsets. `SCHED_TRACE` logs scheduler list transitions with the
-current TCB, mapped task entry, registers, and raw TCB/live/saved stack words.
-`WRITE_TRACE=start:end` records CPU bus writes and modeled eDMA destination writes
-for the half-open instruction-offset window relative to the restored snapshot (or
-run start), including actor, PC, width, address, and value.
-`DSP_LINK` opens the diagnostic DSPI2/eDMA 28/29 exchange; its channel-28 reply
-defaults to `0xffff`. `DSP_LINK_REPLY=word` selects another 16-bit placeholder
-reply (for example, `DSP_LINK_REPLY=0x0000`) and requires `DSP_LINK`. This does not
-model a DSP or establish physical-device behavior.
-`CONVERT_TRACE` records the conversion output index and the outer CMP/BGT flags
-and branch result around `0x401811d2`.
-Run logs list DSPI0/DSPI1 PUSHR words first, with instruction count, PC, PCS mask,
-and post-write status. The DSPI model completes queued transfers instantly as a
-diagnostic override, even when MCR.HALT/MDIS is set; it is not hardware timing.
-`RAM_REMAP=from:to:length` aliases one bounded DDR window for a diagnostic run.
-`RAM_SNAPSHOT=watch:src:dst:length:trigger_start:trigger_end:read_start:read_end`
-copies the input window when the watched write occurs in the trigger PC range and
-redirects reads from the source window only in the selected decoder PC range;
-writes remain at their original addresses. This deliberately changes memory
-aliasing to test source/output overlap and is not a hardware memory model.
-`UART8_TX` captures transmitted UART8 bytes; `UART8_TX_READY` seeds TXRDY/TXEMP
-at startup without injecting a panel response; `UART8_RX=hex` queues explicit
-receive bytes for a diagnostic handshake. These options do not model serial
-timing or eDMA.
-`ESDHC_EMMC` attaches a synthetic blank eMMC. `ESDHC_FILE=path` instead uses a
-sparse 4 GiB raw backing image that persists card blocks across separate runs;
-`ESDHC_TRACE` logs command arguments, block ranges, completed writes, and eDMA
-channel-59 activity. The host image and command responses are synthetic, not
-hardware evidence. A restored snapshot must use the same `ESDHC_FILE` path.
-`PANEL_STUB` answers section 2's `60 01` panel-discovery request through its
-polled SRAM ring, then answers the section-3 UART8 handshake and DMA-delivers a
-group-0 button press, encoder-0 delta, and button release after TCD34 is enabled.
-Its panel records are synthetic diagnostics, not hardware behavior.
-`PANEL_STUB_FUNC` makes the section-2 discovery response report FUNC held at
-startup; it requires `PANEL_STUB`.
-`UART8_RX_PERIODIC=period:hex[,hex...]` schedules synthetic follow-up packets;
-with `PANEL_STUB`, packets arriving before UART8 DMA is enabled enter section 2's
-polled SRAM ring, and packets arriving afterward use the section-3 DMA ring.
-`DTIM1_BOOTSTRAP` models DMA Timer 1 reference compare and INTC0 source 33;
-`DTIM1_TICKS_PER_INSTRUCTION=n` sets an approximate instruction-to-bus-tick
-scale. `DSPI2_BOOTSTRAP` enables the DSPI2 register/FIFO model with no attached
-slave, so reads return the diagnostic `0xffff` fill. These are opt-in probes,
-not evidence of an attached timer clock or peripheral response.
-These are opt-in approximations; section-2 direct entry is not an SBF boot.
+To reproduce the documented diagnostic, first build `dt2-cli`, then use the
+commands and locally prepared inputs described in
+[docs/section3-handoff.md](docs/section3-handoff.md) and
+[docs/ui-recipes.md](docs/ui-recipes.md). These runs use modeled peripherals
+and synthetic inputs; they are not hardware validation.
 
-`trace-depack <packed-section.bin> [step output-end [output-start]]` logs host
-aPLib input cursors at selected output lengths. The verified section-3 handoff,
-periodic resume command, snapshots, callback-table check, and current device
-limitations are recorded in [docs/section3-handoff.md](docs/section3-handoff.md).
-Snapshot binaries and logs are local ignored artifacts under `out/` and are not
-part of the repository.
+## UI smoke test and local assets
+
+`tools/ui-smoke.sh` is an end-to-end diagnostic, not a clean-clone test. It
+expects locally prepared firmware-derived diagnostics and checkpoints under
+`out/`, including:
+
+- `out/section3-pre-entry-image.bin`,
+  `out/section3-panel-discovery-pre-entry-ddr.bin`,
+  `out/section3-panel-discovery-pre-entry-sram.bin`, and
+  `out/dt2-os-1.17-container-nor.bin`.
+- `out/shots/main-after-load.snap` and `.png`, plus
+  `out/shots/action-down.snap` and `.png`.
+- A populated synthetic eMMC image at `out/run-card.img`.
+- Source WAVs at `samples/008 kick verb.wav` and
+  `samples/303 clap real.wav`.
+
+These are locally prepared inputs, not repository assets. The documented
+procedures for preparing them are in the handoff documentation. The sample
+WAVs are local-only; their redistribution rights are not established.
+
+The script checks the diagnostic boot display, sample loading and browsing,
+page changes, a temporary Tune readout change, and WAV comparison for the
+modeled-DSP path. That WAV is synthesized by the model; it does not demonstrate
+real firmware audio playback or device output. The script writes diagnostic
+outputs under `out/ui-smoke/`; review its output paths before running it.
+
+Firmware, sample WAVs, card images, snapshots, and extracted firmware sections
+are not required for a clean build or test run. Keep locally supplied assets
+in the ignored `firmware/`, `samples/`, and `out/` paths.
+
+## Licensing
+
+The project's original code and documentation are MIT-licensed;
+see [LICENSE](LICENSE). This does not imply that every repository item or
+external asset is MIT-licensed. Retained third-party material and its notices
+are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). In particular,
+the root MIT license does not apply to firmware or other assets supplied by
+users; no firmware or sample assets are distributed here. Earlier commits
+include an optional Unicorn/QEMU patch identified as GPL-2.0, not MIT; it has
+been removed from the current tree. See the third-party notices for details.
+
+## Further reading
+
+- [docs/section3-handoff.md](docs/section3-handoff.md) — detailed current
+  status, evidence, limitations, and diagnostic procedures.
+- [docs/roadmap.md](docs/roadmap.md) — proposed development tasks and estimates.
+- [docs/project-summary.md](docs/project-summary.md) — concise project
+  overview.
+- [tools/README.md](tools/README.md) — diagnostic scripts and tools.

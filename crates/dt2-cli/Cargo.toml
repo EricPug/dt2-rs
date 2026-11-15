@@ -13,5 +13,3 @@ image = { version = "0.25", default-features = false, features = ["webp"], optio
 
 [features]
 window = ["dep:minifb", "dep:image"]
-# Experimental execution tier: needs the patched Unicorn (UNICORN_LIB_DIR); see docs/coldfire-perf.md.
-unicorn = []

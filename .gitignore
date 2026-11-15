@@ -1,4 +1,8 @@
 /target
+# Local environment files can contain credentials.
+.env
+.env.*
+!.env.example
 # Elektron firmware and anything derived from it must never be committed.
 *.syx
 /sections/

@@ -51,15 +51,12 @@ engine renders on the ColdFire, nor that it does not.
 | SSI timing and input | The II findings describe externally clocked SSI0 and a receive-marker-dependent handover; clock rate and external source are unresolved. Their opt-in SSI event model does not synthesize RX peer data. | The 1.17 diagnostic `SSI_AUDIO_IRQ` fabricates RX markers to advance the interrupt chain and schedules TX servicing; it is not a hardware clock or peer model. | A running interrupt chain in our tests relies on a synthetic input. Its successful progression does not validate the physical SSI source or timing. |
 | SSI output | Digiemu's [mk1 audio analysis](https://github.com/elekloader/digiemu/blob/master/docs/mk1/11-audio.md) demonstrates a ColdFire sample renderer for mk1 OS 1.53, not for Digitakt II. | In a 1.17 trigger/play run, 1,199 SSI TX blocks were zero. The active service cleared its buffer and followed a null USB-stream list. Forcing mode 5 also produced zero output and only exercised a USB host-audio source list. | Do not transplant the mk1 renderer or infer that forcing mode 5 should play samples. Neither test rules out an unobserved 1.17 CPU renderer or external audio path. |
 
-**Decision:** retain the fresh-load and modeled-DSP tests as regression
-evidence, but do not count their WAV as firmware audio. Before implementing
-anything else, seek independently sourced Digitakt II board/interface
-documentation or hardware observations that identify the SSI endpoint and
-audio signal direction. A bounded follow-up should report the source, firmware
-version and evidence quality, and either identify a testable CPU-side path or
-explicitly stop at an unverified external boundary. Do not invent RX audio,
-force USB events, assume a DSP-to-SSI route, or pursue SHARC/eDMA
-implementation based on the mk1 analogy.
+**Next step:** retain the fresh-load and modeled-DSP tests as regression
+evidence. Before targeting a non-silent SSI capture, seek attributable
+Digitakt II board/interface documentation or qualified hardware observations
+that identify the SSI endpoint and audio direction. The current traces do not
+justify fabricating RX data, forcing USB events, or inferring a DSP-to-SSI
+route from the mk1 analogy.
 
 ### Board and interface evidence follow-up
 
@@ -130,14 +127,13 @@ out/section8-osint-20261109` yields section 8 as 159,948 bytes, SHA-256
 identical to the earlier local extraction. Its stored size is 103,416 bytes.
 At file offset `0x1000`, little-endian words include `0x60042000`; at
 `0x2000`, the first two words are `0x20010000` and `0x6004220d`. Starting
-at `0x1a650`, NUL-terminated strings include `USB PD Task`, `USB task`,
-`USB dev task`, `MIDI task`, `Main task`, `GPI task`, `Audio task`, and
-`Tmr Svc`. The file also contains `Invalid vid/pid` and version string
-`1.00E` / release `0018`. Full extracted firmware stays under ignored `out/`.
+at `0x1a650`, the section contains NUL-terminated task-related text and
+version/release indicators. Extracted firmware remains under ignored `out/`;
+no firmware text excerpts are reproduced here.
 
 **[Inferred]** The header, stack-like address and odd reset-like pointer are
-consistent with a Cortex-M image; task names strongly suggest a USB/MIDI
-controller and `Tmr Svc` is consistent with FreeRTOS. Digiemu's
+consistent with a Cortex-M image; the task-related text is consistent with a
+USB/MIDI controller and a common embedded RTOS. Digiemu's
 [mk1 analysis](https://github.com/elekloader/digiemu/blob/6f2d619fd1bc9579a62868688fc6bdd1dcf844db/docs/mk1/11-audio.md)
 reports the same layout and task/version strings in its mk1 section 8. This
 is a stronger match than size alone, but no mk1 binary or independent 1.16
@@ -671,7 +667,7 @@ Logs are `out/load-diagnostic/clap.log` and `out/load-diagnostic/kick.log`.
 
 The top 10 sampled PCs are below; counts are samples out of 50,000, not exact
 instruction hit counts. Both PC-sampled replays use the same Rust CPU sampling
-path, not the normal Unicorn execution path.
+path.
 
 | Rank | Clap PC | Samples | Kick PC | Samples |
 |---:|---|---:|---|---:|
@@ -1701,14 +1697,21 @@ Captured with `UART8_TX_FILE`: a 1.5B reset run with `DTIM3_BOOTSTRAP` (baseline
 - **LED records now appear.** The baseline boot has 108 `b9 idx val` records on 50 distinct indices (the first time `b9` has been seen), and `bc` appears per input event as before. The TRK tap sends 410 `b9` records on 36 distinct indices (`idx 25` and others), while the encoder turn sends 2 and the FLTR tap sends 6. The idx-to-LED mapping is still unknown.
 - **Open:** whether the code 16 = TRK mapping is right and what the TRK page should show (the screen is nearly the same), and the encoder direction (`3005` is read as positive, as a guess).
 
-## Clickable front panel (`LIVE_PANEL`)
+## Interactive diagnostic viewer
 
-- New `crates/dt2-cli/src/panel_ui.rs`, built with `--features window`. `LIVE_PANEL` opens a 1048x856 faceplate window instead of the bare display. Control positions and sizes come from Elekfake's measured `reference/Digitakt2 controls.csv` (centres in panel-photo coordinates, cropped by 152,78). The live OLED frame is drawn into the glass area.
-- `PANEL_IMAGE=<path>` loads a panel photo as the backdrop (for example `/media/eric/storage/Elekfake/reference/Elektron_Digitakt-II_01.webp`; the photo is not in this repository). Without it the panel is drawn from the control table with small labels.
-- Mouse: left press = momentary button; left drag on a knob = turn it (6 px per detent); a left click on a knob without dragging = encoder push; wheel over a knob = turn; **right click = latch or unlatch a button** (hold FUNC, then left-click another key), and right click on empty panel or Escape releases all latched keys. Latched keys are tinted. The keyboard layout still works. Main Volume is analog, so it is not drawn as a control.
-- Key codes follow the table above (1-6 pages, 7-9 PRESET/SETTINGS/TEMPO, 10-15 YES/UP/NO/LEFT/DOWN/RIGHT, 16 TRK, 17 FUNC, 18 KB, 19-21 REC/PLAY/STOP, 22-24 PAGE/PTN/SONG, 25-40 trigs, 41-48 encoder pushes, 49 LEVEL push, 50 SAMPLING). Encoder index 0-7 = A-H, 8 = LEVEL/DATA.
-- Run (the viewer needs the display attached when the snapshot is saved, or the screen starts blank until the firmware redraws it): save once with `tools/run-section3.sh target/release/dt2-cli 1500000000 RGPIO_READY_MODEL GPIO_LOOPBACK ESDHC_EMMC INTC1_BOOTSTRAP SSI_AUDIO_IRQ=100000 DTIM3_BOOTSTRAP LIVE_PANEL PANEL_IMAGE=... SNAPSHOT_SAVE=out/panel-1p5b.snap`, then `... DTIM3_BOOTSTRAP LIVE_PANEL PANEL_IMAGE=... SNAPSHOT_LOAD=out/panel-1p5b.snap`.
-- Tests cover latching, momentary presses, knob drag/wheel/click and glass compositing. The window itself was checked by opening it: the photo backdrop and hit regions line up. Not yet checked interactively: knob drag feel and whether a restored display snapshot fills the glass.
+With the optional `window` feature, `LIVE_WINDOW` opens the decoded display and
+`LIVE_PANEL` opens a clickable panel with that display embedded. Control
+positions use Elekfake's reference measurements of a panel image; the result is
+not a validated hardware model. `PANEL_IMAGE=<path>` optionally loads a locally
+supplied WebP backdrop; no panel photo is included. Left press/release sends
+momentary keys, right click latches a key, Escape or right click on empty space
+releases latched keys, and encoders respond to drag and wheel input. Encoder
+pushes are available by clicking without dragging. LED colors remain a
+partial, inferred mapping.
+
+The viewer tests cover momentary and latched keys, encoder drag/wheel/click,
+and display compositing. As with other diagnostic UI behavior, these tests
+exercise the emulator model, not a physical device.
 
 ## Panel LEDs (`b5` palette + `b9` LED records)
 
@@ -1733,14 +1736,19 @@ Encoder turns only reach the screen on the next UI tick (receiver type 5, DTIM3 
 
 `DTIM3_TICKS_PER_INSTRUCTION=n` now also overrides the rate stored in a loaded snapshot (`DmaTimer1::set_ticks_per_instruction`). With `=16`: 192 hits per 100M (~520k instructions per tick). Use ~16-32 for LIVE_PANEL. Only the UI tick uses DTIM3, so audio/sequencer timing is unaffected.
 
-## Panel encoder drag
+## Panel encoder input
 
-- Dragging a knob already turned it wherever the pointer went inside the window (the turn is tied to the pressed knob, not the hover). The remaining gap was the pointer leaving the window: minifb's `Discard` mode drops those samples, so `LIVE_PANEL` now reads positions with `Pass` while the left button is held and the turn continues off-window.
-- Sensitivity (revised): measured with `UART8_RX_PERIODIC` encoder messages (`3<enc> <delta>`): the delta is a signed byte of raw counts, and the firmware scales it finely (8 messages of +1 / +4 / +16 moved Tune by about 0.0 / 0.03 / 0.75; one count is about 0.006 of a displayed unit). So the earlier 3 px per count made a full 350 px turn only about 0.7 of a unit. The drag is now 1 pixel = 1 degree (a 360 degree turn is about 350 px, measured by the user) at `PANEL_COUNTS_PER_DEGREE` (default 4) counts per pixel; one wheel notch is 15 degrees. Larger drags are split into several messages of at most 127. For fine adjustment latch FUNC with a right click (not verified against firmware).
+The panel viewer converts pointer movement to signed encoder messages and
+splits large deltas into wire-sized values. The firmware diagnostic path
+observed here applies a per-message clamp and flushes accumulated changes on a
+UI tick; this explains why a sequence of small inputs can differ from one
+larger input. The conversion is an interaction convenience, not a measurement
+of a physical encoder. See the input tests and the `UART8_RX_PERIODIC` recipes
+for the exact emulator observations.
 
 ## Encoder lag, second look: it is firmware latency, not the input path or the tick
 
-`PANEL_PERF=1` (environment variable, with `LIVE_PANEL`) prints wall-time split every 2 s. Measured live: ~9M instr/s, ~22 slices/s, cpu 85% / draw 15% / input 0%, so input is polled about every 45 ms and drawing is cheap.
+`PANEL_PERF=1` (environment variable, with `LIVE_PANEL`) prints wall-time split every 2 s. The recorded measurement was about 9M instructions/s, ~22 slices/s, CPU 85% / draw 15% / input 0%; it characterizes that emulator run, not a device.
 
 UART8 TX timestamps against `UART8_RX_PERIODIC` encoder messages show the firmware takes **~2.0-3.4M instructions** from the RX DMA to the first changed tile (messages at +8.0M and +16.0M: first tile at +3.4M and +2.0M). At ~10M instr/s that is 0.2-0.35 s, roughly 15x the same pipeline on hardware.
 
@@ -1785,38 +1793,38 @@ Baseline ~10.3M instr/s on the panel snapshot (tpi=16).
 
 ## ColdFire performance design note
 
-See [coldfire-perf.md](coldfire-perf.md): bottleneck measurements, options, and the proposed decode-cache/block-cache plan (awaiting review; no code yet).
+See [coldfire-perf.md](coldfire-perf.md) for the performance measurements and
+implementation history. The original decode-cache/block-cache proposal has
+been superseded by the instruction-word cache, quiet batch loop, and handler
+tier described there.
 
 ## Encoder turns: the firmware applies two messages per burst
 
 Measured on OS 1.17 from `out/panel-1p5b.snap` with `UART8_RX_PERIODIC` and the Start (E) encoder, reading the value off the rendered frame: five bursts of one `3410` message gave 0.18, of two gave 0.35, and of four gave 0.35. So only the first two encoder messages of a burst take effect. A delta above 0x40 counts the same as 0x40 (`3440` and `347f` gave identical frames). The live loop delivered a whole drag in one burst, which is why `PANEL_COUNTS_PER_DEGREE=100` and `=400` felt identical. The cause is a firmware clamp: it accumulates deltas and flushes at most 30 counts per UI tick (the same note is in digiemu's `emu/panelin.py`; two `0x10` messages already reach 30). digiemu's GUI sends small deltas (6 px per detent, up to 16 counts per detent, no backlog). A first fix queued whole drags and sent two 0x40 messages per slice, which kept the value changing for 1-2 s after release. `PanelInput::take` now sends one message of at most 30 counts per encoder per slice and caps the unsent backlog at 60, so a release stops within a couple of slices and `PANEL_COUNTS_PER_DEGREE` above about 30 per pixel adds nothing. Start saturates at 1.75 on this sample (and Tune clamped in the same snapshot), so end values from long runs say nothing about rate; compare short runs.
 
-## Panel defaults from hand measurement
+## Panel input pacing notes
 
-With `PANEL_COUNTS_PER_DEGREE=30` and one full upward drag on E (maximum 120): `DTIM3_TICKS_PER_INSTRUCTION=4` reached the maximum, 8 about half, 16 about 6-7, 64 under 1. A faster UI tick means more 30-count flushes per second of wall time. `LIVE_PANEL` now defaults to 4 ticks (an explicit `DTIM3_TICKS_PER_INSTRUCTION=n` still wins) and the drag defaults to 30 counts per pixel.
-
-Revisit once audio exists: the one-30-count-message-per-slice pacing may make parameter changes audibly step-like (a fast drag becomes about 200 discrete changes per second). Judged by eye only so far.
+The diagnostic run showed that faster UI ticks allow more capped encoder
+updates per second. `LIVE_PANEL` uses a 4-tick default when a timer bootstrap is
+enabled, unless `DTIM3_TICKS_PER_INSTRUCTION=n` is supplied. The pointer-to-
+encoder conversion is an input convenience, not a physical measurement.
 
 ## Factory install content (eSDHC FIFO write bug fixed)
 
 - **Bug.** eDMA writes the eSDHC data port one byte at a time. `Esdhc::write8`/`write16` treated that as a read-modify-write of the 32-bit register and pushed a full word per byte, so every DMA-written block was garbled (header `be 00 00 00 00 ef ...`, 4x expansion). Only the project pool at `0x58000` appeared to be written; the firmware's read-back of the sounds/kits then failed. Byte and halfword FIFO writes now push exactly the bytes written (`byte_and_halfword_fifo_writes_store_the_bytes_written`).
-- **Result.** A cold boot to 3B (16,387 eSDHC commands, 33,131 block writes, 33,126 distinct) now installs, with `ESDHC_DUMP=path` (writes every written block as a sparse image):
-  - `0x0`, `0x800`: header and protect area; the pool header reads `beefbace 00000005 "PRESETS" ...`.
-  - `0x12000..0x12418` (1,048 blocks): the factory **sound** presets, each record starting `beefbace`. Names include ACID DD, BAM BASS, BLUE KICK, BRUM KIT SD, BUG RIM, CAFE BELL, CHIP SNARE and others.
-  - `0x16000..0x16e80` (3,712 blocks): **kits**, first record `beefbace 00000000 "INIT"`.
+- **Result.** A cold boot to the diagnostic checkpoint now completes 16,387 eSDHC commands and 33,131 block writes (33,126 distinct), with `ESDHC_DUMP=path` capturing a sparse image:
+  - `0x0`, `0x800`: header and protect area.
+  - `0x12000..0x12418` (1,048 blocks): factory sound-record region; records use the observed `beefbace` marker.
+  - `0x16000..0x16e80` (3,712 blocks): kit-record region.
   - `0x58000..0x5eecc`: the project pool.
-- **No PCM yet.** The sound records have 1.3-3.4 bits/byte of entropy and the pool is mostly `0xff`/zero fill. These are parameter records with names, not sample audio. The factory sample audio is not on the card after the install, so it comes from somewhere else (NOR container or firmware image) or the presets reference samples that are loaded separately. Still to be traced: the "Load all samples" path and what a sound record stores to point at a sample.
+- **No PCM yet.** The sound records have 1.3-3.4 bits/byte of entropy and the pool is mostly `0xff`/zero fill. The records contain parameters, not sample audio. The sample-loading path and any references from sound records to sample slots remain untraced.
 - `out/panel-1p5b-fixed-card.snap` is a 1.5B-instruction snapshot of the fixed install (the old `out/panel-1p5b.snap` carries the garbled card).
-
-## Unicorn cold-boot fixes
-
-Cold boot under Unicorn died at the first `TRAP #0` because the engine ran `MOVEC` to VBR natively and the host kept a stale VBR, then aborted on `MOVEC` to RGPIOBAR (an unmodelled control register). The patch now exports `uc_digikit_vbr_get/set` (synced on every slice) and makes `MOVEC` to registers other than CACR/ACR0-3/VBR an illegal-instruction exception that the host interpreter executes. The gate workload starts after the boot, which is why this was not caught earlier; a cold boot to 1.3B now matches the Rust engine (10,032 commands).
 
 ## Sample/sound discovery after the card fix (audio prerequisites)
 
-- **Sound records.** `0x12000..` holds 131 factory sound records, one per 4 KiB slot (8 blocks; the firmware reads the first 3 blocks of each slot). Each starts `beefbace`, has a 7-bit name (e.g. `ACID DD`, `BLUE KICK`) and about 448 bytes of parameters. Byte offset 106 takes 100 distinct values from 1 to 248 across the records, which is probably a sample-slot id (unverified; not yet cross-checked against the loader).
-- **Load all samples / startup reads.** The firmware scans all 2,048 sound slots (`0x12000..0x16000`), the kit slots (`0x16000..0x36000`) and 128 project headers at a 0x8000-block stride (`0x50000..0x450000`). It never reads above `0x450001`: no +Drive sample data is requested after the install. The pool at `0x58000` is project data (`PRESETS`), not audio.
-- **No factory PCM is reachable.** A scan of 4 KiB chunks for PCM-like data finds none in the card dump or the NOR image; the 59 hits in the 3.2 MB OS image are in code/table areas. So the factory sample audio does not ship in the OS update and is not part of the install. Samples must be supplied (the Elekfake WAVs copied to `samples/`) once the +Drive sample format is known.
+- **Sound records.** `0x12000..` holds 131 factory sound records, one per 4 KiB slot (8 blocks; the firmware reads the first 3 blocks of each slot). Each starts with the observed `beefbace` marker and contains about 448 bytes of parameters. Byte offset 106 takes 100 distinct values from 1 to 248 across the records; whether this is a sample-slot id is unverified.
+- **Startup reads.** The firmware scans all 2,048 sound slots (`0x12000..0x16000`), the kit slots (`0x16000..0x36000`) and 128 project headers at a 0x8000-block stride (`0x50000..0x450000`). It never reads above `0x450001` in this run; no +Drive sample data is requested after the install. The pool at `0x58000` is project data, not audio.
+- **No factory PCM is reachable in this run.** A scan of 4 KiB chunks for PCM-like data finds none in the card dump or the NOR image; the 59 hits in the 3.2 MB OS image are in code/table areas. The user-supplied sample WAVs used by local tests are not part of this repository.
 - **TRIG.** On `out/panel-1p5b-fixed-card.snap` the per-track pointer table at `0x44f37bd0` is populated, and TRIG 1 taps for 150M instructions no longer stop (the old unmapped-read stop at `0x400d8e4c` was caused by the missing install/INTC1 state).
 - **Silent baseline.** TRIG 1 + PLAY taps for 300M instructions leave the SSI TX buffer (`0x4fe58100`, 4 KiB) all zero, and there is no SSI TX capture yet.
 - **Next.** Find where the firmware keeps sample audio (the 'SAMP' key page and the +Drive browser should show it) and its on-card layout by driving that UI, then write a WAV and add an SSI TX capture (channel 50 DMA writes to `0xFC0BC000`).
@@ -1825,7 +1833,7 @@ Cold boot under Unicorn died at the first `TRAP #0` because the engine ran `MOVE
 
 Menu path (scripted with `tools/panel-keys.sh`): SETTINGS, DOWN x7 to SYSTEM, YES,
 DOWN x5 then UP to FORMAT +DRIVE, YES, tick PROJ+PST+KIT and SAMPLES (YES, DOWN, YES, DOWN),
-YES on ERASE SELECTED DATA, YES again on "ARE YOU SURE? Y/N".
+YES on the erase confirmation and YES again to confirm.
 
 Result: the format wrote 6,458 new blocks (33,126 -> 39,584). New extents are in the
 ekFS region, with the superblock magic `ekFS` (`656b4653`, version 4) at sector `0x5d8000`.
