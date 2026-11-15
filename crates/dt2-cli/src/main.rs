@@ -19,8 +19,6 @@ use dt2_core::display;
 mod modeled_dsp;
 #[cfg_attr(not(feature = "window"), allow(dead_code))]
 mod panel_ui;
-#[cfg(dt2_unicorn)]
-mod unicorn_tier;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -1044,10 +1042,6 @@ fn run_binary(args: &[String]) {
         bus.enable_loop_detection();
     }
     let live_panel = args[6..].iter().any(|a| a == "LIVE_PANEL");
-    let panel_image = args[6..]
-        .iter()
-        .find_map(|a| a.strip_prefix("PANEL_IMAGE="))
-        .map(str::to_owned);
     if let Some(value) = args[6..]
         .iter()
         .find_map(|a| a.strip_prefix("PANEL_COUNTS_PER_DEGREE="))
@@ -1110,7 +1104,7 @@ fn run_binary(args: &[String]) {
         std::process::exit(2)
     });
     let mut cpu = Cpu::new();
-    cpu.set_icache(!args[6..].iter().any(|a| a == "DECODE_CACHE=off") && !unicorn_enabled());
+    cpu.set_icache(!args[6..].iter().any(|a| a == "DECODE_CACHE=off"));
     let mut cpu_overrides = Vec::new();
     let mut ram_dumps = Vec::new();
     let mut ram_file_dumps = Vec::new();
@@ -1156,7 +1150,6 @@ fn run_binary(args: &[String]) {
             || assignment.starts_with("SSI_TX_RAW=")
             || assignment == "LIVE_WINDOW"
             || assignment == "LIVE_PANEL"
-            || assignment.starts_with("PANEL_IMAGE=")
             || assignment.starts_with("PC_SAMPLE=")
             || assignment.starts_with("PANEL_COUNTS_PER_DEGREE=")
             || assignment.starts_with("LIVE_WINDOW=")
@@ -1599,7 +1592,7 @@ fn run_binary(args: &[String]) {
             instruction_limit,
             interrupt_injection,
             scale,
-            live_panel.then_some(panel_image),
+            live_panel,
         )
     } else {
         run_engine(&mut cpu, &mut bus, instruction_limit, interrupt_injection)
@@ -1611,8 +1604,6 @@ fn run_binary(args: &[String]) {
         });
         println!("{summary}");
     }
-    #[cfg(dt2_unicorn)]
-    unicorn_tier::print_stats();
     if let (Some(path), Some(display)) = (live_png, &bus.display) {
         let (width, height, pixels) = display.render_upright(4);
         std::fs::write(path, display::encode_gray_png(width, height, &pixels)).unwrap_or_else(
@@ -2105,26 +2096,12 @@ fn run_pc_sampled(
     report
 }
 
-/// `STATE_HASH=n1,n2,...` prints an FNV-1a hash of the full snapshot (CPU, RAM, devices) after each instruction count
-/// (counted from this run's start). It is the regression gate for CPU-core changes: equal hashes mean equal machine state.
-fn unicorn_enabled() -> bool {
-    #[cfg(dt2_unicorn)]
-    return unicorn_tier::enabled();
-    #[cfg(not(dt2_unicorn))]
-    false
-}
-
-/// Runs the CPU on the selected engine: the Rust interpreter, or the Unicorn tier when enabled.
 fn run_engine(
     cpu: &mut Cpu,
     bus: &mut ProbeBus,
     limit: usize,
     injection: Option<InterruptInjection>,
 ) -> dt2_core::coldfire::RunReport {
-    #[cfg(dt2_unicorn)]
-    if unicorn_tier::enabled() {
-        return unicorn_tier::run(cpu, bus, limit, injection);
-    }
     cpu.run_with_interrupt(bus, limit, injection)
 }
 
@@ -2183,7 +2160,7 @@ fn run_live(
     instruction_limit: usize,
     mut injection: Option<InterruptInjection>,
     scale: usize,
-    panel: Option<Option<String>>,
+    panel: bool,
 ) -> dt2_core::coldfire::RunReport {
     let mut window = live_window::open(scale, panel);
     if let Some(display) = &bus.display {
@@ -2347,25 +2324,21 @@ mod live_window {
         Option<super::panel_ui::PanelUi>,
     );
 
-    /// `panel` opens the clickable faceplate (with an optional panel photo as the backdrop) instead of the bare display.
-    pub fn open(scale: usize, panel: Option<Option<String>>) -> Window {
-        let (width, height) = match &panel {
-            Some(_) => (super::panel_ui::PANEL_WIDTH, super::panel_ui::PANEL_HEIGHT),
-            None => (
+    /// `panel` opens the clickable schematic input map instead of the bare display.
+    pub fn open(scale: usize, panel: bool) -> Window {
+        let (width, height, ui) = if panel {
+            (
+                super::panel_ui::PANEL_WIDTH,
+                super::panel_ui::PANEL_HEIGHT,
+                Some(super::panel_ui::PanelUi::default()),
+            )
+        } else {
+            (
                 super::display::FB_HEIGHT * scale,
                 super::display::FB_WIDTH * scale,
-            ),
+                None,
+            )
         };
-        let ui = panel.map(|image| {
-            let backdrop = image.and_then(|path| match super::panel_ui::load_backdrop(&path) {
-                Ok(pixels) => Some(pixels),
-                Err(error) => {
-                    eprintln!("PANEL_IMAGE ignored, drawing the plain panel: {error}");
-                    None
-                }
-            });
-            super::panel_ui::PanelUi::new(backdrop)
-        });
         Window(
             minifb::Window::new(
                 "dt2-rs panel display (synthetic boot)",
@@ -2541,7 +2514,7 @@ mod live_window {
 mod live_window {
     pub struct Window;
 
-    pub fn open(_scale: usize, _panel: Option<Option<String>>) -> Window {
+    pub fn open(_scale: usize, _panel: bool) -> Window {
         eprintln!("LIVE_WINDOW needs the window feature: cargo build --release -p dt2-cli --features window");
         std::process::exit(2)
     }
@@ -7422,8 +7395,7 @@ impl Bus for ProbeBus {
     }
 
     fn idle_skip(&mut self, max: usize) -> usize {
-        // Executing idle spins for real gives the instruction-exact baseline the Unicorn tier
-        // (which cannot fast-forward) is compared against.
+        // Executing idle spins for real gives an instruction-exact baseline.
         static DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if *DISABLED.get_or_init(|| std::env::var_os("DT2_NO_IDLE_SKIP").is_some()) {
             return 0;

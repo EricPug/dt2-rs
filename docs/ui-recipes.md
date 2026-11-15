@@ -55,8 +55,8 @@ For example, the tested trigger recipe's screen assertion is unchanged UI state
 and does not prove audio. Only the modeled-DSP runner's captured note edge and
 sample-matching WAV establish that modeled playback path.
 
-The hardware owner's layout maps the grid's top-left Tune control to encoder A
-and bottom-left Start control to encoder E. One A `+16` rotation did not change
+The original measured layout mapped Tune to encoder A and Start to encoder E;
+those measurements are not part of this repository. One A `+16` rotation did not change
 the Tune readout, while sixteen separate A `+1` rotations did. The latter is
 the verified encoder assertion used by `tools/ui-smoke.sh`; the `+16` result
 remains distinct and inconclusive about why combined deltas behave differently.
@@ -137,7 +137,7 @@ reached. Screens: `menu-track1-src.png`, `menu-track1-slot-step1.png`,
 The earlier D `+16` image shows a list of sample names, but its `Tune Max
 EncoderD` heading does not prove that it is the +Drive browser. The verified
 +Drive route starts from `out/shots/close-browser.snap`: its screen shows
-`SAMPLES` with `+DRIVE` selected. Entering +Drive shows `Factory A` and
+`SAMPLES` with `+DRIVE` selected. Entering +Drive shows a factory-content entry and
 `incoming`; entering `incoming` shows `008 kick verb` and `303 clap real`.
 Per Elektron's FAQ, factory samples do not occupy +Drive space, so the Factory
 tree appearing empty is expected; do not investigate it as an emulator issue.

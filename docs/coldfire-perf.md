@@ -1,6 +1,10 @@
 # ColdFire core performance: design note
 
-Status: **proposal, no implementation yet.** Written for review before any code.
+This note preserves the original measurements and optimization proposal, along
+with the later implementation results below. The initial estimates and plan are
+historical, not the current roadmap. The instruction-word cache, quiet batch loop, and handler tier were
+subsequently implemented; see [section3-handoff.md](section3-handoff.md) for
+the current project status.
 
 Goal: take the interpreter from ~12 M instr/s to roughly 100 M instr/s (about the speed of the real
 133 MHz part), without changing emulated behavior. A UI frame is ~3 M instructions, so 12 M/s is ~4 fps and
@@ -45,7 +49,7 @@ per guest instruction**. A decent cached-decode interpreter spends 15-30 cycles,
 - Fat LTO, `panic=abort`, `target-cpu=native`: **no gain**. Ruled out.
 - Nothing is dominated by one function. Cost is spread across decode, fetch and per-instruction bookkeeping, which is why micro-tuning has run out.
 
-## 2. Options
+## 2. Options considered in the original proposal
 
 | Option | Expected gain (rough) | Cost | Risk |
 |---|---|---|---|
@@ -55,7 +59,8 @@ per guest instruction**. A decent cached-decode interpreter spends 15-30 cycles,
 | **D. Lightweight JIT / IR lowering** (cranelift or dynasm to x86-64) | 10-30x | Very large: new dependency, `unsafe`, flags, faults mid-block, debuggability | High |
 | **E. Execute-side tuning** after B/C: direct RAM pointer instead of `dyn Bus`, lazy CCR, superinstructions for the top sequences (`move.l an,-(a7)`, `addq #4,a7`, `jsr`/`rts`) | ~1.3-1.5x | Small each | Low |
 
-**Recommendation: A, then B, then C, then E. Defer D behind a measured gate.**
+**Original recommendation:** A, then B, then C, then E; defer D behind a
+measured gate. This sequence predates the later implementation results below.
 
 - Why B+C and not D first: 250 host cycles per guest instruction is overhead, not an inherent limit. Cached-decode block interpreters
   typically reach 15-30 cycles per simple instruction, i.e. 100 M+ instr/s on this host. Combined estimate: 12 × 1.3 × 2 × 2 × 1.4 ≈ 85-100 M/s. These factors are
@@ -68,7 +73,7 @@ per guest instruction**. A decent cached-decode interpreter spends 15-30 cycles,
 - Why not hooking firmware loops natively: the hot code is generic C++ virtual-call walking (16 parameter objects × `jsr (a0)` through `$28(vtable)`),
   which has no tight loop to replace.
 
-## 3. Design for B + C
+## 3. Original design proposal for B + C
 
 ### Ownership and layout (kept in `dt2-core`, localized)
 
@@ -219,12 +224,12 @@ Slice 1 landed under estimate (12.7M effective vs 15–17M), and the same reason
 
 ## Design note 2: execute-side tier (after slice 4)
 
-Inputs: re-profile (execute+ea/read/write ~54%, run loop ~34% before slice 4), `docs/coldfire-perf-next.md`, and the digiemu project (patched Unicorn/TCG).
+Inputs: re-profile (execute+ea/read/write ~54%, run loop ~34% before slice 4), `docs/coldfire-perf-next.md`, and the Digiemu project.
 
 Findings that shape the plan:
 - The decode cache gave +3%: fetch was never the bottleneck. `execute` costs ~28 ns/instr on `FlatRam` because of its size and `Result<Operand,_>` plumbing, not dispatch.
 - RAM fast path and SMC detection are already done (SRAM overlay fast path, `CodeMap` page bitmap, 0 flushes).
-- digiemu reaches ~2.8x real time on Unicorn only after fixing memory-hook slow paths, exit checks and MAC helpers. Its lazy-CCR bugs (flags committed stale at hook stops) are the risk to gate against for any lazy-flags work here. EMAC with load at 0x400db9e0 is a decoder test vector.
+- Digiemu's public analysis is a useful external comparison for CPU and peripheral behavior; it is not a validation oracle for this implementation. EMAC with load at 0x400db9e0 is a decoder test vector.
 - Events split blocks only at real deadlines (same as `poll_countdown`).
 
 Plan (each step measured, gates green, reference `execute` kept as fallback):
@@ -232,7 +237,7 @@ Plan (each step measured, gates green, reference `execute` kept as fallback):
 2. Lazy condition codes only if flags show up in the profile after step 1.
 3. Block cache up to the event horizon with threaded dispatch over the same handlers.
 4. Batch timer lag; trim remaining run-loop cost.
-5. Evaluate Unicorn (patched) as differential oracle first, as an engine tier only if the interpreter stalls. Needs project sign-off on the patched C dependency.
+5. Re-profile the remaining interpreter and bus costs before choosing further optimization work.
 
 ### Slice 5 status: inline helpers + batched timer lag
 
@@ -256,116 +261,11 @@ Plan (each step measured, gates green, reference `execute` kept as fallback):
 - `Bus::quiet_horizon/quiet_step/quiet_retire` (defaults: horizon 0 = off) and `Cpu::run_quiet`: with the decode cache on and a bus that allows it, the CPU runs a batch calling only the minimal bookkeeping. The batch ends on `poll_due()`, an interrupt-mask change, a branch-to-self, an error, the instruction limit or a not-yet-due injection. `ProbeBus` allows it only with `lazy_poll`, no instruction hooks, no register capture, no loop detection, no stop PC, no pending `irq_dirty`; the horizon is also bounded by the next `UART8_RX_PERIODIC` injection.
 - Result: ~27 -> 29.3-30.8M instr/s. Gate green with the cache on and off (off = old path, 22.7M); `opsweep` hash unchanged; new core test `quiet_batch_matches_the_normal_loop`.
 - Remaining budget on the gate workload (est.): execute ~35%, bus ~20%, icache lookup + dispatch ~15%, hooks inside `execute` (`report_branch`/`report_tst` Option writes) ~5%.
-- Next: pre-decoded handler tier (hot families with `opsweep` as differential gate) or the patched-Unicorn evaluation; neither is a small change, so this is the point to re-decide.
+- Next: profile the interpreter and bus costs to identify a measurable optimization target.
 
 ### Slice 8 status: handler tier (MOVE.L), second family neutral
 
 - `ICache` entries carry a handler id classified once at insert; `step_cached` dispatches on a hit. Family 1 = MOVE.L/MOVEA.L (source modes 0-5, destination modes 0-5), mirroring `execute` step for step. Result: ~30 -> ~33.2M (+10%), clear gain, so the tier continued.
 - Gate: `tools/opsweep-gate.sh`. The sweep now keeps persistent RAM/CPU per seed; the cached (second, hit) run must hash identically to an uncached double run (`8d3864fdf474ed28`). Found and fixed a harness bug (restored RAM lost the code-page mark, replaying stale entries). Known artifact: MAC opcodes A1C0/A3C0/A5C0/A7C0 differ single vs double run (accumulator persists); cached == double run, so not a handler issue.
 - Family 2 (ADDQ/SUBQ.L, MOVEQ, Bcc/BRA) passed both gates but measured ~32.6M vs ~33.2M: no gain. Reverted per the stop rule; not kept as dead complexity.
-- Conclusion: handler tier tops out at ~33M on this workload. Short of 50M by a wide margin; remaining cost is bus/ProbeBus and dispatch, which per-opcode handlers do not remove. Next: patched-Unicorn evaluation (oracle first, then execution tier); pure-Rust interpreter stays as fallback.
-
-### Slice 9 status: patched-Unicorn oracle (first result), ADDI.L bug fixed
-
-- Built digiemu's patched Unicorn 2.1.4 (m68k only, all six patches, pinned commit 8028ec4) in /tmp, outside the repo. `tools/unicorn-oracle/oracle.c` loads the snapshot's DDR/SRAM (dumped with `DUMP_RAM_FILE` in 64 MB chunks) and registers into Unicorn (CFV4E model; SR must be written before A7 or Unicorn bank-swaps the stack pointer), runs N instructions and prints registers. `tools/unicorn-oracle/bisect.py` bisects the first N where dt2 and Unicorn register state differ. MMIO is a dummy zero-returning region, so the comparison is valid only until the first device read.
-- Result: bit-exact on PC/SR/D0-7/A0-7 for 4561 instructions, then SR differed: `ADDI.L #imm,Dn` (0x0680) cleared X where the ColdFire PRM (and Unicorn) set X = C. Real dt2 bug (SUBI.L already set X). Fixed in `execute`; perf gate unchanged (state hashes identical, this workload never consumes that X), opsweep baseline moves to `3522f4128fba249a` (cached == uncached).
-- Next divergence at N=6594 is `A980` (EMAC accumulator read): harness artifact, ACC/MACSR/MASK are not loaded into Unicorn yet.
-- Raw Unicorn speed, RAM-only run (the dummy-MMIO code ends in an idle loop, so this is an upper bound, not the workload): ~140-200M instr/s, i.e. 4-6x the current 33M. A real execution tier also needs MMIO callbacks into ProbeBus, timer/interrupt delivery at event boundaries, snapshot of Unicorn state and the patched C dependency in the build; the pure-Rust interpreter would remain the fallback.
-
-## Slice 10: Unicorn execution-tier spike (feature `unicorn`, `DT2_UNICORN=1`)
-
-Build: `UNICORN_LIB_DIR=/tmp/uc/build cargo build --release --features window,unicorn`
-(digiemu's patched Unicorn 2.1.4, m68k only). Off by default; the Rust interpreter
-is untouched and remains the fallback (perf and opsweep gates still PASS without the feature).
-
-Design (`crates/dt2-cli/src/unicorn_tier.rs`):
-- Host RAM/SRAM mapped by pointer (`Bus::host_memory`); every other range is an MMIO
-  region whose callbacks call `ProbeBus` read/write.
-- Slices run to `min(limit, quiet_horizon, injection, poll countdown, max_slice)`.
-- A slow-path access that dirties the IRQ state makes the engine stop at the next
-  instruction boundary (writes `emu_counter` into `emu_count`; offset discovered at
-  startup by a probe loop). `uc_emu_stop` from a callback is not safe.
-- TRAP and opcodes Unicorn rejects fall back to one Rust `cpu.step()`.
-- EMAC state is injected via stub code (Rust -> Unicorn only).
-- The Rust icache is disabled in this mode.
-
-Results (40M gate workload, slice 4096): ~87M instr/s, 0.46 s wall vs 1.06 s (~2.3x
-wall-clock; the Rust run idle-skips 5.3M instructions, Unicorn executes them).
-Interrupt histogram nearly equals Rust (155: 404 vs 405, 170: 398 vs 399, 205: 167 vs 185).
-TX is 1283 bytes vs 1284: NOT byte-identical; state hashes will not match.
-
-Known problems:
-- Slices >= 65536 stall the firmware (vector 99 delivered once, TX empty); cause unknown.
-  Cap is 4096 by default. Making RTE a host step (to poll after mask change) was worse
-  (61M, more lost vectors, stall persists), so native RTE is kept.
-- Event ordering differs slightly (vector 205).
-
-Needed for byte-identical gates: Unicorn -> Rust EMAC/MACSR extraction, exact idle-skip
-and time accounting, and exact event ordering around RTE/mask changes. Other caveats:
-patched-C dependency and build story, `emu_count` offset fragility, host writes to code
-pages (stale TB cache), snapshot of Unicorn state.
-
-## Slice 11: Unicorn tier, all gates exact
-
-`DT2_UNICORN=1` (feature `unicorn`, patched library built by `tools/unicorn/build.sh`) now matches
-the Rust interpreter on every gate. The Rust interpreter stays the default and the fallback.
-
-Fixes since Slice 10:
-- **Large-slice stall.** `pending_interrupt()` can return a masked request. Native RTE and SR writes
-  unmask it inside Unicorn without the host noticing. A seventh patch hooks `cpu_m68k_set_sr`; when
-  the host-held pending level exceeds the new mask it stops at the next instruction boundary. The
-  host sets the level with `uc_digikit_set_irq_level` before each slice.
-- **No struct-offset probe.** `uc_digikit_stop_at_boundary`, `uc_digikit_counter` and
-  `uc_digikit_count_limit` are exported.
-- **EMAC state.** `uc_digikit_emac_get/set` move raw macc/macsr/mask each slice (verified against
-  the old stub injection over 64 rounds in both modes).
-- **TRAP accounting.** (a) A pending TRAP or rejected opcode ran one instruction past the budget.
-  (b) The INTR hook did not stop the engine, so the faulting instruction was retried and counted
-  until the count limit. `on_intr` now records the counter and stops at the boundary.
-
-Results (40M-instruction gate workload):
-- TX sha, `.times` sha, interrupt histogram and state hashes at 1M/8M/20M/40M are identical to gold
-  at slices 4096, 65536 and 1000000.
-- About 103-108M instr/s, 0.37-0.39 s wall versus 1.06 s for Rust (about 2.8x wall-clock; the Rust
-  budget includes about 5.3M idle-skipped instructions, so wall-clock is the fair metric).
-- 165 fallback steps (TRAP #0 and rejected opcodes).
-- `DT2_UNICORN=1 tools/perf-gate.sh <unicorn-bin>` prints GATE PASS. Rust-only gate (33M) and
-  opsweep (`3522f4128fba249a`) still pass.
-
-Caveats still open:
-- Host writes to RAM code pages do not invalidate Unicorn's TB cache.
-- No Unicorn-state snapshot/restore beyond `store()` into `Cpu`.
-- `first_pc` in MMIO reports is wrong under Unicorn (cosmetic).
-- The patched C library is a GPL-2.0 dependency; it is built outside the repo.
-
-## Unicorn is now the default engine
-
-`crates/dt2-cli/build.rs` links the patched libunicorn when it finds one (`UNICORN_LIB_DIR`, else
-`~/.cache/dt2-unicorn/build`, the default output of `tools/unicorn/build.sh`) and sets `cfg(dt2_unicorn)`.
-Without it the build warns and produces the pure-Rust interpreter. `--features unicorn` turns a missing
-library into a build error. At run time the tier is on by default; `DT2_UNICORN=0` selects the Rust
-interpreter. The perf gate passes both ways (about 104M vs 32M instr/s).
-
-`LIVE_WINDOW` now runs its 400k-instruction chunks through `run_engine` too: `PANEL_PERF` shows about
-80-85M instr/s (200 slices/s) against 32M (80 slices/s) on the Rust path, with drawing at about 30% of wall time.
-
-Still follow-on: RAM code-page invalidation and Unicorn snapshot/restore. QEMU's build fails in directories with spaces,
-hence the cache-directory default.
-
-## Unicorn follow-ons closed: code-page invalidation and snapshots
-
-**Stale translations.** Unicorn invalidates translated blocks for its own stores only. Host writes to
-the shared RAM (eMMC and UART8 DMA from MMIO callbacks, the Rust fallback step, loads) bypassed it.
-`FlatRam` and `Mcf5441xSram` now keep a coalesced `WriteLog` (off unless `Bus::track_host_writes` is
-called, so the Rust path pays nothing); before every slice the tier drains it via
-`Bus::take_host_writes` and calls `UC_CTL_TB_REMOVE_CACHE` for each range. MMIO accesses end a slice,
-so DMA'd bytes are invalidated before the guest can run them. Test
-`unicorn_tier::tests::host_write_to_translated_code_is_seen` re-runs a rewritten instruction; it
-fails (d0 stays 1) with the drain disabled. Gate workload: 27k range invalidations in 17.8k slices,
-throughput 104M -> 98M instr/s, all gates still exact.
-
-**Snapshots.** Registers and EMAC are copied back into `Cpu` after every slice, so saving needs
-nothing new, and restore only happens at start-up before the tier exists (each run reloads from
-`Cpu`). Checked: `SNAPSHOT_SAVE` after 20M instructions is byte-identical (84,260,716 bytes) between
-`DT2_UNICORN=1` and `=0`, and resuming that file gives equal state hashes at 5M and 10M on both
-engines. There is no mid-run restore path to support yet.
+- Conclusion: the handler tier tops out at about 33M instructions/s on this workload. The remaining measured cost is in bus access and dispatch, which per-opcode handlers do not remove. Further work should start with a fresh profile.
